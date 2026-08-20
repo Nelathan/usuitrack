@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "usuitrack"
+version = "0.1.0"
+description = "A memory-efficient matrix optimizer for consumer-GPU fine-tuning"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Daniel Jonas Gaderbauer" }]
+dependencies = ["torch>=2.1"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["pytorch", "torch", "optimizer", "muon", "low-rank", "fine-tuning"]
+
+[project.urls]
+Repository = "https://github.com/Nelathan/usuitrack"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["usuitrack*"]
