@@ -191,9 +191,10 @@ tensors skip leverage balancing and use `NS(M)` directly.
 
 `NS` first divides by Frobenius norm and orients its input with rows no greater
 than columns. Five default Newton-Schulz polynomial steps apply, using the
-stable coefficient schedule from the
-[HeavyBall](https://github.com/HomebrewML/HeavyBall) project (ported into this
-optimizer; not a runtime dependency):
+Polar Express optimal coefficient schedule (TODO: confirm exact paper
+citation before publishing), as implemented in the
+[HeavyBall](https://github.com/HomebrewML/HeavyBall) project (values ported
+into this optimizer directly; not a runtime dependency):
 
 $$H_k=X_kX_k^\top,\qquad
 X_{k+1}=(a_kI+b_kH_k+c_kH_k^2)X_k.$$
