@@ -1,18 +1,16 @@
 """Hugging Face Trainer integration for UsuiTrack.
 
-Trainer drives a single optimizer object. UsuiTrack only owns 2D matrix
-weights, so this wraps UsuiTrack plus a fallback AdamW behind one object
-that presents Trainer's expected `torch.optim.Optimizer` surface
-(`step`, `zero_grad`, `param_groups`, `state_dict`/`load_state_dict`) and
-routes each call to both.
+Trainer drives a single optimizer object, so UsuiTrack (matrix weights) and
+a fallback AdamW (everything else) get wrapped behind one object that
+presents Trainer's expected `torch.optim.Optimizer` surface and routes
+each call to both.
 
-Embedding tables (`nn.Embedding`) are 2D but excluded from UsuiTrack: they
-are typically tied, sparse-gradient-shaped, or otherwise not what the
-rank-limited projected update targets. Route them to the fallback optimizer
-alongside biases and norms.
+`nn.Embedding` weights are 2D but stay out of UsuiTrack. Each row of an
+embedding table is its own independent vector, not part of a shared linear
+map, so a shared low-rank update doesn't describe what the table needs.
+Route embeddings to the fallback optimizer alongside biases and norms.
 
-Run: pip install transformers
-     python examples/train_hf_trainer.py [--release-matrix-grads]
+Run: uv run --with transformers examples/train_hf_trainer.py [--release-matrix-grads]
 """
 
 from __future__ import annotations

@@ -35,10 +35,12 @@ specified path does not define per-tensor rank truncation.
 | right | $Q:[n,r]$ | $Q^\top:[r,n]$ | $GQ:[m,r]$ | $ZQ^\top:[m,n]$ |
 | left | $Q:[m,r]$ | $Q:[m,r]$ | $Q^\top G:[r,n]$ | $QZ:[m,n]$ |
 
-`auto` chooses right for `m >= n`, otherwise left. On transformer weights, an
-explicit residual-facing policy (up/gate/q/k/v right, down/attention-output
-left) beat shape-only `auto` and is the recommended per-parameter-group
-setting; see the README. Spectral work promotes fp16/bf16 inputs to fp32.
+`auto` chooses right for `m >= n`, otherwise left: a shape guess, not an
+architectural one (see the trap above). On transformer weights, set `side`
+explicitly per parameter group instead: up/gate/q/k/v to `right`,
+down/attention-output to `left`. This measurably beat shape-only `auto` and
+is the recommended production setting; decision 2 below has the reasoning.
+Spectral work promotes fp16/bf16 inputs to fp32.
 
 ## One matrix step
 
@@ -214,7 +216,7 @@ k    a         b         c
 The result `O_t` is an approximate leverage-balanced polar direction, not an
 exact SVD polar factor.
 
-**Decision — projected Aurora:** Aurora chooses direction inside the retained
+**Decision (projected Aurora):** Aurora chooses direction inside the retained
 update space. UsuiTrack, not Aurora, owns momentum, basis motion, scale, and LR.
 
 ### 9. Scale, lift, and update
@@ -259,7 +261,7 @@ unsupported.
 
 UsuiTrack accepts only 2D matrix parameters and raises on `add_param_group` if
 given anything else. Callers own a separate optimizer for non-2D parameters
-(biases, norms, embeddings) — matching the standard Muon split. The tested
+(biases, norms, embeddings), matching the standard Muon split. The tested
 reference configuration uses AdamW with fp32 first/second moments, LR `1e-4`,
 `betas=(0.9,0.99)`, `eps=1e-8`, and zero weight decay; nothing about UsuiTrack
 requires that specific choice. `optimizer_state_bytes_by_category` accounts

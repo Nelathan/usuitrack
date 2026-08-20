@@ -64,6 +64,32 @@ def test_prepare_release_matches_ordinary_step_exactly():
         torch.testing.assert_close(ordinary_weight, released_weight, rtol=0, atol=0)
 
 
+def test_plain_gradient_accumulation_without_release_matches_manual_grad_sum():
+    """UsuiTrack has no accumulation-aware bookkeeping: it just reads
+    param.grad at step() time. Two backward() calls before one step() (no
+    release_matrix_grads, no zero_grad in between) must therefore behave
+    identically to a single step() on the pre-summed gradient."""
+
+    torch.manual_seed(2)
+    accumulated = torch.nn.Linear(4, 8, bias=False)
+    presummed = torch.nn.Linear(4, 8, bias=False)
+    presummed.weight.data.copy_(accumulated.weight.data)
+
+    x1, x2 = torch.randn(3, 4), torch.randn(3, 4)
+    accumulated(x1).sum().backward()
+    accumulated(x2).sum().backward()
+
+    grad1 = torch.autograd.grad(presummed(x1).sum(), presummed.weight)[0]
+    grad2 = torch.autograd.grad(presummed(x2).sum(), presummed.weight)[0]
+    presummed.weight.grad = grad1 + grad2
+
+    torch.testing.assert_close(accumulated.weight.grad, presummed.weight.grad, rtol=0, atol=0)
+
+    UsuiTrack([accumulated.weight], lr=0.01, rank=4).step()
+    UsuiTrack([presummed.weight], lr=0.01, rank=4).step()
+    torch.testing.assert_close(accumulated.weight, presummed.weight, rtol=0, atol=0)
+
+
 def test_prepare_is_exactly_once_and_zero_grad_cannot_discard_pending_work():
     weight = torch.nn.Parameter(torch.randn(8, 4))
     optimizer = UsuiTrack([weight], rank=3)
