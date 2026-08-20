@@ -40,7 +40,11 @@ architectural one (see the trap above). On transformer weights, set `side`
 explicitly per parameter group instead: up/gate/q/k/v to `right`,
 down/attention-output to `left`. This measurably beat shape-only `auto` and
 is the recommended production setting; decision 2 below has the reasoning.
-Spectral work promotes fp16/bf16 inputs to fp32.
+
+Every `eigh`, Gram, and tangent computation upcasts fp16/bf16 inputs to
+fp32 first. The basis is the one piece of state everything else is built
+on; a half-precision eigendecomposition doesn't just cost this step's
+accuracy, it corrupts the tracked frame for every step after it.
 
 ## One matrix step
 
@@ -144,8 +148,9 @@ $$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta_t\sigma_i))
 
 The zero-singular-value limit is `sin(eta_t sigma) / sigma -> eta_t`.
 Equal-rank tangent-Gram eigendecompositions are batched. With
-`S=Q_raw^T Q_raw`, one near-identity Polar Express step using the converged
-steady-state Newton-Schulz coefficient triple retracts before storage:
+`S=Q_raw^T Q_raw`, one near-identity step using the converged steady-state
+coefficient triple from Amsel, Persson, Musco, and Gower, ["The Polar
+Express"](https://arxiv.org/abs/2505.16932) (2025), retracts before storage:
 
 $$Q_+=Q_{raw}(aI+bS+cS^2).$$
 
@@ -193,11 +198,11 @@ tensors skip leverage balancing and use `NS(M)` directly.
 
 `NS` first divides by Frobenius norm and orients its input with rows no greater
 than columns. Five default Newton-Schulz polynomial steps apply, using the
-optimal coefficient schedule from Amsel, Persson, Musco, and Gower, ["The
-Polar Express: Optimal Matrix Sign Methods and Their Application to the Muon
-Algorithm"](https://arxiv.org/abs/2505.16932) (2025), as implemented in the
-[HeavyBall](https://github.com/HomebrewML/HeavyBall) project (values ported
-into this optimizer directly; not a runtime dependency):
+per-step-tuned quintic schedule from the Muon optimizer lineage (the batched
+implementation credited by [HeavyBall](https://github.com/HomebrewML/HeavyBall)'s
+source to GitHub users `@scottjmaddox` and `@YouJiacheng`, descending from
+[Keller Jordan's Muon](https://github.com/KellerJordan/Muon)). Values ported
+directly into this optimizer; not a runtime dependency:
 
 $$H_k=X_kX_k^\top,\qquad
 X_{k+1}=(a_kI+b_kH_k+c_kH_k^2)X_k.$$

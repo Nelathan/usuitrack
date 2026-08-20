@@ -12,7 +12,7 @@ Lfm2 path): 5 real steps, loss 5.31 -> 3.65, 1.86 GB peak on an RTX 4070
 Super. That number is this toy's batch of 4 short sentences, not a claim
 about real training; measure your own shapes.
 
-Run: uv run --with "unsloth" --with torch examples/train_unsloth_full_finetune.py
+Run: uv run --with "unsloth" --with torch examples/train_unsloth.py
      Needs a CUDA GPU. Unsloth pulls its own compatible torch build.
 """
 

@@ -79,6 +79,12 @@ See [`examples/`](examples) for a plain-PyTorch loop, an HF `Trainer`
 integration, and a full-finetune run through Unsloth's `FastModel` loader
 (no LoRA, no quantization: UsuiTrack drives the full weights directly).
 
+UsuiTrack targets full-parameter training, not LoRA. It tracks a moving
+low-rank subspace of the gradient against a full weight; pointing it at an
+already rank-`r` LoRA adapter matrix doesn't buy the thing it's built for.
+LoRA is the comparison point in [Result](#result) above, not a mode of
+operation.
+
 ## How it works
 
 [`docs/SPEC.md`](docs/SPEC.md) is the precise mathematical specification:
