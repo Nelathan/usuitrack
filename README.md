@@ -79,11 +79,17 @@ See [`examples/`](examples) for a plain-PyTorch loop, an HF `Trainer`
 integration, and a full-finetune run through Unsloth's `FastModel` loader
 (no LoRA, no quantization: UsuiTrack drives the full weights directly).
 
-UsuiTrack targets full-parameter training, not LoRA. It tracks a moving
-low-rank subspace of the gradient against a full weight; pointing it at an
-already rank-`r` LoRA adapter matrix doesn't buy the thing it's built for.
-LoRA is the comparison point in [Result](#result) above, not a mode of
-operation.
+UsuiTrack is built for full-parameter training; LoRA is the comparison
+point above, not a mode of operation. It also runs fine on LoRA adapter
+matrices themselves (they're plain 2D tensors), but expect it unoptimized
+there: dedicated orthogonalized-update work on LoRA already exists and
+does that job with less machinery than UsuiTrack carries. Whether tracking
+a moving subspace helps a LoRA adapter stay useful over a much longer run,
+where a fixed low-rank parameterization tends to overfit, is an open
+question we haven't tested. If you try it, the residual-facing `side`
+policy was tuned for full weight storage conventions and we have no idea
+whether it transfers to adapter matrices; `side="auto"` is the safer
+starting point there.
 
 ## How it works
 
