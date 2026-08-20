@@ -191,8 +191,9 @@ tensors skip leverage balancing and use `NS(M)` directly.
 
 `NS` first divides by Frobenius norm and orients its input with rows no greater
 than columns. Five default Newton-Schulz polynomial steps apply, using the
-Polar Express optimal coefficient schedule (TODO: confirm exact paper
-citation before publishing), as implemented in the
+optimal coefficient schedule from Amsel, Persson, Musco, and Gower, ["The
+Polar Express: Optimal Matrix Sign Methods and Their Application to the Muon
+Algorithm"](https://arxiv.org/abs/2505.16932) (2025), as implemented in the
 [HeavyBall](https://github.com/HomebrewML/HeavyBall) project (values ported
 into this optimizer directly; not a runtime dependency):
 
