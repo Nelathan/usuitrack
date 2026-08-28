@@ -44,6 +44,14 @@ every step. And narrow modules are bottlenecks -- they carry the residual
 stream through a small waist, so a large update there destabilizes every block
 downstream, independently of how well-conditioned the step was.
 
+Observed on Anima's `(2048, 64)` input and output projections: at rank 64 on
+their 64-wide data side -- full rank, 100% occupancy -- training errored. Two
+things were wrong at once and both fixes were real. The `side` hint moved them
+onto the 2048-wide residual stream, which is where their basis belongs and which
+brought occupancy from 25% into line with every other module at ~3%. And the
+rank still has to be capped, because those modules are bottlenecks: too much
+change in them destabilized the model regardless of which side was tracked.
+
 Rank itself is a configured hyperparameter picked by parameter size, the same
 way a LoRA rank is; this is a per-parameter cap on that choice. A model trained
 at rank 256 runs a `(2048, 64)` module at 32. Exceeding the cap is not an
