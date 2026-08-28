@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 import weakref
 from dataclasses import dataclass
 from typing import Iterable
@@ -9,7 +10,8 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from .projector import ProjectionSide, SubspaceProjector
+from .projector import MAX_BASIS_ROTATION, ProjectionSide, SubspaceProjector
+from .stochastic import copy_stochastic_, wants_stochastic_rounding
 AURORA_PP_ITERATIONS = 1
 AURORA_PP_BETA = 0.5
 ORTHOGONALIZATION_SCALE_MODE = "muon"
@@ -59,6 +61,7 @@ class UsuiTrack(Optimizer):
         consume_grad: bool = True,
         release_matrix_grads: bool = False,
         compile_tensor_kernels: bool = False,
+        stochastic_rounding: bool = True,
     ) -> None:
         if lr <= 0:
             raise ValueError(f"lr must be positive, got {lr}")
@@ -113,6 +116,12 @@ class UsuiTrack(Optimizer):
         self._matrix_grad_hook_handles = []
         self._matrix_param_groups: dict[Tensor, dict] = {}
         self.release_matrix_grads = release_matrix_grads
+        self.stochastic_rounding = stochastic_rounding
+        # Oja rotation telemetry. Kept per-device as on-device tensors so the
+        # accumulation costs no host sync; only pop_basis_rotation_angle()
+        # reads them, and that is meant to be called at logging cadence.
+        self._basis_rotation_sum: dict[torch.device, Tensor] = {}
+        self._basis_rotation_count: dict[torch.device, int] = {}
         for group in self.param_groups:
             for param in group["params"]:
                 if param.ndim == 2:
@@ -136,17 +145,38 @@ class UsuiTrack(Optimizer):
         super().add_param_group(param_group)
         group = self.param_groups[-1]
         try:
+            # effective_rank() clamps rank to a quarter of the tracked
+            # dimension, so a configured rank is a ceiling rather than a
+            # promise. Not fatal -- those parameters simply track a smaller
+            # subspace -- but the caller asked for something it is not getting,
+            # so report it. One summary per group, not one warning per
+            # parameter: on a real model the same clamp fires for hundreds of
+            # weights and the per-parameter form buries the signal.
+            clamped: dict[tuple[tuple[int, ...], int], int] = {}
             for param in group["params"]:
                 if param.ndim != 2:
                     raise ValueError(
                         "UsuiTrack only supports 2D matrix parameters; "
                         f"got shape {tuple(param.shape)}"
                     )
-                if group["rank"] > min(param.shape):
-                    raise ValueError(
-                        f"rank {group['rank']} exceeds the smaller dimension "
-                        f"of matrix parameter shape {tuple(param.shape)}"
-                    )
+                max_rank = SubspaceProjector(
+                    rank=group["rank"], side=ProjectionSide(group["side"])
+                ).effective_rank(param)
+                if group["rank"] > max_rank:
+                    key = (tuple(param.shape), max_rank)
+                    clamped[key] = clamped.get(key, 0) + 1
+            if clamped:
+                detail = ", ".join(
+                    f"{count}x{list(shape)}->rank {rank}"
+                    for (shape, rank), count in sorted(clamped.items())
+                )
+                warnings.warn(
+                    f"UsuiTrack: configured rank {group['rank']} exceeds a quarter of the "
+                    f"tracked dimension for {sum(clamped.values())} of {len(group['params'])} "
+                    f"matrix parameters on side {group['side']}; they fall back to a smaller "
+                    f"rank ({detail}).",
+                    stacklevel=2,
+                )
         except Exception:
             self.param_groups.pop()
             raise
@@ -157,11 +187,12 @@ class UsuiTrack(Optimizer):
                 matrix_param_groups[param] = group
 
     def zero_grad(self, set_to_none: bool = True) -> None:
-        if self._pending_matrix_updates:
-            raise RuntimeError(
-                "cannot discard released matrix updates or explicitly prepared matrix updates with zero_grad(); preparation has already mutated "
-                "optimizer state, so the pending updates must be consumed by step()"
-        )
+        # A caller (e.g. an OOM-retry path) may need to bail out after prepare()
+        # already mutated moving-average state for some params but before step()
+        # applied it. That mutation can't be undone -- the Oja/adafactor moments
+        # for those params will reflect a step that never landed on the weights --
+        # but that's a one-step drift, not worth blocking a clean recovery over.
+        self._pending_matrix_updates.clear()
         super().zero_grad(set_to_none=set_to_none)
 
     @torch.no_grad()
@@ -560,6 +591,14 @@ class UsuiTrack(Optimizer):
         for entry in pending:
             tangent = entry.oja_tangent
             assert tangent is not None
+            # Sanitize once, here, where every tangent producer converges --
+            # the projector method and both fused kernels. A non-finite tangent
+            # otherwise reaches the geodesic through `tangent @ eigenvectors`
+            # even when the Gram it built was cleaned up, because the two are
+            # separate reads of the same tensor. Sync-free, like the gradient
+            # guard in _prepare_matrix_update.
+            tangent = torch.nan_to_num(tangent, nan=0.0, posinf=0.0, neginf=0.0)
+            entry.oja_tangent = tangent
             key = (tangent.device, tangent.dtype, tangent.shape[1])
             buckets.setdefault(key, []).append(entry)
 
@@ -569,7 +608,54 @@ class UsuiTrack(Optimizer):
             assert all(tangent is not None for tangent in tangents)
             grams = torch.stack([tangent.mT @ tangent for tangent in tangents if tangent is not None])
             grams = 0.5 * (grams + grams.mT)
-            eigenvalues, eigenvectors = torch.linalg.eigh(grams)
+            # A near-zero-curvature direction makes the tangent's
+            # `/ rayleigh.diagonal().mean().clamp_min(1e-12)` normalization
+            # blow it up to a huge magnitude, which pushes its Gram matrix to
+            # an extreme eigenvalue spread and makes the batched eigh solver
+            # fail to converge on that one matrix in the batch. A small
+            # relative Tikhonov jitter fixes the conditioning; the resulting
+            # over-large rotation is bounded separately, by MAX_BASIS_ROTATION
+            # in oja_geodesic_from_eigh.
+            rank_dim = grams.shape[-1]
+            trace = grams.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-12)
+            jitter = (1e-6 * trace / rank_dim).view(-1, 1, 1)
+            eye = torch.eye(rank_dim, device=grams.device, dtype=grams.dtype)
+            grams = grams + jitter * eye
+            try:
+                eigenvalues, eigenvectors = torch.linalg.eigh(grams)
+            except torch.linalg.LinAlgError:
+                # Jitter isn't always enough -- some matrix in this batch is
+                # still too ill-conditioned for eigh to converge. Retry
+                # one-by-one so a single degenerate parameter doesn't block
+                # the basis update for everything else in the bucket; a
+                # parameter that still fails on its own just bails on this
+                # step's basis update (keeps its current frame) instead of
+                # forcing a geodesic move through garbage eigenvectors.
+                values_list: list[Tensor] = []
+                vectors_list: list[Tensor] = []
+                keep_mask: list[bool] = []
+                for i in range(grams.shape[0]):
+                    try:
+                        vals, vecs = torch.linalg.eigh(grams[i])
+                    except torch.linalg.LinAlgError:
+                        warnings.warn(
+                            "UsuiTrack: skipping this step's basis update for "
+                            "a matrix parameter -- its Gram matrix is too "
+                            "ill-conditioned for eigh to converge even after "
+                            "regularization.",
+                            stacklevel=2,
+                        )
+                        keep_mask.append(False)
+                        continue
+                    values_list.append(vals)
+                    vectors_list.append(vecs)
+                    keep_mask.append(True)
+                if not any(keep_mask):
+                    continue
+                bucket_entries = [entry for entry, keep in zip(bucket_entries, keep_mask) if keep]
+                eigenvalues = torch.stack(values_list)
+                eigenvectors = torch.stack(vectors_list)
+            self._accumulate_basis_rotation(eigenvalues, step_size)
             geometry_buckets: dict[tuple, list[int]] = {}
             for index, entry in enumerate(bucket_entries):
                 tangent = entry.oja_tangent
@@ -599,6 +685,49 @@ class UsuiTrack(Optimizer):
                     state["basis"] = entry.projector.basis
                     state["projection_side_is_right"] = side is ProjectionSide.RIGHT
 
+    def _accumulate_basis_rotation(self, eigenvalues: Tensor, step_size: float) -> None:
+        """Record how far this step rotated the Oja frames, in radians.
+
+        The principal angles between the old frame and the geodesic-moved one
+        are exactly ``min(step_size * sqrt(eigenvalue_i), MAX_BASIS_ROTATION)``:
+        the tangent is the frame-orthogonal residual ``action - frame @
+        rayleigh``, so the geodesic turns strictly in the frame's complement and
+        the rotation angles fall straight out of the eigendecomposition that
+        _apply_basis_updates already computed. No extra matmul, and nothing
+        leaves the device -- the per-matrix RMS angle is summed into an
+        on-device accumulator that only pop_basis_rotation_angle() reads.
+
+        Mirrors the clamp in oja_geodesic_from_eigh deliberately: this reports
+        the rotation the frame actually took, not the one the tangent asked
+        for. A reading pinned near MAX_BASIS_ROTATION is therefore itself the
+        signal that the clamp is saturating.
+        """
+        angles = (float(step_size) * eigenvalues.clamp_min(0.0).sqrt()).clamp(max=MAX_BASIS_ROTATION)
+        per_matrix = angles.pow(2).mean(dim=-1).sqrt()
+        device = per_matrix.device
+        total = per_matrix.sum()
+        if device in self._basis_rotation_sum:
+            self._basis_rotation_sum[device] += total
+        else:
+            self._basis_rotation_sum[device] = total
+        # shape[0] is static metadata, not a value read -- no sync here.
+        self._basis_rotation_count[device] = self._basis_rotation_count.get(device, 0) + per_matrix.shape[0]
+
+    def pop_basis_rotation_angle(self) -> float | None:
+        """Mean per-matrix RMS Oja rotation angle (radians) since the last call.
+
+        Returns None when no basis update has happened since. This is the only
+        place the accumulator is read back to the host, so call it at logging
+        cadence, never per step.
+        """
+        count = sum(self._basis_rotation_count.values())
+        if count == 0:
+            return None
+        total = sum(value.item() for value in self._basis_rotation_sum.values())
+        self._basis_rotation_sum.clear()
+        self._basis_rotation_count.clear()
+        return total / count
+
     @staticmethod
     def _basis_update_step_size(group: dict) -> float:
         return max(MIN_BASIS_UPDATE_STEP, 1.0 / group["basis_update_step"])
@@ -608,11 +737,27 @@ class UsuiTrack(Optimizer):
         return (group["matrix_step"] + 1) % group["basis_update_interval"] == 0
 
     def _apply_matrix_update(self, entry: MatrixUpdate, update_hat: Tensor, group: dict) -> None:
-        update = entry.projector.project_back(update_hat).to(dtype=entry.param.dtype)
+        param = entry.param
+        stochastic = self.stochastic_rounding and wants_stochastic_rounding(param)
+        decay = 1.0 - group["lr"] * group["weight_decay"] if group["weight_decay"] else None
 
-        if group["weight_decay"]:
-            entry.param.mul_(1.0 - group["lr"] * group["weight_decay"])
-        entry.param.add_(update, alpha=-group["lr"])
+        if not stochastic:
+            update = entry.projector.project_back(update_hat).to(dtype=param.dtype)
+            if decay is not None:
+                param.mul_(decay)
+            param.add_(update, alpha=-group["lr"])
+            return
+
+        # Lift in fp32 and never round the update on the way in: the whole
+        # point is that `lr * update` is a fraction of a bf16 ulp, so any
+        # intermediate cast discards it before the write can decide what to do
+        # with it. Weight decay is folded into the same fp32 accumulator so the
+        # parameter is rounded exactly once per step, not twice.
+        work = param.float()
+        if decay is not None:
+            work.mul_(decay)
+        work.add_(entry.projector.project_back(update_hat.float()), alpha=-group["lr"])
+        copy_stochastic_(param, work)
 
     def _initialize_projector(
         self,
@@ -683,6 +828,9 @@ class UsuiTrack(Optimizer):
         eps: float = 1e-7,
     ) -> Tensor:
         """Aurora-style leverage-uniform polar direction for rectangular projected moments.
+
+        Aurora: https://github.com/tilde-research/aurora-release (Tilde Research).
+        Reimplemented from the method; not a runtime dependency.
 
         UsuiTrack owns momentum, LR, weight decay, and full-matrix Muon scaling. This
         helper extracts only Aurora's rectangular direction map: diagonally

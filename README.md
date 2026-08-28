@@ -39,21 +39,36 @@ dependency.
 ## Use
 
 UsuiTrack only accepts 2D matrix parameters. Give it every `Linear`-style
-weight and route everything else, biases, norms, and *embeddings* (2D but
-not what a rank-limited update wants), to a separate optimizer: the same
-split Muon and other orthogonalized optimizers use.
+weight and route everything else to a separate optimizer: the same split Muon
+and other orthogonalized optimizers use.
+
+"Everything else" is more than the non-2D tensors. UsuiTrack tracks a subspace
+of a *shared linear map*, and two families of weight pass the shape test while
+breaking that assumption: **lookup tables** (embeddings, whose rows are
+independent vectors with row-sparse gradients) and **multiplicative gates**
+(AdaLN/FiLM modulation linears, whose error compounds through everything they
+scale rather than staying local). Both are named consistently within an
+architecture and neither is cheaply detectable at runtime, so you name them:
 
 ```python
 import torch
-from torch import nn
-from usuitrack import UsuiTrack
+from usuitrack import RoutingPolicy, UsuiTrack, route_parameters
 
-embedding_params = {id(p) for m in model.modules() if isinstance(m, nn.Embedding) for p in m.parameters()}
-matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
-other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
+policy = RoutingPolicy(
+    exclude=("embed.weight", "pos_emb", "norm1.linear", "norm_out.linear"),
+    # side is architecture semantics, not shape: track the residual stream.
+    track_right=("to_q", "to_k", "to_v", "net.0.proj."),   # read the stream
+    track_left=("to_out.", "net.2."),                      # write the stream
+)
+routing = route_parameters(model.named_parameters(), policy)
+print(routing.describe())  # check the hints actually matched something
 
-matrix_opt = UsuiTrack(matrix_params, lr=4e-4, rank=128)
-other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
+matrix_opt = UsuiTrack(
+    [{"params": [p for _, p in entries], "side": side} for side, entries in routing.matrix.items()],
+    lr=4e-4,
+    rank=128,
+)
+other_opt = torch.optim.AdamW([p for _, p in routing.fallback], lr=1e-4, betas=(0.9, 0.99))
 
 loss = model(**batch).loss
 loss.backward()
@@ -104,10 +119,22 @@ projected first moment in that basis. The basis moves via an exact
 Grassmann-geodesic step driven by an Oja covariance tangent, so momentum
 transports through basis motion as a rigid rotation instead of being
 re-projected and losing energy. Direction comes from a leverage-balanced
-Newton-Schulz polar map (Aurora), using the optimal coefficient schedule from
+Newton-Schulz polar map ([Aurora](https://github.com/tilde-research/aurora-release),
+from Tilde Research), using the optimal coefficient schedule from
 Amsel, Persson, Musco, and Gower's ["The Polar
 Express"](https://arxiv.org/abs/2505.16932); scale comes from the original
-parameter shape, Muon-style.
+parameter shape, Muon-style. Each geodesic is capped at a quarter-turn, and
+`pop_basis_rotation_angle()` reports how far the basis actually moved, so
+"is the tracker tracking?" is a number you can log rather than infer.
+For bf16 weights the update is accumulated in
+fp32 and written back with stochastic rounding, because an orthogonalized step
+is often a fraction of a bf16 ulp and round-to-nearest would discard it
+outright; `StochasticAdamW` is provided for the fallback group for the same
+reason.
+
+The design question behind all of this -- what a small-batch, noisy-gradient
+run actually needs from an optimizer -- was framed for me by Martin Marek's
+[batch-size study](https://github.com/martin-marek/batch-size). No code taken.
 
 ## Status and limitations
 
@@ -115,6 +142,10 @@ This is an early release. The core algorithm is measured (see above); the
 generic-PyTorch integration surface is not yet fully swept:
 
 - Tested on a single GPU. No DDP, FSDP, or other distributed testing.
+- The tracked basis is stored in the parameter dtype. On a synthetic bench, a
+  bf16 basis random-walks on rounding noise instead of settling once converged
+  (`docs/SPEC.md`, "Persistent state"). Unconfirmed on a real run; watch
+  `pop_basis_rotation_angle()` if you are training in bf16.
 - `release_matrix_grads` requires exactly one backward per `step()`. Plain
   gradient accumulation (no release, multiple `backward()` calls before one
   `step()`) is tested and works.

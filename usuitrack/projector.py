@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -10,6 +11,25 @@ from torch import Tensor
 # steady-state fixed point. See optimizer.py's NEWTON_SCHULZ_COEFFICIENTS
 # for the full warm-up schedule used elsewhere in the update.
 _POLAR_EXPRESS_FINAL_COEFFICIENTS = (1.875, -1.25, 0.375)
+
+# Hard ceiling on how far one geodesic step may turn the frame, in radians.
+#
+# This is the invariant every numerical guard around the Oja update was really
+# reaching for. Before this clamp the geodesic's principal angles are exactly
+# `step_size * sqrt(eigenvalue_i)` (see oja_geodesic_from_eigh), so bounding
+# them is a single clamp in the coordinates that mean something, in the one
+# place every tangent producer converges -- rather than a collection of proxies
+# (a rank ratio, a tangent magnitude, a Gram condition number) scattered across
+# the paths that build a tangent, each of which only correlates with rotation.
+#
+# A quarter turn is a pathology bound, not a tuning knob: a basis that swings
+# more than 45 degrees in one step is not tracking a subspace, it is thrashing,
+# and the eigenvector directions that produced such a tangent are not
+# trustworthy anyway. Healthy runs sit orders of magnitude below it -- on a
+# synthetic low-rank-plus-noise bench, 1.4e-2 rad at peak during acquisition
+# settling to ~2e-4. Use UsuiTrack.pop_basis_rotation_angle() to see where a
+# given run actually lives.
+MAX_BASIS_ROTATION = math.pi / 4
 
 
 class ProjectionSide(StrEnum):
@@ -42,9 +62,36 @@ class SubspaceProjector:
             return ProjectionSide.RIGHT if matrix.shape[0] >= matrix.shape[1] else ProjectionSide.LEFT
         return ProjectionSide(self.side)
 
-    def effective_rank(self, matrix: Tensor) -> int:
+    def tracked_dim(self, matrix: Tensor) -> int:
+        """Width of the space the basis lives in, which is the side it tracks."""
         self._check_matrix(matrix)
-        return min(self.rank, matrix.shape[0], matrix.shape[1])
+        return matrix.shape[1] if self.effective_side(matrix) is ProjectionSide.RIGHT else matrix.shape[0]
+
+    def effective_rank(self, matrix: Tensor) -> int:
+        # Cap at a quarter of the tracked dimension, not the full dimension.
+        # Oja needs contrast in the signal: if nearly all the gradient mass
+        # already lies inside the basis, the residual that drives rotation is
+        # numerical noise, and the geodesic step size is fixed rather than
+        # proportional to how well-aligned the basis already is -- so a
+        # near-complete basis does not settle down, it rotates on noise at
+        # full speed. Keeping three-quarters of the ambient space outside the
+        # basis guarantees there is always real signal in the complement.
+        # Observed without it: NaN loss within a couple of steps at exactly
+        # full rank, and loss spikes at a half-dimension cap.
+        #
+        # The quarter is measured against the tracked side rather than
+        # min(shape) because that is the space the complement has to exist in.
+        # The two coincide whenever the side is `auto` (which picks the smaller
+        # side) and for square-ish weights, so this leaves LLM-shaped layers
+        # untouched -- a 1024x4096 MLP still resolves to rank 256. They diverge
+        # only where a side hint deliberately tracks the larger side, which is
+        # exactly where min(shape) was the wrong yardstick: a (2048, 68) input
+        # projection tracking its 2048-wide output space was being clamped to
+        # rank 17 by its 68-wide data side, a space the basis does not live in.
+        # Round to nearest rather than floor: the quarter is a contrast
+        # requirement, not a hard boundary, so a dimension of 130 wants 33 and
+        # not 32. Floor of at least 1 keeps a degenerate dimension usable.
+        return min(self.rank, max(1, round(self.tracked_dim(matrix) / 4)))
 
     @torch.no_grad()
     def fit(self, matrix: Tensor) -> Tensor:
@@ -86,13 +133,17 @@ class SubspaceProjector:
     def project_back(self, projected: Tensor) -> Tensor:
         if self.basis is None:
             raise RuntimeError("cannot project back before fitting a basis")
+        # matmul does not promote mixed dtypes the way elementwise ops do, so a
+        # caller lifting an fp32 update through a bf16 basis has to be met here
+        # rather than forced to round its update down to the basis dtype first.
+        basis = self.basis if self.basis.dtype == projected.dtype else self.basis.to(projected.dtype)
         if self._basis_side() is ProjectionSide.RIGHT:
-            if projected.ndim != 2 or projected.shape[1] != self.basis.shape[0]:
-                raise ValueError(f"right-basis projected tensor does not match basis {tuple(self.basis.shape)}")
-            return projected @ self.basis
-        if projected.ndim != 2 or projected.shape[0] != self.basis.shape[1]:
-            raise ValueError(f"left-basis projected tensor does not match basis {tuple(self.basis.shape)}")
-        return self.basis @ projected
+            if projected.ndim != 2 or projected.shape[1] != basis.shape[0]:
+                raise ValueError(f"right-basis projected tensor does not match basis {tuple(basis.shape)}")
+            return projected @ basis
+        if projected.ndim != 2 or projected.shape[0] != basis.shape[1]:
+            raise ValueError(f"left-basis projected tensor does not match basis {tuple(basis.shape)}")
+        return basis @ projected
 
     @torch.no_grad()
     def project_and_back(self, matrix: Tensor) -> Tensor:
@@ -110,12 +161,21 @@ class SubspaceProjector:
         action = work.mT @ low if side is ProjectionSide.RIGHT else work @ low.mT
         rayleigh = frame.mT @ action
         rayleigh = 0.5 * (rayleigh + rayleigh.mT)
+        # The tangent is deliberately left unbounded here. Its magnitude is not
+        # the quantity that has to stay sane -- the rotation it induces is, and
+        # that is clamped in oja_geodesic_from_eigh, downstream of both this
+        # method and the fused kernels in optimizer.py that reimplement it.
         return (action - frame @ rayleigh) / rayleigh.diagonal().mean().clamp_min(1e-12)
 
     @staticmethod
     def oja_geodesic_from_eigh(frame: Tensor, tangent: Tensor, eigenvalues: Tensor, eigenvectors: Tensor, step_size: float) -> Tensor:
         sigma = eigenvalues.clamp_min(0.0).sqrt()
-        rotation = step_size * sigma
+        # Clamping the angle alone is exact, not an approximation: the second
+        # term's `tangent @ eigenvectors / sigma` is already the unit-norm
+        # geodesic direction, so scaling it by sin of the clamped angle lands
+        # on the honest geodesic point at that angle. Orthonormality is
+        # preserved by construction, whether or not the clamp bites.
+        rotation = (step_size * sigma).clamp(max=MAX_BASIS_ROTATION)
         sin_over_sigma = torch.where(sigma > 1e-7, torch.sin(rotation) / sigma.clamp_min(1e-12), torch.full_like(sigma, step_size))
         moved = ((frame @ eigenvectors) * torch.cos(rotation).unsqueeze(-2) + (tangent @ eigenvectors) * sin_over_sigma.unsqueeze(-2)) @ eigenvectors.mT
         return SubspaceProjector._polar_express_stiefel_correction(moved)
