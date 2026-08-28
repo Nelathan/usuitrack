@@ -17,6 +17,14 @@ basis-tracking path; see the [README](../README.md) for results and usage.
   precede Adafactor, held-frame projection, and Oja tangent construction.
 - **`side="auto"` knows shape, not architecture.** It cannot infer a transformer's
   residual-facing axis.
+- **`ndim == 2` is a shape gate, not the precondition.** Lookup tables and
+  multiplicative gates pass it and break the method, for reasons no numerical
+  guard can see. See "Parameter eligibility".
+- **Raw sigma is the controller, not a raw number to be tamed.** Normalizing or
+  capping the geodesic angle removes the self-annealing that makes the tracker
+  settle. Both have been tried and reverted.
+- **Passing tests over a mechanism that never fires is not evidence.** Guards
+  and code paths that no configuration reaches will pass every test they have.
 - **Exact implementation of a formula does not validate the formula's premise.**
 
 ## Coordinates
@@ -25,8 +33,25 @@ Let a matrix parameter and gradient be
 
 $$W,G\in\mathbb R^{m\times n},\qquad 1\le r\le\min(m,n).$$
 
-The configured rank must satisfy this bound for every optimized matrix; the
-specified path does not define per-tensor rank truncation.
+The configured rank is a ceiling, not a promise. Each matrix runs at
+
+$$r_{\text{eff}}=\min\!\left(r,\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
+
+Two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
+has rank at most `min(m,n)`, so a wider basis tracks directions the gradient
+cannot populate; half leaves an orthogonal complement for the Oja residual at
+every step. And narrow modules are bottlenecks -- they carry the residual
+stream through a small waist, so a large update there destabilizes every block
+downstream, independently of how well-conditioned the step was.
+
+Rank itself is a configured hyperparameter picked by parameter size, the same
+way a LoRA rank is; this is a per-parameter cap on that choice. A model trained
+at rank 256 runs a `(2048, 64)` module at 32. Exceeding the cap is not an
+error, but UsuiTrack reports it once at startup rather than silently giving the
+caller something other than what was asked for.
+
+**Migration:** this cap changed stored basis shapes. Checkpoints written before
+it will fail the basis-shape check on resume.
 
 `Q` is always the canonical column frame, `Q^T Q = I`:
 
@@ -37,9 +62,22 @@ specified path does not define per-tensor rank truncation.
 
 `auto` chooses right for `m >= n`, otherwise left: a shape guess, not an
 architectural one (see the trap above). On transformer weights, set `side`
-explicitly per parameter group instead: up/gate/q/k/v to `right`,
-down/attention-output to `left`. This measurably beat shape-only `auto` and
-is the recommended production setting; decision 2 below has the reasoning.
+explicitly per parameter group instead. The rule is **track the residual
+stream**: weights that *read* the stream (q/k/v, the feed-forward
+up/gate-projection, the patch or token embedder's output) track their input
+side, `right`; weights that *write* it (the attention out-projection, the
+feed-forward down-projection, the final projection) track their output side,
+`left`. That puts every tracker's basis in the one space the whole network
+shares, where the gradient really is low-rank, rather than in a per-layer data
+space that happens to be narrow. This measurably beat shape-only `auto` and is
+the recommended production setting; decision 2 below has the reasoning.
+
+The difference concentrates at the edges of the network, where the data side is
+narrow. Shape-only `auto` tracked the 68- and 64-wide data sides of a model's
+input and output projections and produced its two worst-conditioned bases
+(orthonormality error 1.1e-03 and 1.0e-03 against ~5e-04 elsewhere); the hint
+spends the same rank budget inside the 2048-wide stream, where the complement
+the Oja tangent needs is ample.
 
 Every `eigh`, Gram, and tangent computation upcasts fp16/bf16 inputs to
 fp32 first. The basis is the one piece of state everything else is built
@@ -147,6 +185,16 @@ $$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta_t\sigma_i))
 \left(\frac{\sin(\eta_t\sigma_i)}{\sigma_i}\right)\right]V^\top.$$
 
 The zero-singular-value limit is `sin(eta_t sigma) / sigma -> eta_t`.
+
+`sigma` is raw: neither normalized nor clamped. That is the mechanism, not an
+oversight. A poorly fitted basis produces large `sigma` and turns hard; a
+well-fitted one produces small `sigma` and settles. Normalizing the angle
+(by `sigma_max` or by the tangent's Frobenius norm) forces a constant turn every
+refresh, re-inflates the residual tail, and prevents convergence -- tried,
+rejected. Capping the angle costs the other end, the large-`sigma` acquisition
+the schedule is hot for. Measured on a 2B DiT, the per-step angle anneals
+`0.7 -> 0.11 -> 0.038 -> 0.035` rad over a full run without any bound applied.
+
 Equal-rank tangent-Gram eigendecompositions are batched. With
 `S=Q_raw^T Q_raw`, one near-identity step using the converged steady-state
 coefficient triple from Amsel, Persson, Musco, and Gower, ["The Polar
@@ -181,6 +229,12 @@ projection of a fixed old ambient vector. It contracts each rotated plane by a
 principal-angle cosine before Aurora.
 
 ### 8. Aurora direction
+
+The leverage-balancing scheme below is
+[Aurora](https://github.com/tilde-research/aurora-release) (Tilde Research).
+Reimplemented here from the method, not a runtime dependency; UsuiTrack takes
+only the rectangular direction map, per the decision note at the end of this
+section.
 
 Aurora acts only on `M`. For a rectangular tensor, orient it as
 `A:[p,q]`, `p >= q`, transposing if needed. Initialize row scaling
@@ -237,6 +291,15 @@ $$W_t=W_{t-1}-\alpha U_t.$$
 
 Matrix parameters retain no full-size first or second moment.
 
+**Rounding.** For bf16 `W`, the lift and the update are accumulated in fp32 and
+written back once through stochastic rounding (`stochastic_rounding=True`,
+default). Orthogonalization means `alpha` alone sets the step size, so a
+well-conditioned run puts `alpha * U` well under a bf16 ulp -- measured at
+~1/76 ulp on a 2B DiT at `alpha=2e-5` -- and round-to-nearest then discards
+every step. `U` is never cast to `W`'s dtype on the way in; a single rounding
+happens at the write, with weight decay folded into the same accumulator so it
+is not rounded twice. See `usuitrack/stochastic.py`.
+
 ## Two-phase execution
 
 For each matrix, phase one runs exactly once after its full gradient is complete:
@@ -254,22 +317,68 @@ Phase one does not move the basis or update the parameter. Phase two runs in
 `prepare(param)` exposes phase one explicitly. A no-accumulation training loop
 can invoke it from a `register_post_accumulate_grad_hook` callback to release
 each full matrix gradient as soon as it is consumed (`release_matrix_grads=True`
-at construction). Preparation mutates
-Adafactor, projected-moment, initialization, and step state, so pending work is
-not transactional: it must be consumed by `step()`. Calling `zero_grad()` while
-work is pending would only discard the retained tangent after persistent state
-has advanced and is therefore rejected. Repeated preparation, gradient
-accumulation before `step()`, and optimizer closures with pending work are
-unsupported.
+at construction).
+
+The split is deliberately not a transaction, and cannot be made one at this
+memory budget. Phase one exists so that `G` can be freed the moment it is
+consumed; deferring the Adafactor and moment updates to `step()` would mean
+holding a matrix-sized conditioned gradient per parameter until then, which is
+the cost the two-phase design exists to avoid. So state commits in two places:
+phase one commits the moving averages, phase two commits the weight. Normal
+completion of a step still requires `step()`, not `zero_grad()`. But a caller
+that must bail out mid-step regardless (an OOM-retry loop, say) is allowed to:
+`zero_grad()` drops any pending prepared update rather than rejecting the
+call. This does not roll back the moving-average state prepare() already
+advanced -- that one step's contribution to Adafactor/projected-moment state
+is unrecoverable -- it only clears the retained tangent so the next
+`prepare()`/`step()` starts clean. Repeated preparation, gradient accumulation
+before `step()`, and optimizer closures with pending work remain unsupported.
+
+## Parameter eligibility
+
+`ndim == 2` is the structural gate `add_param_group` enforces, and it is not the
+precondition the method has. UsuiTrack tracks a subspace of a **shared linear
+map**: it assumes a weight's rows (or columns) are coordinates in one common
+space, so a basis fitted from a few batches means something for all of them. Two
+families pass the shape test and break that assumption. Neither failure is
+numerical, so no guard in the update path can catch them; both were found as a
+run going non-finite thousands of steps in.
+
+**Lookup tables.** `nn.Embedding` weights, and any matrix whose rows are
+independent per-token vectors. There is no shared map, and the gradient is
+row-sparse: most rows go untouched for thousands of steps with their Adafactor
+row variance pinned at the eps floor, while the basis only ever sees the rows a
+batch lights up. Observed on a 32128x1024 vocabulary table: non-finite mid-run
+with a finite gradient and a healthy loss, while the updates it did receive were
+~3e-7 per element against weights of order 1e-2..1e2 -- below bf16 resolution,
+so it carried the risk without training. Muon-lineage optimizers exclude
+embedding tables for the same reason.
+
+**Multiplicative gates.** AdaLN/FiLM modulation linears, and anything whose
+output scales or shifts another layer's output instead of feeding forward. These
+are ordinary, well-conditioned matrices; the problem is that a tracking error in
+a gate is multiplied through everything downstream instead of staying local.
+Observed on a `(6144, 256)` AdaLN modulation linear, clear of any rank or shape
+degeneracy: non-finite one step into training.
+
+Both families are named consistently within an architecture and are not cheaply
+detectable at runtime, so the caller names them. The integration owns that
+policy; the library owns the structural rule.
 
 ## Fallback path
 
-UsuiTrack accepts only 2D matrix parameters and raises on `add_param_group` if
-given anything else. Callers own a separate optimizer for non-2D parameters
-(biases, norms, embeddings), matching the standard Muon split. The tested
+Callers own a separate optimizer for everything UsuiTrack does not take --
+non-2D parameters and the excluded families above -- matching the standard Muon
+split. The tested
 reference configuration uses AdamW with fp32 first/second moments, LR `1e-4`,
 `betas=(0.9,0.99)`, `eps=1e-8`, and zero weight decay; nothing about UsuiTrack
-requires that specific choice. `optimizer_state_bytes_by_category` accounts
+requires that specific choice. For bf16 models, `StochasticAdamW` is provided
+as a drop-in: the fallback set holds the smallest-stepping weights in a model
+(norm gains, biases), so leaving it on round-to-nearest cancels out what
+stochastic rounding buys on the matrix side. It is not a memory optimization --
+`torch.optim.AdamW` already stores moments in the parameter dtype -- it moves
+the moment recurrences and the parameter update into fp32 accumulators that are
+rounded once, instead of rounding on every in-place bf16 op. `optimizer_state_bytes_by_category` accounts
 matrix and fallback state separately when both optimizers are inspected.
 Sparse gradients are unsupported.
 
@@ -286,6 +395,7 @@ Sparse gradients are unsupported.
 Oja tangents are transient pending work. No target frame, second basis, or lag
 snapshot is stored. Fallback parameters retain AdamW's fp32 first moment, second
 moment, and step tensor in their separate optimizer.
+
 
 ## Decisions and reasons
 

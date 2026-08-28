@@ -43,8 +43,26 @@ class SubspaceProjector:
         return ProjectionSide(self.side)
 
     def effective_rank(self, matrix: Tensor) -> int:
+        """Rank actually used for this matrix: at most half its smaller side.
+
+        Two independent reasons, both structural rather than numerical:
+
+        * A gradient of shape [m,n] has rank at most min(m,n), so a basis wider
+          than that is asking to track directions the gradient can never
+          populate. Half leaves an orthogonal complement for the Oja residual
+          to live in at every step.
+        * Narrow modules are bottlenecks. They carry the whole residual stream
+          through a small waist, so a large update there destabilizes every
+          block downstream of it. Limiting their rank limits how much the
+          optimizer can move them per step, independently of conditioning.
+
+        Rank is a configured hyperparameter picked by parameter size, the same
+        way a LoRA rank is. This is a per-parameter ceiling on that choice, not
+        a replacement for it: a model trained at rank 256 simply runs its tall
+        narrow modules at 32.
+        """
         self._check_matrix(matrix)
-        return min(self.rank, matrix.shape[0], matrix.shape[1])
+        return min(self.rank, max(1, min(matrix.shape) // 2))
 
     @torch.no_grad()
     def fit(self, matrix: Tensor) -> Tensor:
@@ -86,13 +104,17 @@ class SubspaceProjector:
     def project_back(self, projected: Tensor) -> Tensor:
         if self.basis is None:
             raise RuntimeError("cannot project back before fitting a basis")
+        # matmul does not promote mixed dtypes the way elementwise ops do, so a
+        # caller lifting an fp32 update through a bf16 basis has to be met here
+        # rather than forced to round its update down to the basis dtype first.
+        basis = self.basis if self.basis.dtype == projected.dtype else self.basis.to(projected.dtype)
         if self._basis_side() is ProjectionSide.RIGHT:
-            if projected.ndim != 2 or projected.shape[1] != self.basis.shape[0]:
-                raise ValueError(f"right-basis projected tensor does not match basis {tuple(self.basis.shape)}")
-            return projected @ self.basis
-        if projected.ndim != 2 or projected.shape[0] != self.basis.shape[1]:
-            raise ValueError(f"left-basis projected tensor does not match basis {tuple(self.basis.shape)}")
-        return self.basis @ projected
+            if projected.ndim != 2 or projected.shape[1] != basis.shape[0]:
+                raise ValueError(f"right-basis projected tensor does not match basis {tuple(basis.shape)}")
+            return projected @ basis
+        if projected.ndim != 2 or projected.shape[0] != basis.shape[1]:
+            raise ValueError(f"left-basis projected tensor does not match basis {tuple(basis.shape)}")
+        return basis @ projected
 
     @torch.no_grad()
     def project_and_back(self, matrix: Tensor) -> Tensor:
@@ -115,6 +137,11 @@ class SubspaceProjector:
     @staticmethod
     def oja_geodesic_from_eigh(frame: Tensor, tangent: Tensor, eigenvalues: Tensor, eigenvectors: Tensor, step_size: float) -> Tensor:
         sigma = eigenvalues.clamp_min(0.0).sqrt()
+        # Raw sigma, deliberately unnormalized and unclamped. The step is
+        # self-annealing: a poorly fitted basis gives large sigma and a large
+        # turn, a well-fitted one gives small sigma and settles. Normalizing or
+        # capping the angle removes exactly that behaviour -- measured on a real
+        # run the angle falls 0.7 -> 0.035 rad on its own.
         rotation = step_size * sigma
         sin_over_sigma = torch.where(sigma > 1e-7, torch.sin(rotation) / sigma.clamp_min(1e-12), torch.full_like(sigma, step_size))
         moved = ((frame @ eigenvectors) * torch.cos(rotation).unsqueeze(-2) + (tangent @ eigenvectors) * sin_over_sigma.unsqueeze(-2)) @ eigenvectors.mT

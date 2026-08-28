@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 import weakref
 from dataclasses import dataclass
 from typing import Iterable
@@ -10,6 +11,7 @@ from torch import Tensor
 from torch.optim import Optimizer
 
 from .projector import ProjectionSide, SubspaceProjector
+from .stochastic import copy_stochastic_, wants_stochastic_rounding
 AURORA_PP_ITERATIONS = 1
 AURORA_PP_BETA = 0.5
 ORTHOGONALIZATION_SCALE_MODE = "muon"
@@ -59,6 +61,7 @@ class UsuiTrack(Optimizer):
         consume_grad: bool = True,
         release_matrix_grads: bool = False,
         compile_tensor_kernels: bool = False,
+        stochastic_rounding: bool = True,
     ) -> None:
         if lr <= 0:
             raise ValueError(f"lr must be positive, got {lr}")
@@ -113,6 +116,7 @@ class UsuiTrack(Optimizer):
         self._matrix_grad_hook_handles = []
         self._matrix_param_groups: dict[Tensor, dict] = {}
         self.release_matrix_grads = release_matrix_grads
+        self.stochastic_rounding = stochastic_rounding
         for group in self.param_groups:
             for param in group["params"]:
                 if param.ndim == 2:
@@ -136,17 +140,37 @@ class UsuiTrack(Optimizer):
         super().add_param_group(param_group)
         group = self.param_groups[-1]
         try:
+            # effective_rank() caps rank at half a parameter's smaller side, so
+            # a configured rank is a ceiling rather than a promise. This is
+            # normal and not an error -- a model trained at rank 256 runs its
+            # tall narrow modules at 32, the same way a LoRA config does -- but
+            # saying nothing would be dishonest, so report it once at startup.
+            # One summary per group, not one warning per parameter: on a real
+            # model the same cap applies to hundreds of weights.
+            clamped: dict[tuple[tuple[int, ...], int], int] = {}
             for param in group["params"]:
                 if param.ndim != 2:
                     raise ValueError(
                         "UsuiTrack only supports 2D matrix parameters; "
                         f"got shape {tuple(param.shape)}"
                     )
-                if group["rank"] > min(param.shape):
-                    raise ValueError(
-                        f"rank {group['rank']} exceeds the smaller dimension "
-                        f"of matrix parameter shape {tuple(param.shape)}"
-                    )
+                max_rank = SubspaceProjector(
+                    rank=group["rank"], side=ProjectionSide(group["side"])
+                ).effective_rank(param)
+                if group["rank"] > max_rank:
+                    key = (tuple(param.shape), max_rank)
+                    clamped[key] = clamped.get(key, 0) + 1
+            if clamped:
+                detail = ", ".join(
+                    f"{count}x{list(shape)}->rank {rank}"
+                    for (shape, rank), count in sorted(clamped.items())
+                )
+                warnings.warn(
+                    f"UsuiTrack: configured rank {group['rank']} exceeds half the smaller side "
+                    f"of {sum(clamped.values())} of {len(group['params'])} matrix parameters; "
+                    f"those run at a reduced rank ({detail}).",
+                    stacklevel=2,
+                )
         except Exception:
             self.param_groups.pop()
             raise
@@ -157,11 +181,19 @@ class UsuiTrack(Optimizer):
                 matrix_param_groups[param] = group
 
     def zero_grad(self, set_to_none: bool = True) -> None:
+        # A caller (an OOM-retry path, say) may need to bail out after prepare()
+        # has already advanced moving-average state but before step() applied it.
+        # That advance cannot be undone: those parameters carry one Oja/Adafactor
+        # step that never reached the weights. Not good, not worth killing a run
+        # over -- so warn and drop the pending work rather than raise.
         if self._pending_matrix_updates:
-            raise RuntimeError(
-                "cannot discard released matrix updates or explicitly prepared matrix updates with zero_grad(); preparation has already mutated "
-                "optimizer state, so the pending updates must be consumed by step()"
-        )
+            warnings.warn(
+                f"UsuiTrack: zero_grad() discarded prepared updates for "
+                f"{len(self._pending_matrix_updates)} matrix parameters. Their moment state "
+                f"has advanced by one step that will not reach the weights.",
+                stacklevel=2,
+            )
+        self._pending_matrix_updates.clear()
         super().zero_grad(set_to_none=set_to_none)
 
     @torch.no_grad()
@@ -560,6 +592,14 @@ class UsuiTrack(Optimizer):
         for entry in pending:
             tangent = entry.oja_tangent
             assert tangent is not None
+            # Sanitize once, here, where every tangent producer converges --
+            # the projector method and both fused kernels. A non-finite tangent
+            # otherwise reaches the geodesic through `tangent @ eigenvectors`
+            # even when the Gram it built was cleaned up, because the two are
+            # separate reads of the same tensor. Sync-free, like the gradient
+            # guard in _prepare_matrix_update.
+            tangent = torch.nan_to_num(tangent, nan=0.0, posinf=0.0, neginf=0.0)
+            entry.oja_tangent = tangent
             key = (tangent.device, tangent.dtype, tangent.shape[1])
             buckets.setdefault(key, []).append(entry)
 
@@ -569,6 +609,15 @@ class UsuiTrack(Optimizer):
             assert all(tangent is not None for tangent in tangents)
             grams = torch.stack([tangent.mT @ tangent for tangent in tangents if tangent is not None])
             grams = 0.5 * (grams + grams.mT)
+            # A near-zero-curvature direction can leave the tangent's Gram with
+            # an extreme eigenvalue spread that the batched eigh solver will not
+            # converge on. A small relative Tikhonov jitter fixes the
+            # conditioning.
+            rank_dim = grams.shape[-1]
+            trace = grams.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-12)
+            jitter = (1e-6 * trace / rank_dim).view(-1, 1, 1)
+            eye = torch.eye(rank_dim, device=grams.device, dtype=grams.dtype)
+            grams = grams + jitter * eye
             eigenvalues, eigenvectors = torch.linalg.eigh(grams)
             geometry_buckets: dict[tuple, list[int]] = {}
             for index, entry in enumerate(bucket_entries):
@@ -608,11 +657,27 @@ class UsuiTrack(Optimizer):
         return (group["matrix_step"] + 1) % group["basis_update_interval"] == 0
 
     def _apply_matrix_update(self, entry: MatrixUpdate, update_hat: Tensor, group: dict) -> None:
-        update = entry.projector.project_back(update_hat).to(dtype=entry.param.dtype)
+        param = entry.param
+        stochastic = self.stochastic_rounding and wants_stochastic_rounding(param)
+        decay = 1.0 - group["lr"] * group["weight_decay"] if group["weight_decay"] else None
 
-        if group["weight_decay"]:
-            entry.param.mul_(1.0 - group["lr"] * group["weight_decay"])
-        entry.param.add_(update, alpha=-group["lr"])
+        if not stochastic:
+            update = entry.projector.project_back(update_hat).to(dtype=param.dtype)
+            if decay is not None:
+                param.mul_(decay)
+            param.add_(update, alpha=-group["lr"])
+            return
+
+        # Lift in fp32 and never round the update on the way in: the whole
+        # point is that `lr * update` is a fraction of a bf16 ulp, so any
+        # intermediate cast discards it before the write can decide what to do
+        # with it. Weight decay is folded into the same fp32 accumulator so the
+        # parameter is rounded exactly once per step, not twice.
+        work = param.float()
+        if decay is not None:
+            work.mul_(decay)
+        work.add_(entry.projector.project_back(update_hat.float()), alpha=-group["lr"])
+        copy_stochastic_(param, work)
 
     def _initialize_projector(
         self,
@@ -683,6 +748,9 @@ class UsuiTrack(Optimizer):
         eps: float = 1e-7,
     ) -> Tensor:
         """Aurora-style leverage-uniform polar direction for rectangular projected moments.
+
+        Aurora: https://github.com/tilde-research/aurora-release (Tilde Research).
+        Reimplemented from the method; not a runtime dependency.
 
         UsuiTrack owns momentum, LR, weight decay, and full-matrix Muon scaling. This
         helper extracts only Aurora's rectangular direction map: diagonally

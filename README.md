@@ -39,9 +39,15 @@ dependency.
 ## Use
 
 UsuiTrack only accepts 2D matrix parameters. Give it every `Linear`-style
-weight and route everything else, biases, norms, and *embeddings* (2D but
-not what a rank-limited update wants), to a separate optimizer: the same
-split Muon and other orthogonalized optimizers use.
+weight and route everything else to a separate optimizer, the same split Muon
+and other orthogonalized optimizers use. "Everything else" is wider than the
+non-2D tensors: lookup tables (embeddings) and multiplicative gates (AdaLN-style
+modulation linears) are 2D but are not shared linear maps, and belong in the
+fallback. `docs/SPEC.md` has the reasoning.
+
+Rank is a ceiling, not a promise: each parameter runs at no more than half its
+smaller side, so a model configured at rank 128 runs its tall narrow modules
+lower. UsuiTrack says so once at startup.
 
 ```python
 import torch
@@ -104,10 +110,19 @@ projected first moment in that basis. The basis moves via an exact
 Grassmann-geodesic step driven by an Oja covariance tangent, so momentum
 transports through basis motion as a rigid rotation instead of being
 re-projected and losing energy. Direction comes from a leverage-balanced
-Newton-Schulz polar map (Aurora), using the optimal coefficient schedule from
+Newton-Schulz polar map ([Aurora](https://github.com/tilde-research/aurora-release),
+from Tilde Research), using the optimal coefficient schedule from
 Amsel, Persson, Musco, and Gower's ["The Polar
 Express"](https://arxiv.org/abs/2505.16932); scale comes from the original
-parameter shape, Muon-style.
+parameter shape, Muon-style. For bf16 weights the update is accumulated in
+fp32 and written back with stochastic rounding, because an orthogonalized step
+is often a fraction of a bf16 ulp and round-to-nearest would discard it
+outright; `StochasticAdamW` is provided for the fallback group for the same
+reason.
+
+The design question behind all of this -- what a small-batch, noisy-gradient
+run actually needs from an optimizer -- was framed for me by Martin Marek's
+[batch-size study](https://github.com/martin-marek/batch-size). No code taken.
 
 ## Status and limitations
 
