@@ -85,6 +85,10 @@ See [`examples/`](examples) for a plain-PyTorch loop, an HF `Trainer`
 integration, and a full-finetune run through Unsloth's `FastModel` loader
 (no LoRA, no quantization: UsuiTrack drives the full weights directly).
 
+Gradient clipping is always on (`grad_clip_norm`, default `1.0`) and cannot be
+disabled: it is what protects the Adafactor state, the basis, and the projected
+moment from a single bad batch.
+
 UsuiTrack is built for full-parameter training; LoRA is the comparison
 point above, not a mode of operation. It also runs fine on LoRA adapter
 matrices themselves (they're plain 2D tensors), but expect it unoptimized

@@ -120,20 +120,6 @@ class SubspaceProjector:
     def project_and_back(self, matrix: Tensor) -> Tensor:
         return self.project_back(self.project(matrix))
 
-    @torch.no_grad()
-    def oja_tangent(self, matrix: Tensor, projected: Tensor | None = None) -> Tensor:
-        if self.basis is None:
-            raise RuntimeError("cannot compute an Oja tangent before fitting a basis")
-        self._check_basis_matches(matrix)
-        side = self._basis_side()
-        work = matrix.float() if matrix.dtype in (torch.float16, torch.bfloat16) else matrix
-        frame = self.canonical_basis()
-        low = projected.float() if projected is not None else (work @ frame if side is ProjectionSide.RIGHT else frame.mT @ work)
-        action = work.mT @ low if side is ProjectionSide.RIGHT else work @ low.mT
-        rayleigh = frame.mT @ action
-        rayleigh = 0.5 * (rayleigh + rayleigh.mT)
-        return (action - frame @ rayleigh) / rayleigh.diagonal().mean().clamp_min(1e-12)
-
     @staticmethod
     def oja_geodesic_from_eigh(frame: Tensor, tangent: Tensor, eigenvalues: Tensor, eigenvectors: Tensor, step_size: float) -> Tensor:
         sigma = eigenvalues.clamp_min(0.0).sqrt()

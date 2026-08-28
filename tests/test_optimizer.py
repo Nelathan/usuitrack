@@ -145,3 +145,42 @@ def test_state_dict_resume_matches_uninterrupted_run():
     first_optimizer.step()
     second_optimizer.step()
     torch.testing.assert_close(first, second, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("side", ["right", "left"])
+def test_live_kernel_tangent_is_horizontal(side):
+    """Oja's tangent must have no component along the current frame -- that is
+    what makes the geodesic turn strictly in the frame's complement and keeps
+    the retraction exact. Checked against the fused kernel because after the
+    first step that is the only code that builds a tangent."""
+    from usuitrack import SubspaceProjector
+
+    torch.manual_seed(0)
+    gradient = torch.randn(ROWS, COLS)
+    projector = SubspaceProjector(rank=RANK, side=side)
+    projector.fit(gradient)
+    basis = projector.basis
+    assert basis is not None
+
+    kernel = (
+        UsuiTrack._prepare_tracker_adafactor_right_tensors
+        if side == "right"
+        else UsuiTrack._prepare_tracker_adafactor_left_tensors
+    )
+    projected_shape = (ROWS, RANK) if side == "right" else (RANK, COLS)
+    _conditioned, tangent, _norm = kernel(
+        gradient,
+        basis,
+        torch.rand(ROWS).mul_(1e-3),
+        torch.rand(COLS).mul_(1e-3),
+        torch.zeros(projected_shape),
+        3,  # adafactor_step
+        1.0,  # grad_clip_norm
+        0.99,  # adafactor_beta2
+        1e-30,  # adafactor_eps
+        0.95,  # beta
+    )
+
+    frame = projector.canonical_basis()
+    overlap = frame.mT @ tangent
+    assert float(overlap.abs().max()) < 1e-3 * float(tangent.abs().max()), overlap.abs().max()

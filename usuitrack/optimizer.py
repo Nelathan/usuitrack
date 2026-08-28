@@ -56,7 +56,7 @@ class UsuiTrack(Optimizer):
         side: ProjectionSide | str = ProjectionSide.AUTO,
         adafactor_beta2: float = 0.99,
         adafactor_eps: float = 1e-30,
-        grad_clip_norm: float | None = 1.0,
+        grad_clip_norm: float = 1.0,
         basis_update_interval: int = 1,
         consume_grad: bool = True,
         release_matrix_grads: bool = False,
@@ -77,8 +77,8 @@ class UsuiTrack(Optimizer):
             raise ValueError(f"adafactor_beta2 must be in [0, 1), got {adafactor_beta2}")
         if adafactor_eps <= 0:
             raise ValueError(f"adafactor_eps must be positive, got {adafactor_eps}")
-        if grad_clip_norm is not None and grad_clip_norm <= 0:
-            raise ValueError(f"grad_clip_norm must be positive when set, got {grad_clip_norm}")
+        if grad_clip_norm <= 0:
+            raise ValueError(f"grad_clip_norm must be positive, got {grad_clip_norm}")
         if basis_update_interval <= 0:
             raise ValueError(f"basis_update_interval must be positive, got {basis_update_interval}")
         if release_matrix_grads and not consume_grad:
@@ -308,51 +308,38 @@ class UsuiTrack(Optimizer):
     def _prepare_matrix_update(self, p: Tensor, grad: Tensor, group: dict) -> MatrixUpdate:
         state = self.state[p]
         projector = self._projector_from_state(p, group, state)
-        oja_tangent = None
-        raw_grad_norm = None
-        if self._can_use_initialized_tracker_adafactor_prepare(projector, state, group):
-            return self._prepare_initialized_tracker_adafactor_update(
-                p,
-                grad,
-                projector,
-                state,
-                group,
-            )
-        else:
-            # Sync-free non-finite guard. A NaN/inf batch otherwise poisons every
-            # downstream consumer at once: the clip scale (NaN norm -> NaN scale ->
-            # whole grad NaN), adafactor's row/col vars, the tangent buffer, and
-            # eventually the refresh SVD -- and an `isfinite().all()` branch would be
-            # a device->host sync in the hot path. Zeroing non-finite elements drops
-            # their contribution for one step instead.
-            grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
-            # Clip the RAW gradient before it reaches adafactor. A blip batch (grad
-            # norm spiking ~180x) otherwise poisons the adafactor row/col second
-            # moment: grad_sq of the blip is ~30000x normal, and with beta2=0.99 that
-            # spike decays over ~100 steps, over-dampening whole gradient directions
-            # for the entire window -- the basis then tracks a *starved* residual and
-            # each subsequent refresh adapts to the corruption (observed: a single
-            # step-54 blip collapsed alignment for the whole back half of a 100-step
-            # run). Clipping here protects adafactor's state, the basis refresh, and
-            # the projection in one place -- upstream of everything, which is why the
-            # projected-grad clip (downstream, moment-only) could not stop it.
-            raw_grad_norm = grad.float().norm().detach()
-            grad_clip_norm = group.get("grad_clip_norm")
-            if grad_clip_norm is not None:
-                clip_scale = (grad.new_tensor(float(grad_clip_norm)) / raw_grad_norm.clamp_min(1e-12)).clamp(max=1.0)
-                grad = grad.mul(clip_scale)
-            grad = self._adafactor_dampen_full_grad(grad, group, state)
-            held_projected_grad = projector.project(grad) if projector.is_initialized else None
-            if held_projected_grad is None:
-                self._initialize_projector(projector, grad, state)
-                projected_grad = projector.project(grad)
-            else:
-                # The held-frame projection supplies both the projected moment
-                # update and Oja's covariance action. Basis motion is deferred
-                # until every tangent can be batched in step().
-                if self._basis_update_due(group):
-                    oja_tangent = projector.oja_tangent(grad, projected=held_projected_grad)
-                projected_grad = held_projected_grad
+
+        if (
+            projector.is_initialized
+            and self._basis_update_due(group)
+            and state.get("adafactor_row_var") is not None
+            and state.get("projected_exp_avg") is not None
+        ):
+            # Steady state, and after the first step this is every step at the
+            # default cadence: one fused kernel per side does clipping,
+            # Adafactor, the held-frame projection, the Oja tangent, and the
+            # moment update in a single pass.
+            return self._prepare_initialized_tracker_adafactor_update(p, grad, projector, state, group)
+
+        # Two cold cases are left, and neither wants a tangent: the first step,
+        # which fits the frame rather than moving it, and a step where the basis
+        # update is not due under basis_update_interval > 1.
+        #
+        # Clipping happens on the RAW gradient, before Adafactor. A blip batch
+        # (grad norm spiking ~180x) otherwise poisons the factored second moment:
+        # grad_sq of the blip is ~30000x normal, and at beta2=0.99 that spike
+        # decays over ~100 steps, over-dampening whole gradient directions for the
+        # entire window -- the basis then tracks a starved residual and every
+        # later refresh adapts to the corruption. Observed: a single step-54 blip
+        # collapsed alignment for the whole back half of a 100-step run. A guard
+        # installed downstream cannot protect an upstream memory, which is why
+        # the projected-grad clip could not stop it and why grad_clip_norm has no
+        # off switch.
+        grad, raw_grad_norm = self._sanitize_and_clip_grad_tensors(grad, float(group["grad_clip_norm"]))
+        grad = self._adafactor_dampen_full_grad(grad, group, state)
+        if not projector.is_initialized:
+            self._initialize_projector(projector, grad, state)
+        projected_grad = projector.project(grad)
 
         projected_exp_avg = state.get("projected_exp_avg")
         state["step"] = state.get("step", 0) + 1
@@ -366,23 +353,8 @@ class UsuiTrack(Optimizer):
             projector=projector,
             projected_exp_avg=projected_exp_avg,
             original_shape=tuple(p.shape),
-            oja_tangent=oja_tangent,
+            oja_tangent=None,
             raw_grad_norm=raw_grad_norm,
-        )
-
-    @staticmethod
-    def _can_use_initialized_tracker_adafactor_prepare(
-        projector: SubspaceProjector,
-        state: dict,
-        _group: dict,
-    ) -> bool:
-        return (
-            projector.is_initialized
-            and UsuiTrack._basis_update_due(_group)
-            and _group.get("grad_clip_norm") is not None
-            and state.get("adafactor_row_var") is not None
-            and state.get("adafactor_col_var") is not None
-            and state.get("projected_exp_avg") is not None
         )
 
     def _prepare_initialized_tracker_adafactor_update(

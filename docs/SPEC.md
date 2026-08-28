@@ -109,8 +109,20 @@ default,
 
 $$G_c=S(G)\min\left(1,\frac{c}{\max(\|S(G)\|_F,10^{-12})}\right).$$
 
-This occurs before all matrix consumers. Disabling the threshold leaves only
-sanitization.
+This occurs before all matrix consumers, and there is no off switch: `c` has no
+`None`. Clipping the raw gradient is what protects every persistent memory
+downstream of it -- Adafactor's factored variance, the frame, the projected
+moment -- and a guard installed later cannot protect an earlier one. A single
+blip batch (grad norm spiking ~180x) otherwise writes a ~30000x spike into the
+factored second moment, which at `beta2=0.99` over-dampens whole gradient
+directions for ~100 steps while the basis tracks the starved residual and every
+later refresh adapts to the corruption.
+
+Making it mandatory also collapses the update to a single implementation.
+Once `c` is always present, the only thing that varies between steps is whether
+the frame exists yet and whether a basis update is due, so the tangent is built
+in exactly one place: the fused per-side kernel. There is no second readable
+copy to drift out of sync with it -- that is what this document is for.
 
 ### 2. Adafactor SNR conditioning
 
@@ -304,7 +316,7 @@ is not rounded twice. See `usuitrack/stochastic.py`.
 
 For each matrix, phase one runs exactly once after its full gradient is complete:
 
-1. sanitize and clip `G`;
+1. sanitize and clip `G` (always);
 2. update Adafactor state and form `G_tilde`;
 3. read `Z_t` and, after initialization, form `Delta_t` in the held frame `Q_t`;
 4. update `M_t`;

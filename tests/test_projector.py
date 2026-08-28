@@ -35,21 +35,21 @@ def test_project_and_lift_round_trip_shape():
         assert tuple(lifted.shape) == shape
 
 
-def test_oja_tangent_is_horizontal_and_geodesic_stays_on_stiefel():
-    matrix = torch.randn(ROWS, COLS)
-    projector = SubspaceProjector(rank=RANK, side="right")
-    projector.fit(matrix)
-    projected = projector.project(matrix)
-    tangent = projector.oja_tangent(matrix, projected=projected)
-    frame = projector.canonical_basis()
-
-    # Horizontal: the tangent has no component along the current frame.
-    torch.testing.assert_close(frame.mT @ tangent, torch.zeros(RANK, RANK), atol=1e-5, rtol=0)
+def test_geodesic_stays_on_the_stiefel_manifold():
+    """The geodesic must return an orthonormal frame for any horizontal tangent,
+    at any step size. The tangent is built here rather than taken from the
+    optimizer so this stays a test of the retraction alone; the tangent's own
+    horizontality is checked against the live kernel in test_optimizer.py."""
+    torch.manual_seed(0)
+    frame = torch.linalg.qr(torch.randn(COLS, RANK))[0]
+    tangent = torch.randn(COLS, RANK)
+    tangent = tangent - frame @ (frame.mT @ tangent)  # horizontal by construction
 
     gram = tangent.mT @ tangent
     values, vectors = torch.linalg.eigh(0.5 * (gram + gram.mT))
-    moved = SubspaceProjector.oja_geodesic_from_eigh(frame, tangent, values, vectors, 0.5)
-    torch.testing.assert_close(moved.mT @ moved, torch.eye(RANK), atol=3e-3, rtol=0)
+    for step_size in (0.01, 0.5, 5.0):
+        moved = SubspaceProjector.oja_geodesic_from_eigh(frame, tangent, values, vectors, step_size)
+        torch.testing.assert_close(moved.mT @ moved, torch.eye(RANK), atol=3e-3, rtol=0)
 
 
 def test_effective_rank_caps_at_half_the_smaller_side():
