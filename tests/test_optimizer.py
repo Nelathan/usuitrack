@@ -3,7 +3,7 @@ import copy
 import pytest
 import torch
 
-from usuitrack import UsuiTrack
+from usuitrack import SubspaceProjector, UsuiTrack
 
 
 # A representative transformer-ish weight. Small toy shapes like (8, 4) put
@@ -163,24 +163,188 @@ def test_live_kernel_tangent_is_horizontal(side):
     assert basis is not None
 
     kernel = (
-        UsuiTrack._prepare_tracker_adafactor_right_tensors
+        UsuiTrack._prepare_tracker_right_tensors
         if side == "right"
-        else UsuiTrack._prepare_tracker_adafactor_left_tensors
+        else UsuiTrack._prepare_tracker_left_tensors
     )
     projected_shape = (ROWS, RANK) if side == "right" else (RANK, COLS)
-    _conditioned, tangent, _norm = kernel(
-        gradient,
+    # A gradient the frame was *not* fitted on: a frame fitted on G is the
+    # leading eigenspace of `G^T G`, so the Oja action lands entirely inside it
+    # and the horizontal residual is exactly zero, which makes this assertion
+    # vacuous.
+    _projected, tangent, _norm = kernel(
+        torch.randn(ROWS, COLS),
         basis,
-        torch.rand(ROWS).mul_(1e-3),
-        torch.rand(COLS).mul_(1e-3),
         torch.zeros(projected_shape),
-        3,  # adafactor_step
         1.0,  # grad_clip_norm
-        0.99,  # adafactor_beta2
-        1e-30,  # adafactor_eps
         0.95,  # beta
     )
 
     frame = projector.canonical_basis()
     overlap = frame.mT @ tangent
     assert float(overlap.abs().max()) < 1e-3 * float(tangent.abs().max()), overlap.abs().max()
+
+
+def _two_matrix_optimizer(**kwargs):
+    params = [
+        torch.nn.Parameter(torch.randn(ROWS, COLS)),
+        torch.nn.Parameter(torch.randn(ROWS, COLS)),
+    ]
+    return params, UsuiTrack(params, lr=1e-3, rank=RANK, **kwargs)
+
+
+def _run(params, optimizer, steps):
+    for _ in range(steps):
+        for param in params:
+            param.grad = torch.randn_like(param)
+        optimizer.step()
+
+
+def test_a_fitted_frame_is_a_fixed_point_of_its_own_gradient():
+    """The frame has nothing left to learn from the gradient that fitted it.
+
+    The Oja action is `(G^T G) B^T`, and a frame fitted on `G` *is* the leading
+    eigenspace of `G^T G`, so the action lands entirely inside the frame and the
+    horizontal residual is zero. The tracker therefore stops turning when the
+    gradient's principal subspace stops moving, rather than churning on a
+    stationary target.
+    """
+    torch.manual_seed(0)
+    gradient = torch.randn(ROWS, COLS)
+    projector = SubspaceProjector(rank=RANK, side="right")
+    projector.fit(gradient)
+    basis = projector.basis
+    assert basis is not None
+
+    _projected, tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
+        gradient, basis, torch.zeros(ROWS, RANK), 1.0, 0.95
+    )
+    assert float(tangent.abs().max()) < 1e-5, float(tangent.abs().max())
+
+
+def test_kernel_matches_a_hand_rolled_step():
+    """The fused kernel is the written-out update, not a path that merely runs."""
+    torch.manual_seed(0)
+    gradient = torch.randn(ROWS, COLS)
+    projector = SubspaceProjector(rank=RANK, side="right")
+    projector.fit(torch.randn(ROWS, COLS))
+    basis = projector.basis
+    assert basis is not None
+
+    moment = torch.randn(ROWS, RANK).mul_(1e-3)
+    expected = moment.clone()
+    projected, _tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
+        gradient, basis, moment, 1.0, 0.95
+    )
+
+    clipped = gradient * (1.0 / gradient.float().norm()).clamp(max=1.0)
+    assert torch.allclose(projected, clipped @ basis.mT, atol=1e-6)
+    expected.mul_(0.95).add_(projected, alpha=0.05)
+    assert torch.allclose(moment, expected, atol=1e-6)
+
+
+def test_diagnostics_are_inert_until_enabled():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    _run(params, optimizer, 3)
+
+    assert optimizer.pop_diagnostics() == {}
+    # Nothing was allocated to hold telemetry nobody asked for.
+    assert optimizer._diagnostics is None
+
+
+def test_diagnostics_report_every_documented_metric():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    optimizer.diagnostics_enabled = True
+    # Three steps: the first fits the frame, so basis motion only exists after it.
+    _run(params, optimizer, 3)
+
+    diagnostics = optimizer.pop_diagnostics()
+    assert set(diagnostics) == {
+        "rotation_rad_sum",
+        "tangent_concentration",
+        "projected_grad_norm",
+        "grad_to_moment_ratio",
+        "update_to_param_ratio",
+        "nonfinite_grads",
+    }
+    assert all(isinstance(value, float) for value in diagnostics.values())
+    assert all(value == value for value in diagnostics.values()), diagnostics
+
+    assert diagnostics["rotation_rad_sum"] > 0
+    assert 1.0 / RANK <= diagnostics["tangent_concentration"] <= 1.0
+    assert diagnostics["update_to_param_ratio"] > 0
+    assert diagnostics["nonfinite_grads"] == 0.0
+
+
+def test_pop_diagnostics_clears_the_window():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    optimizer.diagnostics_enabled = True
+    _run(params, optimizer, 2)
+
+    assert optimizer.pop_diagnostics()
+    # A second read with no steps in between has nothing to report, rather than
+    # repeating the previous window's numbers.
+    assert optimizer.pop_diagnostics() == {}
+    _run(params, optimizer, 1)
+    assert optimizer.pop_diagnostics()
+
+
+def test_nonfinite_gradients_are_counted_not_averaged():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    optimizer.diagnostics_enabled = True
+    _run(params, optimizer, 2)
+    optimizer.pop_diagnostics()
+
+    for param in params:
+        param.grad = torch.randn_like(param)
+    params[0].grad[0, 0] = float("nan")
+    optimizer.step()
+
+    diagnostics = optimizer.pop_diagnostics()
+    assert diagnostics["nonfinite_grads"] == 1.0
+    assert torch.isfinite(params[0]).all()
+
+
+def test_diagnostics_do_not_change_the_trajectory():
+    torch.manual_seed(0)
+    quiet_params, quiet = _two_matrix_optimizer()
+    torch.manual_seed(0)
+    loud_params, loud = _two_matrix_optimizer()
+    loud.diagnostics_enabled = True
+
+    torch.manual_seed(1)
+    _run(quiet_params, quiet, 4)
+    torch.manual_seed(1)
+    _run(loud_params, loud, 4)
+
+    for quiet_param, loud_param in zip(quiet_params, loud_params, strict=True):
+        assert torch.equal(quiet_param, loud_param)
+
+
+def test_tangent_eigh_does_not_jitter_on_healthy_gradients():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    optimizer.diagnostics_enabled = True
+    _run(params, optimizer, 5)
+
+    # The Tikhonov jitter is a fallback now, not a toll on every basis update.
+    assert "eigh_jitter_retries" not in optimizer.pop_diagnostics()
+
+
+def test_no_second_moment_state_is_allocated():
+    """UsuiTrack keeps a basis and a projected first moment. Nothing else."""
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    _run(params, optimizer, 4)
+
+    for param in params:
+        assert set(optimizer.state[param]) == {
+            "basis",
+            "projection_side_is_right",
+            "projected_exp_avg",
+            "step",
+        }

@@ -86,8 +86,36 @@ integration, and a full-finetune run through Unsloth's `FastModel` loader
 (no LoRA, no quantization: UsuiTrack drives the full weights directly).
 
 Gradient clipping is always on (`grad_clip_norm`, default `1.0`) and cannot be
-disabled: it is what protects the Adafactor state, the basis, and the projected
-moment from a single bad batch.
+disabled: it is what protects the basis and the projected moment from a single
+bad batch.
+
+### Is the tracker actually tracking?
+
+Optional telemetry, off by default, that answers that without assuming any
+particular trainer -- it is a plain dict of floats, so it drops straight into
+whatever logging you already have:
+
+```python
+matrix_opt.diagnostics_enabled = True
+...
+if step % 10 == 0:
+    for key, value in matrix_opt.pop_diagnostics().items():
+        my_logger.log(f"usuitrack/{key}", value, step=step)
+```
+
+Measurements accumulate on-device every step and are read back once per
+`pop_diagnostics()` call, so a logged point is the mean over the interval since
+the last read rather than a sample of one step, and the hot path stays free of
+device syncs. Call it on your logging cadence, not every step. An empty dict
+means nothing has happened since the last read and is safe to skip.
+
+The two that answer the title question are `rotation_rad_sum` (how far the frame
+turned -- summed across all `r` planes, so it is total motion, not a per-plane
+angle) and `tangent_concentration` (where that motion went, as the leading
+direction's share of the tangent's energy). A frame drifting toward a real
+signal turns with high concentration; a frame churning on this batch's noise
+shows the same total motion spread flat across every plane.
+`pop_diagnostics()`'s docstring documents the rest.
 
 UsuiTrack is built for full-parameter training; LoRA is the comparison
 point above, not a mode of operation. It also runs fine on LoRA adapter

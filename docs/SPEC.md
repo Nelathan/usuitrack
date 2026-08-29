@@ -14,7 +14,7 @@ basis-tracking path; see the [README](../README.md) for results and usage.
 - **A healthy polar output can hide a sick input.** Newton--Schulz restores
   semi-orthogonal scale after weak directions have already become noise-dominated.
 - **A downstream operation cannot protect upstream state.** Raw clipping must
-  precede Adafactor, held-frame projection, and Oja tangent construction.
+  precede held-frame projection and Oja tangent construction.
 - **`side="auto"` knows shape, not architecture.** It cannot infer a transformer's
   residual-facing axis.
 - **`ndim == 2` is a shape gate, not the precondition.** Lookup tables and
@@ -97,7 +97,6 @@ accuracy, it corrupts the tracked frame for every step after it.
 ```text
 raw gradient G
   -> sanitize and raw clip
-  -> Adafactor SNR conditioning
   -> stable EIGH initialization on the first step
   -> held-frame projected gradient Z
   -> Rayleigh-normalized one-state Oja tangent
@@ -119,12 +118,10 @@ $$G_c=S(G)\min\left(1,\frac{c}{\max(\|S(G)\|_F,10^{-12})}\right).$$
 
 This occurs before all matrix consumers, and there is no off switch: `c` has no
 `None`. Clipping the raw gradient is what protects every persistent memory
-downstream of it -- Adafactor's factored variance, the frame, the projected
-moment -- and a guard installed later cannot protect an earlier one. A single
-blip batch (grad norm spiking ~180x) otherwise writes a ~30000x spike into the
-factored second moment, which at `beta2=0.99` over-dampens whole gradient
-directions for ~100 steps while the basis tracks the starved residual and every
-later refresh adapts to the corruption.
+downstream of it -- the frame and the projected moment -- and a guard installed
+later cannot protect an earlier one. A single blip batch (grad norm spiking
+~180x) otherwise reaches both at full size, and a frame that has turned toward
+one is wrong for as long as it takes the tracker to turn back.
 
 Making it mandatory also collapses the update to a single implementation.
 Once `c` is always present, the only thing that varies between steps is whether
@@ -132,30 +129,9 @@ the frame exists yet and whether a basis update is due, so the tangent is built
 in exactly one place: the fused per-side kernel. There is no second readable
 copy to drift out of sync with it -- that is what this document is for.
 
-### 2. Adafactor SNR conditioning
+### 2. Initialize the frame
 
-The selected path maintains row and column means of squared
-full-gradient entries (`beta2=0.99`, `epsilon_a=1e-30`):
-
-$$R_t=\beta_2R_{t-1}+(1-\beta_2)\operatorname{mean}_j(G_{c,ij}^2+\epsilon_a),$$
-$$C_t=\beta_2C_{t-1}+(1-\beta_2)\operatorname{mean}_i(G_{c,ij}^2+\epsilon_a).$$
-
-Bias-correct both, then reconstruct
-
-$$\widehat V_{ij}=\frac{\widehat R_i\widehat C_j}
-{\operatorname{mean}(\widehat R)}.$$
-
-The gradient consumed by tracking and projection is
-
-$$\widetilde G=\frac{G_c}{\sqrt{\widehat V}}\operatorname{RMS}(G_c).$$
-
-RMS restoration retains relative SNR weighting without feeding an RMS-one matrix
-into the tracker. Reconstruction denominators and square roots are floored by
-`epsilon_a`.
-
-### 3. Initialize the frame
-
-Normalize `A = G_tilde / ||G_tilde||_F` and form the symmetrized side Gram:
+Normalize `A = G_c / ||G_c||_F` and form the symmetrized side Gram:
 
 $$K=A^\top A\quad\text{(right)},\qquad K=AA^\top\quad\text{(left)}.$$
 
@@ -166,13 +142,13 @@ $$K\leftarrow K+10^{-6}\max(\operatorname{tr}(K)/d,10^{-12})I.$$
 An exactly zero gradient produces the deterministic EIGH frame of the zero side
 Gram.
 
-### 4. Project in the held frame
+### 3. Project in the held frame
 
 Using the held frame before the current Oja move,
 
 $$Z_t=\Pi_{Q_t}(\widetilde G_t).$$
 
-### 5. Track with one-state Oja
+### 4. Track with one-state Oja
 
 After EIGH initialization, the live frame updates on the configured basis-update
 cadence (default every conditioned full gradient). Reuse the held-frame
@@ -225,13 +201,13 @@ $$Q_+=Q_{raw}(aI+bS+cS^2).$$
 The Oja tangent rotates every tracked plane. UsuiTrack stores no target frame or
 second tracker state and requires a full matrix gradient on every step.
 
-### 6. Accumulate momentum
+### 5. Accumulate momentum
 
 $$M_t=\beta M_{t-1}+(1-\beta)Z_t,\qquad \beta=0.95.$$
 
 There is no EMA bias correction.
 
-### 7. Transport momentum through frame motion
+### 6. Transport momentum through frame motion
 
 The geodesic chooses an ambient rotation `R` with `Q_+ = RQ`. UsuiTrack defines
 momentum as moving with that frame:
@@ -248,7 +224,7 @@ old/new frame overlap would answer a different question: represent the surviving
 projection of a fixed old ambient vector. It contracts each rotated plane by a
 principal-angle cosine before Aurora.
 
-### 8. Aurora direction
+### 7. Aurora direction
 
 The leverage-balancing scheme below is
 [Aurora](https://github.com/tilde-research/aurora-release) (Tilde Research).
@@ -298,7 +274,7 @@ exact SVD polar factor.
 **Decision (projected Aurora):** Aurora chooses direction inside the retained
 update space. UsuiTrack, not Aurora, owns momentum, basis motion, scale, and LR.
 
-### 9. Scale, lift, and update
+### 8. Scale, lift, and update
 
 Muon scale uses the original parameter shape, not the projected shape:
 
@@ -325,7 +301,7 @@ is not rounded twice. See `usuitrack/stochastic.py`.
 For each matrix, phase one runs exactly once after its full gradient is complete:
 
 1. sanitize and clip `G` (always);
-2. update Adafactor state and form `G_tilde`;
+2. form the clipped gradient `G_c`;
 3. read `Z_t` and, after initialization, form `Delta_t` in the held frame `Q_t`;
 4. update `M_t`;
 5. retain `M_t`, the optional `Delta_t`, and the frame reference, then release `G`.
@@ -341,7 +317,7 @@ at construction).
 
 The split is deliberately not a transaction, and cannot be made one at this
 memory budget. Phase one exists so that `G` can be freed the moment it is
-consumed; deferring the Adafactor and moment updates to `step()` would mean
+consumed; deferring the moment update to `step()` would mean
 holding a matrix-sized conditioned gradient per parameter until then, which is
 the cost the two-phase design exists to avoid. So state commits in two places:
 phase one commits the moving averages, phase two commits the weight. Normal
@@ -349,7 +325,7 @@ completion of a step still requires `step()`, not `zero_grad()`. But a caller
 that must bail out mid-step regardless (an OOM-retry loop, say) is allowed to:
 `zero_grad()` drops any pending prepared update rather than rejecting the
 call. This does not roll back the moving-average state prepare() already
-advanced -- that one step's contribution to Adafactor/projected-moment state
+advanced -- that one step's contribution to projected-moment state
 is unrecoverable -- it only clears the retained tangent so the next
 `prepare()`/`step()` starts clean. Repeated preparation, gradient accumulation
 before `step()`, and optimizer closures with pending work remain unsupported.
@@ -366,9 +342,8 @@ run going non-finite thousands of steps in.
 
 **Lookup tables.** `nn.Embedding` weights, and any matrix whose rows are
 independent per-token vectors. There is no shared map, and the gradient is
-row-sparse: most rows go untouched for thousands of steps with their Adafactor
-row variance pinned at the eps floor, while the basis only ever sees the rows a
-batch lights up. Observed on a 32128x1024 vocabulary table: non-finite mid-run
+row-sparse: most rows go untouched for thousands of steps, while the basis only
+ever sees the rows a batch lights up. Observed on a 32128x1024 vocabulary table: non-finite mid-run
 with a finite gradient and a healthy loss, while the updates it did receive were
 ~3e-7 per element against weights of order 1e-2..1e2 -- below bf16 resolution,
 so it carried the risk without training. Muon-lineage optimizers exclude
@@ -408,13 +383,46 @@ Sparse gradients are unsupported.
 |---|---|---|---|
 | basis | `[r,n]` | `[m,r]` | parameter dtype |
 | projected EMA | `[m,r]` | `[r,n]` | gradient dtype |
-| Adafactor row variance | `[m]` | `[m]` | fp32 |
-| Adafactor column variance | `[n]` | `[n]` | fp32 |
 | update counts and resolved side | scalar | scalar | Python |
 
 Oja tangents are transient pending work. No target frame, second basis, or lag
 snapshot is stored. Fallback parameters retain AdamW's fp32 first moment, second
 moment, and step tensor in their separate optimizer.
+
+
+## Diagnostics
+
+Optional, off by default, and structurally incapable of costing anything when
+off: every accumulation site is guarded by one attribute read. Set
+`diagnostics_enabled = True` and drain with `pop_diagnostics()`, which returns a
+plain dict of floats -- no wandb, no trainer, no assumptions about the caller.
+
+Measurements accumulate on-device every step; the single device-to-host read
+happens inside `pop_diagnostics()`. A drained value is therefore the mean over
+the interval since the last drain, which is why the intended cadence is the
+caller's logging cadence rather than every step. Non-finite gradient counts and
+`eigh` jitter retries are reported as totals over the interval instead of means,
+because a rare event averaged against a long quiet interval reads as zero.
+
+| key | what it measures |
+|---|---|
+| `rotation_rad_sum` | `eta * sum_i sigma_i` of one geodesic: total frame motion summed over all `r` planes, not a per-plane angle |
+| `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
+| `projected_grad_norm` | norm of the conditioned gradient inside the held frame |
+| `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |
+| `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
+| `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
+| `eigh_jitter_retries` | tangent eigendecompositions that failed bare and needed the jittered retry |
+
+`rotation_rad_sum` and `tangent_concentration` are read from the eigenvalues the
+geodesic already computes, so they cost nothing beyond two reductions. The pair
+is meant to be read together: the same total rotation is a confident drift when
+concentration is high and a frame spinning on its noise tail when it is low.
+
+The Tikhonov jitter behind `eigh_jitter_retries` is a fallback, not a toll. The
+tangent Gram is decomposed bare; only if that fails does a relative jitter get
+applied and the retry counted -- the same shape `_side_gram_eigh` uses for the
+initial fit.
 
 
 ## Decisions and reasons
@@ -432,10 +440,13 @@ These choices define the current design; they are redesignable.
    `1/2, 1/3, ...` down to `0.01` and no second basis.
 5. **Moving-frame momentum:** identity coordinates preserve the projected
    moment's spectrum through the chosen frame rotation.
-6. **Adafactor before tracking and projection:** both consumers see the same
-   SNR-conditioned signal; RMS restoration preserves tracker scale units.
-7. **Raw clipping before all consumers:** protects persistent Adafactor state and
-   Oja tangent construction, not just momentum.
+6. **No second moment on the full gradient:** the tangent and the moment both
+   read the clipped gradient directly. A frame fitted on `G` is the leading
+   eigenspace of `G^T G`, so the Oja residual is zero there and the tracker
+   converges when the gradient's principal subspace stops moving; any two-sided
+   rescale is a congruence rather than a similarity and destroys that property.
+7. **Raw clipping before all consumers:** protects the frame and the projected
+   moment, not just the update.
 8. **Aurora plus full-shape Muon scale:** direction belongs to projected geometry;
    scale remains tied to parameter geometry.
 9. **Separate AdamW fallback:** non-matrix tensors remain trainable under a

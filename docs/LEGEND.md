@@ -57,9 +57,9 @@ smoothly the car can carry speed.
 Rain above C-121. Oil near the retaining wall.
 
 The first version put the safety rail near the steering rack, after projection.
-It protected the little momentum tensor and left the suspension, alignment, and
-road map to absorb the impact. One bad batch entered the factored variance,
-distorted the next basis target, and haunted a hundred clean corners.
+It protected the little momentum tensor and left the alignment and the frame to
+absorb the impact. One bad batch turned the basis toward a corner that was not
+there, and the car spent a hundred clean corners turning back.
 
 Now the bump stop sits where the tire meets the road.
 
@@ -68,39 +68,34 @@ G <- finite(G)
 G <- G * min(1, raw_clip / ||G||)
 ```
 
-Everything downstream sees the same survivable event: Adafactor, eigenspace,
-projection, momentum. A guard installed later cannot protect an earlier memory.
+Everything downstream sees the same survivable event: eigenspace, projection,
+momentum. A guard installed later cannot protect an earlier memory.
 
 The cups settle. The car continues.
 
 ---
 
-## November 12, suspension notes
+## November 12, no suspension
 
 Grip is information.
 
 Raw magnitude mixes two stories: signal and roughness. A direction can shout
-because it matters or because the road beneath it is noisy. The suspension keeps
-a compact map of that roughness, one row trace and one column trace, then lets the
-gradient speak in units of local uncertainty.
+because it matters or because the road beneath it is noisy, and the obvious move
+is to carry a compact map of that roughness and let the gradient speak in units
+of local uncertainty.
+
+The car does not carry one. A survey is only useful if the driver is driving the
+road being surveyed. Rescale every wheel and the corner the frame aims at is a
+corner that does not exist -- arrive perfectly and the map still says turn. On
+the real road the frame is the mountain's own leading shape, so when the mountain
+stops turning the driver does too. That is the whole reason to refuse the map:
+not weight, but the ability to stop.
+
+The projected EMA is what remains: enough memory to hold a line through
+vibration, light enough to answer the next corner.
 
 ```text
-V_ij ~= row_variance_i * column_variance_j / mean(row_variance)
-G_tilde = G / sqrt(V)
-G_tilde *= RMS(G)
-```
-
-The last line was learned the expensive way. Without RMS restoration, the map
-changed the units of the mountain. The basis turned by absurd angles while the
-polar differential downstream concealed the inflation. Every gauge agreed because
-every gauge was wrong together.
-
-Adafactor is the suspension: it reads the surface without carrying a full damper
-map for every patch of asphalt. The projected EMA: enough memory
-to hold a line through vibration, light enough to answer the next corner.
-
-```text
-Z_t = project_Q(G_tilde_t)
+Z_t = project_Q(G_t)
 M_t = 0.9 M_(t-1) + 0.1 Z_t
 ```
 

@@ -10,6 +10,7 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
+from .diagnostics import DiagnosticsAccumulator
 from .projector import ProjectionSide, SubspaceProjector
 from .stochastic import copy_stochastic_, wants_stochastic_rounding
 AURORA_PP_ITERATIONS = 1
@@ -41,8 +42,8 @@ class UsuiTrack(Optimizer):
     Matrix parameters keep optimizer state in projected space: an orthonormal
     basis plus a projected first moment. UsuiTrack accepts only 2D parameters;
     callers own any bias, norm, or other fallback optimizer separately. The
-    default one-state basis tracker conditions every full matrix gradient and
-    updates its live basis on the configured cadence.
+    default one-state basis tracker clips every full matrix gradient and updates
+    its live basis on the configured cadence.
     """
 
     def __init__(
@@ -54,8 +55,6 @@ class UsuiTrack(Optimizer):
         weight_decay: float = 0.0,
         rank: int = 32,
         side: ProjectionSide | str = ProjectionSide.AUTO,
-        adafactor_beta2: float = 0.99,
-        adafactor_eps: float = 1e-30,
         grad_clip_norm: float = 1.0,
         basis_update_interval: int = 1,
         consume_grad: bool = True,
@@ -73,10 +72,6 @@ class UsuiTrack(Optimizer):
             raise ValueError(f"weight_decay must be non-negative, got {weight_decay}")
         if rank <= 0:
             raise ValueError(f"rank must be positive, got {rank}")
-        if not 0 <= adafactor_beta2 < 1:
-            raise ValueError(f"adafactor_beta2 must be in [0, 1), got {adafactor_beta2}")
-        if adafactor_eps <= 0:
-            raise ValueError(f"adafactor_eps must be positive, got {adafactor_eps}")
         if grad_clip_norm <= 0:
             raise ValueError(f"grad_clip_norm must be positive, got {grad_clip_norm}")
         if basis_update_interval <= 0:
@@ -91,8 +86,6 @@ class UsuiTrack(Optimizer):
             weight_decay=weight_decay,
             rank=rank,
             side=ProjectionSide(side).value,
-            adafactor_beta2=adafactor_beta2,
-            adafactor_eps=adafactor_eps,
             grad_clip_norm=grad_clip_norm,
             consume_grad=consume_grad,
             compile_tensor_kernels=compile_tensor_kernels,
@@ -102,17 +95,20 @@ class UsuiTrack(Optimizer):
         )
         super().__init__(params, defaults)
         self._compiled_orthogonalize_update = torch.compile(UsuiTrack._orthogonalize_aurora_muon_tensor) if compile_tensor_kernels else None
-        self._compiled_prepare_tracker_adafactor_right = (
-            torch.compile(UsuiTrack._prepare_tracker_adafactor_right_tensors, dynamic=True)
+        self._compiled_prepare_tracker_right = (
+            torch.compile(UsuiTrack._prepare_tracker_right_tensors, dynamic=True)
             if compile_tensor_kernels
             else None
         )
-        self._compiled_prepare_tracker_adafactor_left = (
-            torch.compile(UsuiTrack._prepare_tracker_adafactor_left_tensors, dynamic=True)
+        self._compiled_prepare_tracker_left = (
+            torch.compile(UsuiTrack._prepare_tracker_left_tensors, dynamic=True)
             if compile_tensor_kernels
             else None
         )
         self._pending_matrix_updates: dict[Tensor, MatrixUpdate] = {}
+        self.diagnostics_enabled = False
+        self._diagnostics: DiagnosticsAccumulator | None = None
+        self._step_update_norm_sq: Tensor | None = None
         self._matrix_grad_hook_handles = []
         self._matrix_param_groups: dict[Tensor, dict] = {}
         self.release_matrix_grads = release_matrix_grads
@@ -183,7 +179,7 @@ class UsuiTrack(Optimizer):
     def zero_grad(self, set_to_none: bool = True) -> None:
         # A caller (an OOM-retry path, say) may need to bail out after prepare()
         # has already advanced moving-average state but before step() applied it.
-        # That advance cannot be undone: those parameters carry one Oja/Adafactor
+        # That advance cannot be undone: those parameters carry one Oja/moment
         # step that never reached the weights. Not good, not worth killing a run
         # over -- so warn and drop the pending work rather than raise.
         if self._pending_matrix_updates:
@@ -195,6 +191,92 @@ class UsuiTrack(Optimizer):
             )
         self._pending_matrix_updates.clear()
         super().zero_grad(set_to_none=set_to_none)
+
+    def _diagnostics_sink(self) -> DiagnosticsAccumulator | None:
+        """The live accumulator, or None when telemetry is off.
+
+        Every accumulation site goes through here and does nothing when the
+        result is None, so a run with diagnostics off pays one attribute read
+        per site and no device work at all.
+        """
+
+        if not self.diagnostics_enabled:
+            return None
+        if self._diagnostics is None:
+            self._diagnostics = DiagnosticsAccumulator()
+        return self._diagnostics
+
+    @torch.no_grad()
+    def pop_diagnostics(self) -> dict[str, float]:
+        """Telemetry accumulated since the last call, as a plain dict of floats.
+
+        Set ``diagnostics_enabled = True`` and call this on whatever cadence the
+        surrounding trainer already logs at -- every step is supported but not
+        the intent, since this is where the accumulated device tensors are read
+        back to the host. An empty dict means either telemetry is off or nothing
+        has happened since the last read, and is always safe to skip logging.
+
+        Means are over samples (matrix x step) since the last read; the two
+        counters are totals. What is here answers a specific question, in this
+        order of load-bearing-ness:
+
+        ``rotation_rad_sum``
+            How far the frame turned, as the sum of the per-plane angles of one
+            geodesic -- the tangent's nuclear norm times the step size. Not the
+            angle any single plane moves through. Falling is convergence; a
+            plateau at the ``MIN_BASIS_UPDATE_STEP`` floor means the schedule is
+            holding the tracker open rather than the tracker having settled.
+        ``tangent_concentration``
+            Where that motion went, in ``[1/r, 1]``: the fraction of the
+            tangent's energy in its leading direction. High means a confident
+            aim drifting; low means the frame is spinning on a near-isotropic
+            noise tail. Distinguishes a long smooth turn from churn, which
+            ``rotation_rad_sum`` alone cannot.
+        ``projected_grad_norm``, ``grad_to_moment_ratio``
+            Scale of the gradient inside the frame, and how much of
+            the moment is this batch rather than history. The ratio is against
+            the moment *after* this step's update, which sits at ``1/(1 - beta)``
+            on the first step and settles well below it once the moment has
+            history; it can spike when a fresh gradient cancels the moment it
+            just went into.
+        ``update_to_param_ratio``
+            Mean per-step weight motion against current weight norm. Flat
+            through healthy training; mostly useful for finding a sane learning
+            rate on an unfamiliar model.
+        ``nonfinite_grads``, ``eigh_jitter_retries``
+            Event counters for the two guards that are otherwise invisible: how
+            many incoming matrix gradients needed sanitizing, and how many
+            tangent eigendecompositions failed bare and needed a jittered retry.
+            Zero over a long run is the evidence that retires a guard.
+        """
+
+        accumulator = self._diagnostics
+        self._diagnostics = None
+        if accumulator is None or not accumulator:
+            return {}
+        result = accumulator.reduce()
+        update_norm = result.pop("update_norm", None)
+        if update_norm is not None:
+            param_norm = self._matrix_param_norm()
+            result["update_to_param_ratio"] = update_norm / param_norm if param_norm > 0 else float("nan")
+        return result
+
+    @torch.no_grad()
+    def _matrix_param_norm(self) -> float:
+        """Global norm of the parameters this optimizer owns.
+
+        A state quantity, not an accumulation, so it is measured here at read
+        time rather than swept every step.
+        """
+
+        squares = [
+            param.detach().float().pow(2).sum()
+            for group in self.param_groups
+            for param in group["params"]
+        ]
+        if not squares:
+            return 0.0
+        return float(torch.stack(squares).sum().sqrt())
 
     @torch.no_grad()
     def prepare(self, param: Tensor) -> None:
@@ -283,6 +365,7 @@ class UsuiTrack(Optimizer):
                 loss = closure()
 
         self._validate_step_inputs()
+        self._step_update_norm_sq = None
 
         for group in self.param_groups:
             matrix_updates = []
@@ -302,6 +385,14 @@ class UsuiTrack(Optimizer):
             self._apply_basis_updates(matrix_updates, group)
             self._apply_matrix_update_buckets(matrix_updates, group)
 
+        # One sample per step, not per matrix: the quantity that means something
+        # is the whole step's motion against the whole model's norm, so the
+        # per-matrix squares are summed here and rooted once.
+        diagnostics = self._diagnostics_sink()
+        if diagnostics is not None and self._step_update_norm_sq is not None:
+            diagnostics.add("update_norm", self._step_update_norm_sq.sqrt())
+        self._step_update_norm_sq = None
+
         self._pending_matrix_updates.clear()
         return loss
 
@@ -312,31 +403,29 @@ class UsuiTrack(Optimizer):
         if (
             projector.is_initialized
             and self._basis_update_due(group)
-            and state.get("adafactor_row_var") is not None
             and state.get("projected_exp_avg") is not None
         ):
             # Steady state, and after the first step this is every step at the
-            # default cadence: one fused kernel per side does clipping,
-            # Adafactor, the held-frame projection, the Oja tangent, and the
-            # moment update in a single pass.
-            return self._prepare_initialized_tracker_adafactor_update(p, grad, projector, state, group)
+            # default cadence: one fused kernel per side does clipping, the
+            # held-frame projection, the Oja tangent, and the moment update in a
+            # single pass.
+            return self._prepare_initialized_tracker_update(p, grad, projector, state, group)
 
         # Two cold cases are left, and neither wants a tangent: the first step,
         # which fits the frame rather than moving it, and a step where the basis
         # update is not due under basis_update_interval > 1.
         #
-        # Clipping happens on the RAW gradient, before Adafactor. A blip batch
-        # (grad norm spiking ~180x) otherwise poisons the factored second moment:
-        # grad_sq of the blip is ~30000x normal, and at beta2=0.99 that spike
-        # decays over ~100 steps, over-dampening whole gradient directions for the
-        # entire window -- the basis then tracks a starved residual and every
-        # later refresh adapts to the corruption. Observed: a single step-54 blip
-        # collapsed alignment for the whole back half of a 100-step run. A guard
-        # installed downstream cannot protect an upstream memory, which is why
-        # the projected-grad clip could not stop it and why grad_clip_norm has no
-        # off switch.
+        # Clipping happens on the RAW gradient, upstream of every consumer. A
+        # blip batch (grad norm spiking ~180x) otherwise reaches the frame and
+        # the moment at full size, and a basis that has adapted to one is
+        # corrupt for as long as it takes the tracker to turn back. Observed: a
+        # single step-54 blip collapsed alignment for the whole back half of a
+        # 100-step run. A guard installed downstream cannot protect upstream
+        # state, which is why the projected-grad clip could not stop it and why
+        # grad_clip_norm has no off switch.
+        diagnostics = self._diagnostics_sink()
+        self._record_incoming_grad_diagnostics(diagnostics, grad)
         grad, raw_grad_norm = self._sanitize_and_clip_grad_tensors(grad, float(group["grad_clip_norm"]))
-        grad = self._adafactor_dampen_full_grad(grad, group, state)
         if not projector.is_initialized:
             self._initialize_projector(projector, grad, state)
         projected_grad = projector.project(grad)
@@ -347,6 +436,7 @@ class UsuiTrack(Optimizer):
             projected_exp_avg = torch.zeros_like(projected_grad)
         projected_exp_avg.mul_(group["beta"]).add_(projected_grad, alpha=1.0 - group["beta"])
         state["projected_exp_avg"] = projected_exp_avg
+        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg)
 
         return MatrixUpdate(
             param=p,
@@ -357,7 +447,7 @@ class UsuiTrack(Optimizer):
             raw_grad_norm=raw_grad_norm,
         )
 
-    def _prepare_initialized_tracker_adafactor_update(
+    def _prepare_initialized_tracker_update(
         self,
         p: Tensor,
         grad: Tensor,
@@ -365,36 +455,28 @@ class UsuiTrack(Optimizer):
         state: dict,
         group: dict,
     ) -> MatrixUpdate:
-        adafactor_step = state.get("adafactor_step", 0) + 1
-        state["adafactor_step"] = adafactor_step
+        diagnostics = self._diagnostics_sink()
+        self._record_incoming_grad_diagnostics(diagnostics, grad)
         state["step"] = state.get("step", 0) + 1
         basis = projector.basis
         assert basis is not None
-        side = projector._basis_side()
+        is_right = projector._basis_side() is ProjectionSide.RIGHT
         prepare = (
-            self._compiled_prepare_tracker_adafactor_right
-            if side is ProjectionSide.RIGHT
-            else self._compiled_prepare_tracker_adafactor_left
+            self._compiled_prepare_tracker_right if is_right else self._compiled_prepare_tracker_left
+        ) or (
+            self._prepare_tracker_right_tensors if is_right else self._prepare_tracker_left_tensors
         )
-        if prepare is None:
-            prepare = (
-                self._prepare_tracker_adafactor_right_tensors
-                if side is ProjectionSide.RIGHT
-                else self._prepare_tracker_adafactor_left_tensors
-            )
-        _conditioned_grad, oja_tangent, raw_grad_norm = prepare(
+        projected_grad, oja_tangent, raw_grad_norm = prepare(
             grad,
             basis,
-            state["adafactor_row_var"],
-            state["adafactor_col_var"],
             state["projected_exp_avg"],
-            adafactor_step,
             float(group["grad_clip_norm"]),
-            float(group["adafactor_beta2"]),
-            float(group["adafactor_eps"]),
             float(group["beta"]),
         )
         projected_exp_avg = state["projected_exp_avg"]
+        # Deliberately outside the compiled kernel: measuring in there would put
+        # the reductions in the graph whether or not anyone asked for them.
+        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg)
 
         return MatrixUpdate(
             param=p,
@@ -406,29 +488,51 @@ class UsuiTrack(Optimizer):
         )
 
     @staticmethod
-    def _prepare_tracker_adafactor_right_tensors(
+    def _record_incoming_grad_diagnostics(diagnostics: DiagnosticsAccumulator | None, grad: Tensor) -> None:
+        """Count matrix gradients that arrive non-finite.
+
+        Stays a device tensor: an `isfinite().all()` read here would be a sync
+        on the hot path, which is exactly what the sanitizer avoids being.
+        """
+
+        if diagnostics is None:
+            return
+        diagnostics.add_total("nonfinite_grads", (~torch.isfinite(grad)).any().float())
+
+    @staticmethod
+    def _record_projection_diagnostics(
+        diagnostics: DiagnosticsAccumulator | None,
+        projected_grad: Tensor,
+        projected_exp_avg: Tensor | None,
+    ) -> None:
+        if diagnostics is None:
+            return
+        projected_grad_norm = projected_grad.float().norm()
+        diagnostics.add("projected_grad_norm", projected_grad_norm)
+        if projected_exp_avg is not None:
+            diagnostics.add(
+                "grad_to_moment_ratio",
+                projected_grad_norm / projected_exp_avg.float().norm().clamp_min(1e-12),
+            )
+
+    @staticmethod
+    def _prepare_tracker_right_tensors(
         grad: Tensor,
         basis: Tensor,
-        row_var: Tensor,
-        col_var: Tensor,
         projected_exp_avg: Tensor,
-        adafactor_step: int,
         grad_clip_norm: float,
-        adafactor_beta2: float,
-        adafactor_eps: float,
         beta: float,
     ) -> tuple[Tensor, Tensor, Tensor]:
+        """One fused pass: clip, project in the held frame, aim, accumulate.
+
+        Both consumers -- the Oja tangent that steers the basis and the
+        projected moment that becomes the update -- read the same raw clipped
+        gradient, so the held-frame projection is computed once and shared.
+        """
+
         grad, raw_grad_norm = UsuiTrack._sanitize_and_clip_grad_tensors(grad, grad_clip_norm)
-        conditioned_grad = UsuiTrack._adafactor_dampen_tensors(
-            grad,
-            row_var,
-            col_var,
-            adafactor_step,
-            adafactor_beta2,
-            adafactor_eps,
-        )
-        projected_grad = conditioned_grad @ basis.mT
-        work = conditioned_grad.float()
+        projected_grad = grad @ basis.mT
+        work = grad.float()
         frame = basis.float().mT
         low = projected_grad.float()
         action = work.mT @ low
@@ -437,32 +541,21 @@ class UsuiTrack(Optimizer):
         tangent = action - frame @ rayleigh
         tangent = tangent / rayleigh.diagonal().mean().clamp_min(1e-12)
         projected_exp_avg.mul_(beta).add_(projected_grad, alpha=1.0 - beta)
-        return conditioned_grad, tangent, raw_grad_norm
+        return projected_grad, tangent, raw_grad_norm
 
     @staticmethod
-    def _prepare_tracker_adafactor_left_tensors(
+    def _prepare_tracker_left_tensors(
         grad: Tensor,
         basis: Tensor,
-        row_var: Tensor,
-        col_var: Tensor,
         projected_exp_avg: Tensor,
-        adafactor_step: int,
         grad_clip_norm: float,
-        adafactor_beta2: float,
-        adafactor_eps: float,
         beta: float,
     ) -> tuple[Tensor, Tensor, Tensor]:
+        """Left-side twin of `_prepare_tracker_right_tensors`."""
+
         grad, raw_grad_norm = UsuiTrack._sanitize_and_clip_grad_tensors(grad, grad_clip_norm)
-        conditioned_grad = UsuiTrack._adafactor_dampen_tensors(
-            grad,
-            row_var,
-            col_var,
-            adafactor_step,
-            adafactor_beta2,
-            adafactor_eps,
-        )
-        projected_grad = basis.mT @ conditioned_grad
-        work = conditioned_grad.float()
+        projected_grad = basis.mT @ grad
+        work = grad.float()
         frame = basis.float()
         low = projected_grad.float()
         action = work @ low.mT
@@ -471,7 +564,7 @@ class UsuiTrack(Optimizer):
         tangent = action - frame @ rayleigh
         tangent = tangent / rayleigh.diagonal().mean().clamp_min(1e-12)
         projected_exp_avg.mul_(beta).add_(projected_grad, alpha=1.0 - beta)
-        return conditioned_grad, tangent, raw_grad_norm
+        return projected_grad, tangent, raw_grad_norm
 
     @staticmethod
     def _sanitize_and_clip_grad_tensors(grad: Tensor, grad_clip_norm: float) -> tuple[Tensor, Tensor]:
@@ -479,55 +572,6 @@ class UsuiTrack(Optimizer):
         raw_grad_norm = grad.float().norm().detach()
         clip_scale = (grad.new_tensor(grad_clip_norm) / raw_grad_norm.clamp_min(1e-12)).clamp(max=1.0)
         return grad.mul(clip_scale), raw_grad_norm
-
-    @staticmethod
-    def _adafactor_dampen_tensors(
-        grad: Tensor,
-        row_var: Tensor,
-        col_var: Tensor,
-        step: int,
-        beta2: float,
-        eps: float,
-    ) -> Tensor:
-        grad32 = grad.float()
-        grad_sq = grad32.square() + eps
-        row_var.mul_(beta2).add_(grad_sq.mean(dim=1), alpha=1.0 - beta2)
-        col_var.mul_(beta2).add_(grad_sq.mean(dim=0), alpha=1.0 - beta2)
-        bias_correction = 1.0 - beta2**step
-        row_hat = row_var / bias_correction
-        col_hat = col_var / bias_correction
-        # Reconstruct the inverse factored RMS as two broadcast vectors rather
-        # than a second matrix-sized tensor, then restore the raw gradient RMS.
-        # The latter keeps Oja's quadratic covariance scale comparable to the
-        # unconditioned gradient while retaining Adafactor's SNR reweighting.
-        mean_row = row_hat.mean().clamp_min(eps)
-        row_scale = (mean_row / row_hat.clamp_min(eps)).sqrt().unsqueeze(1)
-        col_scale = col_hat.clamp_min(eps).rsqrt().unsqueeze(0)
-        dampened = grad32 * row_scale * col_scale
-        grad_rms = grad32.square().mean().sqrt().clamp_min(eps)
-        return (dampened * grad_rms).to(dtype=grad.dtype)
-
-    @staticmethod
-    def _adafactor_dampen_full_grad(grad: Tensor, group: dict, state: dict) -> Tensor:
-        """Adafactor-style row/col factored second moment on the full gradient,
-        applied before basis tracking and before projection so the same dampened
-        gradient feeds both consumers, then still passed through the same
-        first-moment EMA as ema mode.
-        """
-
-        beta2 = group["adafactor_beta2"]
-        eps = group["adafactor_eps"]
-        step = state.get("adafactor_step", 0) + 1
-        state["adafactor_step"] = step
-
-        row_var = state.get("adafactor_row_var")
-        col_var = state.get("adafactor_col_var")
-        if row_var is None:
-            row_var = torch.zeros(grad.shape[0], device=grad.device, dtype=torch.float32)
-            col_var = torch.zeros(grad.shape[1], device=grad.device, dtype=torch.float32)
-        state["adafactor_row_var"] = row_var
-        state["adafactor_col_var"] = col_var
-        return UsuiTrack._adafactor_dampen_tensors(grad, row_var, col_var, step, beta2, eps)
 
     def _apply_matrix_update_buckets(self, entries: list[MatrixUpdate], group: dict) -> None:
         if not entries:
@@ -576,21 +620,14 @@ class UsuiTrack(Optimizer):
             buckets.setdefault(key, []).append(entry)
 
         step_size = self._basis_update_step_size(group)
+        diagnostics = self._diagnostics_sink()
         for bucket_entries in buckets.values():
             tangents = [entry.oja_tangent for entry in bucket_entries]
             assert all(tangent is not None for tangent in tangents)
             grams = torch.stack([tangent.mT @ tangent for tangent in tangents if tangent is not None])
             grams = 0.5 * (grams + grams.mT)
-            # A near-zero-curvature direction can leave the tangent's Gram with
-            # an extreme eigenvalue spread that the batched eigh solver will not
-            # converge on. A small relative Tikhonov jitter fixes the
-            # conditioning.
-            rank_dim = grams.shape[-1]
-            trace = grams.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-12)
-            jitter = (1e-6 * trace / rank_dim).view(-1, 1, 1)
-            eye = torch.eye(rank_dim, device=grams.device, dtype=grams.dtype)
-            grams = grams + jitter * eye
-            eigenvalues, eigenvectors = torch.linalg.eigh(grams)
+            eigenvalues, eigenvectors = self._tangent_gram_eigh(grams, diagnostics)
+            self._record_basis_motion_diagnostics(diagnostics, eigenvalues, step_size)
             geometry_buckets: dict[tuple, list[int]] = {}
             for index, entry in enumerate(bucket_entries):
                 tangent = entry.oja_tangent
@@ -621,6 +658,57 @@ class UsuiTrack(Optimizer):
                     state["projection_side_is_right"] = side is ProjectionSide.RIGHT
 
     @staticmethod
+    def _tangent_gram_eigh(grams: Tensor, diagnostics: DiagnosticsAccumulator | None) -> tuple[Tensor, Tensor]:
+        """Eigendecompose the tangent Grams, jittering only if the bare call fails.
+
+        A near-zero-curvature direction can leave a tangent Gram with an
+        eigenvalue spread the batched solver will not converge on, and a small
+        relative Tikhonov jitter fixes that. It used to be applied
+        unconditionally, which shifted every eigenvalue on every basis update to
+        pay for a failure nobody had measured. This is the same
+        try-then-jitter shape `_side_gram_eigh` already uses for the initial
+        fit; `eigh` checks its convergence info on the host anyway, so the
+        failure is visible here without adding a sync of our own.
+        """
+
+        try:
+            return torch.linalg.eigh(grams)
+        except RuntimeError:
+            rank_dim = grams.shape[-1]
+            trace = grams.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-12)
+            jitter = (1e-6 * trace / rank_dim).view(-1, 1, 1)
+            eye = torch.eye(rank_dim, device=grams.device, dtype=grams.dtype)
+            if diagnostics is not None:
+                diagnostics.bump("eigh_jitter_retries")
+            return torch.linalg.eigh(grams + jitter * eye)
+
+    @staticmethod
+    def _record_basis_motion_diagnostics(
+        diagnostics: DiagnosticsAccumulator | None,
+        eigenvalues: Tensor,
+        step_size: float,
+    ) -> None:
+        """How far the frame turns, and how concentrated that turn is.
+
+        Both come free from the eigenvalues the geodesic already needs. The
+        angle is the sum of the per-plane rotations -- the tangent's nuclear
+        norm scaled by the step size -- so it is a measure of total motion
+        across all `r` planes, not of how far any one plane moves.
+        Concentration, the leading eigenvalue's share of the trace, is what
+        separates a confident drift from a frame spinning on its noise tail:
+        the same total angle can be either.
+        """
+
+        if diagnostics is None:
+            return
+        spectrum = eigenvalues.clamp_min(0.0)
+        rotation = step_size * spectrum.sqrt().sum(dim=-1)
+        concentration = spectrum.amax(dim=-1) / spectrum.sum(dim=-1).clamp_min(1e-12)
+        samples = int(spectrum.shape[0])
+        diagnostics.add("rotation_rad_sum", rotation.sum(), count=samples)
+        diagnostics.add("tangent_concentration", concentration.sum(), count=samples)
+
+    @staticmethod
     def _basis_update_step_size(group: dict) -> float:
         return max(MIN_BASIS_UPDATE_STEP, 1.0 / group["basis_update_step"])
 
@@ -635,6 +723,7 @@ class UsuiTrack(Optimizer):
 
         if not stochastic:
             update = entry.projector.project_back(update_hat).to(dtype=param.dtype)
+            self._record_update_norm(update, group["lr"])
             if decay is not None:
                 param.mul_(decay)
             param.add_(update, alpha=-group["lr"])
@@ -648,8 +737,25 @@ class UsuiTrack(Optimizer):
         work = param.float()
         if decay is not None:
             work.mul_(decay)
-        work.add_(entry.projector.project_back(update_hat.float()), alpha=-group["lr"])
+        update = entry.projector.project_back(update_hat.float())
+        self._record_update_norm(update, group["lr"])
+        work.add_(update, alpha=-group["lr"])
         copy_stochastic_(param, work)
+
+    def _record_update_norm(self, update: Tensor, lr: float) -> None:
+        """Accumulate this matrix's contribution to the step's total motion.
+
+        Kept as a running square across the step and rooted once in `step()`, so
+        the reported number is the norm of the whole step's update rather than a
+        mean over matrices of unrelated sizes.
+        """
+
+        if self._diagnostics_sink() is None:
+            return
+        contribution = (update.float().norm() * lr).square().detach()
+        self._step_update_norm_sq = (
+            contribution if self._step_update_norm_sq is None else self._step_update_norm_sq + contribution
+        )
 
     def _initialize_projector(
         self,

@@ -54,7 +54,7 @@ class SubspaceProjector:
         * Narrow modules are bottlenecks. They carry the whole residual stream
           through a small waist, so a large update there destabilizes every
           block downstream of it. Limiting their rank limits how much the
-          optimizer can move them per step, independently of conditioning.
+          optimizer can move them per step, independently of rank.
 
         Rank is a configured hyperparameter picked by parameter size, the same
         way a LoRA rank is. This is a per-parameter ceiling on that choice, not
