@@ -400,9 +400,9 @@ plain dict of floats -- no wandb, no trainer, no assumptions about the caller.
 Measurements accumulate on-device every step; the single device-to-host read
 happens inside `pop_diagnostics()`. A drained value is therefore the mean over
 the interval since the last drain, which is why the intended cadence is the
-caller's logging cadence rather than every step. Non-finite gradient counts and
-`eigh` jitter retries are reported as totals over the interval instead of means,
-because a rare event averaged against a long quiet interval reads as zero.
+caller's logging cadence rather than every step. `nonfinite_grads` is reported as
+a total over the interval rather than a mean, because a rare event averaged
+against a long quiet interval reads as zero.
 
 | key | what it measures |
 |---|---|
@@ -412,17 +412,17 @@ because a rare event averaged against a long quiet interval reads as zero.
 | `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
-| `eigh_jitter_retries` | tangent eigendecompositions that failed bare and needed the jittered retry |
 
 `rotation_rad_sum` and `tangent_concentration` are read from the eigenvalues the
 geodesic already computes, so they cost nothing beyond two reductions. The pair
 is meant to be read together: the same total rotation is a confident drift when
 concentration is high and a frame spinning on its noise tail when it is low.
 
-The Tikhonov jitter behind `eigh_jitter_retries` is a fallback, not a toll. The
-tangent Gram is decomposed bare; only if that fails does a relative jitter get
-applied and the retry counted -- the same shape `_side_gram_eigh` uses for the
-initial fit.
+The tangent Gram is decomposed bare. There is no jitter and no retry: a failing
+`eigh` fails, because its result steers the frame and a silently rescued
+decomposition is worse than a stopped run. The initial fit in `_side_gram_eigh`
+keeps its try-then-jitter fallback -- different matrix, once per parameter rather
+than once per step.
 
 
 ## Decisions and reasons

@@ -325,16 +325,6 @@ def test_diagnostics_do_not_change_the_trajectory():
         assert torch.equal(quiet_param, loud_param)
 
 
-def test_tangent_eigh_does_not_jitter_on_healthy_gradients():
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics_enabled = True
-    _run(params, optimizer, 5)
-
-    # The Tikhonov jitter is a fallback now, not a toll on every basis update.
-    assert "eigh_jitter_retries" not in optimizer.pop_diagnostics()
-
-
 def test_no_second_moment_state_is_allocated():
     """UsuiTrack keeps a basis and a projected first moment. Nothing else."""
     torch.manual_seed(0)

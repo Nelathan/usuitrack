@@ -55,18 +55,16 @@ class DiagnosticsAccumulator:
     Means are over samples, not over steps: a quantity measured once per matrix
     per step contributes one sample per matrix per step, so a run's mean weights
     every tracked matrix equally regardless of how many steps it appeared in.
-    Counters (``bump``) are plain host-side integers, already known without a
-    transfer, and are reported as totals since the last read.
+    ``add_total`` is the exception, for rare-event counts an average would hide.
     """
 
     def __init__(self) -> None:
         self._sums: dict[str, Tensor] = {}
         self._counts: defaultdict[str, int] = defaultdict(int)
-        self._counters: defaultdict[str, int] = defaultdict(int)
         self._report_as_total: set[str] = set()
 
     def __bool__(self) -> bool:
-        return bool(self._sums or self._counters)
+        return bool(self._sums)
 
     def add(self, name: str, value: Tensor, count: int = 1) -> None:
         """Add one (or ``count`` pre-summed) samples of a scalar measurement."""
@@ -91,11 +89,6 @@ class DiagnosticsAccumulator:
         self.add(name, value)
         self._report_as_total.add(name)
 
-    def bump(self, name: str, amount: int = 1) -> None:
-        """Add to a host-side event counter (retries, failures, and the like)."""
-
-        self._counters[name] += amount
-
     def reduce(self) -> dict[str, float]:
         """Mean of every accumulated measurement plus every counter total.
 
@@ -116,6 +109,4 @@ class DiagnosticsAccumulator:
                     continue
                 count = self._counts[name]
                 result[name] = value / count if count else float("nan")
-        for name, count in self._counters.items():
-            result[name] = float(count)
         return result

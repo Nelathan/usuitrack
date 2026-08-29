@@ -216,8 +216,8 @@ class UsuiTrack(Optimizer):
         back to the host. An empty dict means either telemetry is off or nothing
         has happened since the last read, and is always safe to skip logging.
 
-        Means are over samples (matrix x step) since the last read; the two
-        counters are totals. What is here answers a specific question, in this
+        Means are over samples (matrix x step) since the last read;
+        ``nonfinite_grads`` is a total. What is here answers a specific question, in this
         order of load-bearing-ness:
 
         ``rotation_rad_sum``
@@ -243,11 +243,10 @@ class UsuiTrack(Optimizer):
             Mean per-step weight motion against current weight norm. Flat
             through healthy training; mostly useful for finding a sane learning
             rate on an unfamiliar model.
-        ``nonfinite_grads``, ``eigh_jitter_retries``
-            Event counters for the two guards that are otherwise invisible: how
-            many incoming matrix gradients needed sanitizing, and how many
-            tangent eigendecompositions failed bare and needed a jittered retry.
-            Zero over a long run is the evidence that retires a guard.
+        ``nonfinite_grads``
+            How many incoming matrix gradients arrived non-finite and were
+            sanitized at the clip. This is the one guard left on the matrix path,
+            and this counter is what would justify removing it too.
         """
 
         accumulator = self._diagnostics
@@ -608,14 +607,6 @@ class UsuiTrack(Optimizer):
         for entry in pending:
             tangent = entry.oja_tangent
             assert tangent is not None
-            # Sanitize once, here, where every tangent producer converges --
-            # the projector method and both fused kernels. A non-finite tangent
-            # otherwise reaches the geodesic through `tangent @ eigenvectors`
-            # even when the Gram it built was cleaned up, because the two are
-            # separate reads of the same tensor. Sync-free, like the gradient
-            # guard in _prepare_matrix_update.
-            tangent = torch.nan_to_num(tangent, nan=0.0, posinf=0.0, neginf=0.0)
-            entry.oja_tangent = tangent
             key = (tangent.device, tangent.dtype, tangent.shape[1])
             buckets.setdefault(key, []).append(entry)
 
@@ -626,7 +617,12 @@ class UsuiTrack(Optimizer):
             assert all(tangent is not None for tangent in tangents)
             grams = torch.stack([tangent.mT @ tangent for tangent in tangents if tangent is not None])
             grams = 0.5 * (grams + grams.mT)
-            eigenvalues, eigenvectors = self._tangent_gram_eigh(grams, diagnostics)
+            # Bare, deliberately. A relative Tikhonov jitter used to be applied
+            # here to rescue a solver failure, and across two models, two ranks
+            # and ~3300 basis updates it never once fired. A failing eigh now
+            # fails, which is what you want from a decomposition whose result
+            # steers the frame.
+            eigenvalues, eigenvectors = torch.linalg.eigh(grams)
             self._record_basis_motion_diagnostics(diagnostics, eigenvalues, step_size)
             geometry_buckets: dict[tuple, list[int]] = {}
             for index, entry in enumerate(bucket_entries):
@@ -656,31 +652,6 @@ class UsuiTrack(Optimizer):
                     state = self.state[entry.param]
                     state["basis"] = entry.projector.basis
                     state["projection_side_is_right"] = side is ProjectionSide.RIGHT
-
-    @staticmethod
-    def _tangent_gram_eigh(grams: Tensor, diagnostics: DiagnosticsAccumulator | None) -> tuple[Tensor, Tensor]:
-        """Eigendecompose the tangent Grams, jittering only if the bare call fails.
-
-        A near-zero-curvature direction can leave a tangent Gram with an
-        eigenvalue spread the batched solver will not converge on, and a small
-        relative Tikhonov jitter fixes that. It used to be applied
-        unconditionally, which shifted every eigenvalue on every basis update to
-        pay for a failure nobody had measured. This is the same
-        try-then-jitter shape `_side_gram_eigh` already uses for the initial
-        fit; `eigh` checks its convergence info on the host anyway, so the
-        failure is visible here without adding a sync of our own.
-        """
-
-        try:
-            return torch.linalg.eigh(grams)
-        except RuntimeError:
-            rank_dim = grams.shape[-1]
-            trace = grams.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-12)
-            jitter = (1e-6 * trace / rank_dim).view(-1, 1, 1)
-            eye = torch.eye(rank_dim, device=grams.device, dtype=grams.dtype)
-            if diagnostics is not None:
-                diagnostics.bump("eigh_jitter_retries")
-            return torch.linalg.eigh(grams + jitter * eye)
 
     @staticmethod
     def _record_basis_motion_diagnostics(
