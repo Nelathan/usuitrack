@@ -422,8 +422,16 @@ class UsuiTrack(Optimizer):
                 group["matrix_step"] += 1
                 if basis_update_due:
                     group["basis_update_step"] += 1
-            self._apply_basis_updates(matrix_updates, group)
+            # Weights first, frame second. Everything in this step -- the
+            # held-frame projection, the Oja tangent, and the lift back -- must
+            # see the same frame `Q_t`. Moving the frame first meant the update
+            # was projected down through `Q_t` and lifted back through
+            # `Q_{t+1}`, so every step applied its own gradient rotated by
+            # however far the tracker had just turned. History is unaffected:
+            # the moment is read next step in the moved frame, where identity
+            # transport is exact because the geodesic is a rigid rotation.
             self._apply_matrix_update_buckets(matrix_updates, group)
+            self._apply_basis_updates(matrix_updates, group)
 
         # One sample per step, not per matrix: the quantity that means something
         # is the whole step's motion against the whole model's norm, so the

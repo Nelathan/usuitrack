@@ -235,6 +235,14 @@ There is no EMA bias correction.
 
 ### 6. Transport momentum through frame motion
 
+The whole step reads one frame. The held frame `Q_t` supplies the projection,
+the Oja tangent, and the lift back to parameter space; the geodesic runs after
+the parameter update, so `Q_{t+1}` is never used to lift an update that `Q_t`
+measured. Ordering the geodesic first would rotate every step's own gradient by
+however far the tracker had just turned -- a systematic error scaling with the
+step size, and one that falls entirely on the current gradient rather than on
+the accumulated history it is correct for.
+
 The geodesic chooses an ambient rotation `R` with `Q_+ = RQ`. UsuiTrack defines
 momentum as moving with that frame:
 

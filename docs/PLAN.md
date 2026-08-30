@@ -221,6 +221,51 @@ residual *outside* it, so this is not a refutation -- but whether persistent
 structure exists outside the frame is now the thing to measure before A1 is
 built, not after.
 
+### The beta sweep: 0.95 was two to four times too long
+
+Five arms, rank 128, LR `2e-4`, 1k steps, one variable apart. Run-to-run noise
+was measured at the same time -- two independent `beta=0.95` runs on *different
+code revisions* agreed to `3e-4` on target and `2e-3` on source, which also
+confirms the guard deletion and the diagnostics are trajectory-neutral in a real
+run, not just in unit tests. Every difference below is 10-60x that floor.
+
+| beta | target | source | memory | rot | lag | `g/m` | iid `g/m` | excess |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.0 | 1.6889 | **3.0233** | 1 | 0.7428 | 0.0788 | 1.000 | 1.000 | -- |
+| 0.5 | 1.6735 | 3.0388 | 2 | 0.7488 | 0.0779 | 1.754 | 1.732 | +1.3% |
+| 0.9 | **1.6712** | 3.0826 | 10 | 0.7608 | 0.0763 | 4.490 | 4.359 | +3.0% |
+| 0.95 | 1.6843 | 3.1137 | 20 | 0.7685 | 0.0747 | 6.440 | 6.245 | +3.1% |
+| 0.98 | 1.7182 | 3.1899 | 50 | 0.7904 | 0.0743 | 10.442 | 9.950 | +4.9% |
+
+**The shipped default was dominated on both axes.** Target bottoms at `0.9` and
+degrades at an accelerating rate past it; source is monotone in `beta`
+throughout, so `beta=0` owns retention. `0.5` is the better trade -- it gives up
+`0.0023` of target for `0.0438` of retention against `0.9`, and beats `0.95` by
+`0.011` and `0.075`.
+
+**The moment earns its place, but barely.** `beta=0` is 59 sigma worse on target
+than `0.9` -- so it is not deletable on a technicality -- yet against `0.5` it is
+a near-perfect swap: `0.0154` worse target for `0.0155` better source. In
+aggregate a wash. Whether that is worth a state tensor is a values question, not
+a measurement one. Note the state is small by design, so this is not a VRAM
+argument in either direction.
+
+**Frame smear shows up as a measurable residue, which is the real result.**
+`g/m` sits *above* the iid prediction `sqrt((1+beta)/(1-beta))` at every `beta`,
+and the excess grows monotonically with memory length: +1.3%, +3.0%, +3.1%,
++4.9%. A persistent mean gradient would push the ratio the other way. What pushes
+it this way is the frame rotating under the moment, so old coordinates partially
+cancel and `||M||` falls below what iid noise alone predicts. Two further
+signatures agree: rotation *rises* with `beta` while lag *falls*, so a long
+memory makes the frame churn more and travel less. Churn, as rotation per unit
+net displacement, is lowest with no moment at all: 9.43 at `beta=0` against 10.64
+at `0.98`.
+
+**Consequence for method, not just defaults.** Tracker work now runs with
+`beta=0`. It removes the only other stateful component, eliminates smear by
+construction, and gives the least-churning configuration available -- so what the
+lag instrument reads is the tracker and nothing else.
+
 ### Moment memory is capped by frame rotation, not by beta
 
 The moment's coordinates live in a frame that rotates under them. Transport is
@@ -253,6 +298,49 @@ NS a second moment can only reweight directions before they are normalized, whic
 is second order. P1's note that "if a second moment is needed the shape is a
 projected one at `[m,r]`" stands as a fallback, but the case for needing one is
 weaker after this measurement, not stronger.
+
+### Where the tracker actually stands, and why it is not deletable
+
+The step-size sweep (constant `eta`, no moment, seeded, 1k steps, `eta` from
+frozen to `0.3`) settled several things and one of them is a correction.
+
+**Tracking does real geometric work.** A frozen frame loses essentially all its
+alignment within 200 steps -- `sigma` 50 -> 91 -> 98 -> **101, saturated** -- while
+tracking at `0.01` holds 74 and is still improving at step 1000. That is a 26%
+better residual, sustained.
+
+**No step size recovers the quality of the initial fit.** EIGH hands the tracker
+`sigma ~ 50`. Every arm, at every step size across a 100x range, rises to 80+ and
+then settles at best to 74. `0.003` and `0.01` are indistinguishable; above `0.01`
+alignment degrades monotonically and motion efficiency collapses (net displacement
+per unit turning falls 7.5x from `eta=0.01` to `0.3`). **The aim, not the step
+size, is what limits the tracker** -- a bad formula run slowly is still a bad
+formula.
+
+**Loss barely notices any of it.** The entire 100x sweep spans `0.0057` of target
+loss. Frozen costs only `0.0038` against the best tracked arm -- the same
+magnitude as the Adafactor effect P1 deleted. Source is flat to slightly better
+frozen.
+
+**That last number does not argue for deleting tracking, and reading it that way
+was an error of criterion.** A frozen basis confines every weight update to one
+rank-128 subspace forever; the rest of the parameter space is unreachable. For
+continual pretraining -- the product target -- that is disqualifying whatever a
+1k-step loss says. Loss at this horizon cannot see a capability constraint.
+Periodic EIGH refitting is the fallback if Oja tracking cannot be fixed.
+
+**What it does say is that update quality is robust to subspace quality.** Even a
+badly aligned frame produces good updates, which is a real and useful property --
+but it means loss is a blunt instrument for tracker work, and tracker changes
+must be judged on `sigma`, lag, and capture rather than on loss deltas that sit
+near the noise floor.
+
+**Open, and the first thing to run when experiments resume: random basis
+initialization.** If Oja from a random frame converges to the same `sigma ~ 74`
+it settles at from an EIGH start, then 74 is Oja's own equilibrium and EIGH
+initialization is simply a better place than its aim can hold. If random
+converges somewhere worse, the aim cannot acquire at all. Either answer localizes
+the defect.
 
 ### What is missing before any of this can be judged
 
