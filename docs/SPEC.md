@@ -117,9 +117,11 @@ default,
 $$G_c=S(G)\min\left(1,\frac{c}{\max(\|S(G)\|_F,10^{-12})}\right).$$
 
 This occurs before all matrix consumers, and there is no off switch: `c` has no
-`None`. Clipping the raw gradient is what protects every persistent memory
-downstream of it -- the frame and the projected moment -- and a guard installed
-later cannot protect an earlier one. A single blip batch (grad norm spiking
+`None`. Clipping the raw gradient protects the projected moment, which is linear
+in `G` and accumulates, and a guard installed later cannot protect an earlier
+memory. It does **not** protect the frame: the Oja tangent is exactly invariant
+to a uniform rescale of the gradient (see step 4), so the clip changes basis
+motion by nothing at all. A single blip batch (grad norm spiking
 ~180x) otherwise reaches both at full size, and a frame that has turned toward
 one is wrong for as long as it takes the tracker to turn back.
 
@@ -146,16 +148,16 @@ Gram.
 
 Using the held frame before the current Oja move,
 
-$$Z_t=\Pi_{Q_t}(\widetilde G_t).$$
+$$Z_t=\Pi_{Q_t}(G_{c,t}).$$
 
 ### 4. Track with one-state Oja
 
 After EIGH initialization, the live frame updates on the configured basis-update
-cadence (default every conditioned full gradient). Reuse the held-frame
-projection to form the covariance action:
+cadence (default every full gradient). Reuse the held-frame projection to form
+the covariance action:
 
-$$A=\widetilde G^\top Z\quad\text{(right)},\qquad
-A=\widetilde GZ^\top\quad\text{(left)},$$
+$$A=G_c^\top Z\quad\text{(right)},\qquad
+A=G_cZ^\top\quad\text{(left)},$$
 
 and form the symmetrized Rayleigh matrix and horizontal tangent
 
@@ -166,21 +168,44 @@ The denominator is floored at `1e-12`. With
 
 $$\Delta^\top\Delta=V\operatorname{diag}(\sigma_i^2)V^\top,$$
 
-the exact full-rank Grassmann step uses
+the exact full-rank Grassmann step uses a constant
 
-$$\eta_t=\max(0.01, 1/t),$$
+$$\eta=0.01.$$
 
-where `t` counts basis updates, including EIGH initialization. Thus the first
-geodesic uses `1/2`. With `basis_update_interval=k`, phase one still runs for
-every matrix gradient while geodesics occur only on matrix steps divisible by
-`k`; `t` still counts only basis updates. The released harmonic schedule reaches
-its steady `.01` floor at basis update 100. The frame update is
+It is not scheduled. A `max(0.01, 1/t)` anneal previously sat here, answering a
+problem that no longer exists: while an upstream factored second moment warmed
+up, the Gram whose eigenspace the tracker targets was itself shifting, so the
+frame chased a moving target and a hot start was the correct compensation. The
+target is now the leading eigenspace of `G_c^T G_c` from the first step and moves
+only as the model does.
 
-$$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta_t\sigma_i))
+Removing the schedule also makes the tracker observable. `sigma` already
+self-anneals -- a poorly fitted frame gives a large residual and turns hard, a
+well-fitted one settles -- so a decaying schedule on top of it made frame motion
+the product of two annealing terms, and no reading could separate "the tracker
+settled" from "the clock ran out". With a constant step, `rotation_rad_sum` is
+`sigma` up to that constant. EIGH initialization already places the frame on the
+first gradient's leading eigenspace rather than at random, so the geodesic
+maintains a fit rather than searching for one. With
+`basis_update_interval=k`, phase one still runs for every matrix gradient while
+geodesics occur only on matrix steps divisible by `k`. The frame update is
+
+$$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta\sigma_i))
 +(\Delta V)\operatorname{diag}
-\left(\frac{\sin(\eta_t\sigma_i)}{\sigma_i}\right)\right]V^\top.$$
+\left(\frac{\sin(\eta\sigma_i)}{\sigma_i}\right)\right]V^\top.$$
 
-The zero-singular-value limit is `sin(eta_t sigma) / sigma -> eta_t`.
+The zero-singular-value limit is `sin(eta sigma) / sigma -> eta`.
+
+**`sigma` is a contrast ratio, not a magnitude.** Both `A` and `R` are quadratic
+in the gradient, so the division by `mean(diag R)` cancels gradient scale
+exactly: rescaling `G_c` by any constant leaves `Delta`, every `sigma_i`, and the
+frame update bit-identical (verified across a 1000x range). What `sigma`
+measures is the out-of-frame coupling against the mean in-frame energy per
+plane. It is therefore already scale-free in the gradient, and unaffected by
+where `grad_clip_norm` sits. It is *not* rank-free: it is a nuclear norm over
+`r` planes and grows roughly linearly in `r` (~37.6 at rank 64 against ~80 at
+rank 128 on the same problem), so a step size tuned at one rank does not
+transfer to another.
 
 `sigma` is raw: neither normalized nor clamped. That is the mechanism, not an
 oversight. A poorly fitted basis produces large `sigma` and turns hard; a
@@ -188,8 +213,9 @@ well-fitted one produces small `sigma` and settles. Normalizing the angle
 (by `sigma_max` or by the tangent's Frobenius norm) forces a constant turn every
 refresh, re-inflates the residual tail, and prevents convergence -- tried,
 rejected. Capping the angle costs the other end, the large-`sigma` acquisition
-the schedule is hot for. Measured on a 2B DiT, the per-step angle anneals
-`0.7 -> 0.11 -> 0.038 -> 0.035` rad over a full run without any bound applied.
+the schedule is hot for. Measured on a 2B DiT under the previous harmonic schedule, the per-step angle
+annealed `0.7 -> 0.11 -> 0.038 -> 0.035` rad with no bound applied; under a
+constant step the same self-annealing is what `sigma` alone produces.
 
 Equal-rank tangent-Gram eigendecompositions are batched. With
 `S=Q_raw^T Q_raw`, one near-identity step using the converged steady-state
@@ -318,7 +344,7 @@ at construction).
 The split is deliberately not a transaction, and cannot be made one at this
 memory budget. Phase one exists so that `G` can be freed the moment it is
 consumed; deferring the moment update to `step()` would mean
-holding a matrix-sized conditioned gradient per parameter until then, which is
+holding a matrix-sized gradient per parameter until then, which is
 the cost the two-phase design exists to avoid. So state commits in two places:
 phase one commits the moving averages, phase two commits the weight. Normal
 completion of a step still requires `step()`, not `zero_grad()`. But a caller
@@ -408,7 +434,7 @@ against a long quiet interval reads as zero.
 |---|---|
 | `rotation_rad_sum` | `eta * sum_i sigma_i` of one geodesic: total frame motion summed over all `r` planes, not a per-plane angle |
 | `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
-| `projected_grad_norm` | norm of the conditioned gradient inside the held frame |
+| `projected_grad_norm` | norm of the clipped gradient inside the held frame |
 | `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
@@ -445,8 +471,9 @@ These choices define the current design; they are redesignable.
    eigenspace of `G^T G`, so the Oja residual is zero there and the tracker
    converges when the gradient's principal subspace stops moving; any two-sided
    rescale is a congruence rather than a similarity and destroys that property.
-7. **Raw clipping before all consumers:** protects the frame and the projected
-   moment, not just the update.
+7. **Raw clipping before all consumers:** bounds what one batch can write into
+   the projected moment. It has no effect on the frame, which is scale-invariant
+   by construction.
 8. **Aurora plus full-shape Muon scale:** direction belongs to projected geometry;
    scale remains tied to parameter geometry.
 9. **Separate AdamW fallback:** non-matrix tensors remain trainable under a

@@ -23,7 +23,24 @@ NEWTON_SCHULZ_COEFFICIENTS = (
     (2.8769, -3.1427, 1.2046),
     (2.8366, -3.0525, 1.2012),
 )
-MIN_BASIS_UPDATE_STEP = 0.01
+# Fixed step size for the Grassmann geodesic. Constant, not scheduled.
+#
+# There used to be a `max(0.01, 1/t)` anneal here, and its justification was a
+# moving aim: while Adafactor's row/column variances warmed up, the conditioned
+# Gram whose eigenspace the tracker targets was itself shifting, so the frame was
+# chasing a target rather than fitting one. A hot start is the right answer to
+# that. The schedule reached this value at basis update 100 and Adafactor's
+# variance memory was 1/(1 - 0.99) = 100 steps; the agreement is not a
+# coincidence. With the conditioning gone the aim is the leading eigenspace of
+# `G^T G` from the first step and moves only as the model does, so the
+# compensation has nothing left to compensate for.
+#
+# Removing it also makes the tracker observable. `sigma` is already
+# self-annealing, so a decaying schedule on top of it made frame motion the
+# product of two annealing terms, and no reading could separate "the tracker
+# settled" from "the clock ran out". Constant step, and `rotation_rad_sum` is
+# `sigma` up to a fixed factor.
+BASIS_UPDATE_STEP = 0.01
 
 
 @dataclass
@@ -107,6 +124,15 @@ class UsuiTrack(Optimizer):
         )
         self._pending_matrix_updates: dict[Tensor, MatrixUpdate] = {}
         self.diagnostics_enabled = False
+        # Convergence instrument, off even when diagnostics are on: it is the
+        # only read that goes to zero iff the frame actually stops, and it is
+        # the one diagnostic that costs persistent bytes. Sampled over a few
+        # matrices rather than carried per parameter -- see pop_diagnostics().
+        self.diagnostics_lag_enabled = False
+        self.diagnostics_lag_matrices = 32
+        self.diagnostics_lag_interval = 5
+        self._lag_snapshots: dict[Tensor, Tensor] = {}
+        self._lag_sampled: set[Tensor] | None = None
         self._diagnostics: DiagnosticsAccumulator | None = None
         self._step_update_norm_sq: Tensor | None = None
         self._matrix_grad_hook_handles = []
@@ -224,8 +250,8 @@ class UsuiTrack(Optimizer):
             How far the frame turned, as the sum of the per-plane angles of one
             geodesic -- the tangent's nuclear norm times the step size. Not the
             angle any single plane moves through. Falling is convergence; a
-            plateau at the ``MIN_BASIS_UPDATE_STEP`` floor means the schedule is
-            holding the tracker open rather than the tracker having settled.
+            Since the step size is a constant, this is ``sigma`` up to that
+            constant, so it reads directly as the tracker's residual.
         ``tangent_concentration``
             Where that motion went, in ``[1/r, 1]``: the fraction of the
             tangent's energy in its leading direction. High means a confident
@@ -243,6 +269,21 @@ class UsuiTrack(Optimizer):
             Mean per-step weight motion against current weight norm. Flat
             through healthy training; mostly useful for finding a sane learning
             rate on an unfamiliar model.
+        ``grad_moment_cosine``
+            Agreement between this batch's projected gradient and the moment as
+            it stood before this step -- does the batch confirm accumulated
+            history, or contradict it. A persistence read, not a preference:
+            unlike capture it cannot reward the frame for what it already holds.
+            Read it beside ``tangent_concentration``: disagreement with a
+            concentrated spectrum is structured drift, disagreement with a flat
+            one is noise.
+        ``basis_lag_rms_sin``
+            Only present when ``diagnostics_lag_enabled``. RMS sine of the
+            principal angles between each sampled frame and its own snapshot
+            ``diagnostics_lag_interval`` basis updates ago. Zero iff every
+            tracked plane has stopped. This is the only metric here that can
+            distinguish a frame that has converged from one orbiting a fixed
+            point at constant radius; every other read is floored by aim noise.
         ``nonfinite_grads``
             How many incoming matrix gradients arrived non-finite and were
             sanitized at the clip. This is the one guard left on the matrix path,
@@ -435,7 +476,7 @@ class UsuiTrack(Optimizer):
             projected_exp_avg = torch.zeros_like(projected_grad)
         projected_exp_avg.mul_(group["beta"]).add_(projected_grad, alpha=1.0 - group["beta"])
         state["projected_exp_avg"] = projected_exp_avg
-        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg)
+        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg, group["beta"])
 
         return MatrixUpdate(
             param=p,
@@ -475,7 +516,7 @@ class UsuiTrack(Optimizer):
         projected_exp_avg = state["projected_exp_avg"]
         # Deliberately outside the compiled kernel: measuring in there would put
         # the reductions in the graph whether or not anyone asked for them.
-        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg)
+        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg, group["beta"])
 
         return MatrixUpdate(
             param=p,
@@ -503,16 +544,33 @@ class UsuiTrack(Optimizer):
         diagnostics: DiagnosticsAccumulator | None,
         projected_grad: Tensor,
         projected_exp_avg: Tensor | None,
+        beta: float,
     ) -> None:
         if diagnostics is None:
             return
         projected_grad_norm = projected_grad.float().norm()
         diagnostics.add("projected_grad_norm", projected_grad_norm)
-        if projected_exp_avg is not None:
-            diagnostics.add(
-                "grad_to_moment_ratio",
-                projected_grad_norm / projected_exp_avg.float().norm().clamp_min(1e-12),
-            )
+        if projected_exp_avg is None:
+            return
+        moment = projected_exp_avg.float()
+        diagnostics.add("grad_to_moment_ratio", projected_grad_norm / moment.norm().clamp_min(1e-12))
+        # Agreement is asked of the moment as it stood BEFORE this step's blend,
+        # recovered exactly from the post-update moment. The post-update moment
+        # already contains `1 - beta` of this very gradient, which would make the
+        # measurement partly self-referential -- it would report agreement with
+        # itself. Reconstructing costs one axpy and keeps the fused kernel free
+        # of telemetry.
+        if beta <= 0.0:
+            # No memory, so there is no prior moment to agree or disagree with:
+            # the moment *is* this gradient. Reporting 1.0 would be true and
+            # useless; reporting nothing keeps the metric meaning one thing.
+            return
+        moment_before = (moment - (1.0 - beta) * projected_grad.float()) / beta
+        diagnostics.add(
+            "grad_moment_cosine",
+            (projected_grad.float() * moment_before).sum()
+            / (projected_grad_norm * moment_before.norm()).clamp_min(1e-12),
+        )
 
     @staticmethod
     def _prepare_tracker_right_tensors(
@@ -652,6 +710,52 @@ class UsuiTrack(Optimizer):
                     state = self.state[entry.param]
                     state["basis"] = entry.projector.basis
                     state["projection_side_is_right"] = side is ProjectionSide.RIGHT
+        self._record_basis_lag(pending, group)
+
+    def _record_basis_lag(self, entries: list[MatrixUpdate], group: dict) -> None:
+        """Principal-angle distance between each sampled frame and its own past.
+
+        The one read that can show convergence. `rotation_rad_sum` cannot: it is
+        floored by single-batch noise in the aim, so a frame orbiting a fixed
+        point at constant radius reports the same rotation forever as one that
+        is genuinely still travelling. Comparing the frame to *itself* some
+        refreshes back cancels that -- an orbit returns, a drift does not.
+
+        Reported as an RMS sine of the principal angles, which is exact and
+        needs no decomposition: with `C = Q_old^T Q_now`, the residual
+        `R = Q_now - Q_old C` has `||R||_F^2 = sum_i sin^2(theta_i)`. Forming
+        `R` by subtracting the vectors rather than the squared cosines is what
+        keeps it well conditioned at the small angles that matter here. It goes
+        to zero if and only if every tracked plane has stopped moving.
+
+        Sampled over `diagnostics_lag_matrices` parameters, not carried per
+        parameter: this is the only diagnostic that costs persistent bytes
+        (`[d,r]` per sampled matrix), and the VRAM-first rule bans that in the
+        update, not in an opt-in instrument over a handful of tensors. The
+        snapshots live outside `self.state` so they never enter a checkpoint.
+        """
+
+        diagnostics = self._diagnostics_sink()
+        if diagnostics is None or not self.diagnostics_lag_enabled:
+            return
+        if group["basis_update_step"] % max(1, self.diagnostics_lag_interval):
+            return
+        if self._lag_sampled is None:
+            # Deterministic sample, so two runs of the same config measure the
+            # same tensors and their curves are comparable.
+            matrices = [param for candidate in self.param_groups for param in candidate["params"]]
+            self._lag_sampled = set(matrices[: max(0, self.diagnostics_lag_matrices)])
+        for entry in entries:
+            if entry.param not in self._lag_sampled:
+                continue
+            frame = entry.projector.canonical_basis().float()
+            previous = self._lag_snapshots.get(entry.param)
+            self._lag_snapshots[entry.param] = frame.clone()
+            if previous is None or previous.shape != frame.shape:
+                continue
+            residual = frame - previous @ (previous.mT @ frame)
+            rank = frame.shape[1]
+            diagnostics.add("basis_lag_rms_sin", residual.norm() / math.sqrt(rank))
 
     @staticmethod
     def _record_basis_motion_diagnostics(
@@ -681,7 +785,7 @@ class UsuiTrack(Optimizer):
 
     @staticmethod
     def _basis_update_step_size(group: dict) -> float:
-        return max(MIN_BASIS_UPDATE_STEP, 1.0 / group["basis_update_step"])
+        return BASIS_UPDATE_STEP
 
     @staticmethod
     def _basis_update_due(group: dict) -> bool:
