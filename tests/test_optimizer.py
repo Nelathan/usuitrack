@@ -1,4 +1,5 @@
 import copy
+import math
 
 import pytest
 import torch
@@ -266,9 +267,11 @@ def test_diagnostics_report_every_documented_metric():
         "tangent_concentration",
         "projected_grad_norm",
         "grad_to_moment_ratio",
+        "grad_moment_cosine",
         "update_to_param_ratio",
         "nonfinite_grads",
     }
+    assert -1.0 <= diagnostics["grad_moment_cosine"] <= 1.0
     assert all(isinstance(value, float) for value in diagnostics.values())
     assert all(value == value for value in diagnostics.values()), diagnostics
 
@@ -338,3 +341,60 @@ def test_no_second_moment_state_is_allocated():
             "projected_exp_avg",
             "step",
         }
+
+
+def test_agreement_reads_the_moment_before_this_step_not_after():
+    """The post-update moment contains `1-beta` of this very gradient, so a
+    cosine against it would partly measure the gradient against itself. A first
+    step, where the prior moment is exactly zero, is the sharpest case: the
+    post-update moment is a pure multiple of this gradient, so a naive read
+    would report perfect agreement where there is no history to agree with."""
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    optimizer.diagnostics_enabled = True
+    _run(params, optimizer, 1)
+
+    cosine = optimizer.pop_diagnostics()["grad_moment_cosine"]
+    assert abs(cosine) < 1e-6, cosine
+
+
+def test_basis_lag_is_off_until_asked_for_and_measures_frame_motion():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    optimizer.diagnostics_enabled = True
+    _run(params, optimizer, 8)
+    assert "basis_lag_rms_sin" not in optimizer.pop_diagnostics()
+    assert optimizer._lag_snapshots == {}
+
+    optimizer.diagnostics_lag_enabled = True
+    optimizer.diagnostics_lag_interval = 2
+    _run(params, optimizer, 8)
+    lag = optimizer.pop_diagnostics()["basis_lag_rms_sin"]
+    # A frame under random gradients keeps moving, so the sine is real but is a
+    # sine: bounded by 1 whatever the frame does.
+    assert 0.0 < lag <= 1.0, lag
+
+
+def test_basis_lag_metric_is_the_sine_of_the_principal_angle():
+    """Check the quantity itself, not the plumbing: zero for a frame compared
+    against itself, and exactly sin(theta) for a frame rotated by theta in one
+    plane. This is the property the instrument exists for -- it must vanish iff
+    motion vanishes, and it must not saturate at the small angles we expect."""
+    torch.manual_seed(0)
+    frame, _ = torch.linalg.qr(torch.randn(64, 4))
+
+    def rms_sin(current, previous):
+        residual = current - previous @ (previous.mT @ current)
+        return float(residual.norm() / (current.shape[1] ** 0.5))
+
+    assert rms_sin(frame, frame) < 1e-6
+
+    for theta in (1e-4, 1e-2, 0.3):
+        rotated = frame.clone()
+        # Rotate one plane by theta, out of the span, keeping the frame orthonormal.
+        outside = torch.linalg.qr(torch.randn(64, 1))[0]
+        outside = outside - frame @ (frame.mT @ outside)
+        outside = outside / outside.norm()
+        rotated[:, 0] = frame[:, 0] * math.cos(theta) + outside[:, 0] * math.sin(theta)
+        # One plane of four moved by theta, so the RMS sine is sin(theta)/2.
+        assert abs(rms_sin(rotated, frame) - math.sin(theta) / 2) < 1e-5, theta
