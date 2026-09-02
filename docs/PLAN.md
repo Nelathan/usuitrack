@@ -1192,7 +1192,11 @@ left**, and P2's history is now a story of deleting the others one at a time:
    overlap and its earlier numbers do not transfer. Note the mechanism, which is
    easy to get wrong -- the window is frozen by this patch swallowing `n - 1`
    geodesics at the *default* cadence, not by `--basis-update-interval n`, which
-   would build no tangent on the skipped steps and average one.
+   would build no tangent on the skipped steps and average one. Measured at
+   `n = 4` and `n = 8`; see "Tangent accumulation, re-asked" below. The next cut
+   is an arm that averages the tangent but meters agreement on the unaveraged
+   aim, which is the only way to separate the geometry win from the meter reading
+   its own smoothing.
 
 ### Shipped: the tracker's rule moved from the harness into the release
 
@@ -1251,6 +1255,64 @@ unequal in size, which they are. The released form is the one that means what th
 name says.
 
 `eta` carries over unchanged: every arm in the table above ran at `0.01`.
+
+### Tangent accumulation, re-asked under the released controller
+
+Averaging `n` Oja tangents in a frozen frame, then taking one geodesic on the
+mean. The window is frozen by swallowing `n - 1` geodesics at the default
+cadence -- not by `--basis-update-interval n`, which builds no tangent on the
+skipped steps and would average one. 300 steps, same seed and config as the
+released baseline.
+
+| read | baseline | `n = 4` | `n = 8` |
+|---|---:|---:|---:|
+| target loss | **1.70769** | 1.70848 | 1.70897 |
+| source loss | 3.04537 | **3.04328** | 3.04470 |
+| `transport_curve` | 0.683 | **0.421** | **0.302** |
+| `transport_lag` | 0.00598 | 0.01170 | 0.02018 |
+| `transport_speed` | 0.00175 | 0.00252 | 0.00351 |
+| `transport_spin` | 0.000859 | 0.000988 | 0.001064 |
+| `turn_fraction` | 0.217 | 0.312 | 0.564 |
+| `agreement_ceiling` | 0.128 | 0.219 | 0.273 |
+| `tangent_participation` | 0.0180 | 0.0316 | 0.0421 |
+| `tangent_concentration` | 0.699 | 0.490 | 0.449 |
+| s/step | 0.765 | 0.753 | 0.753 |
+
+**Prediction stated before the run, and wrong:** that four times fewer geodesics
+would lower `transport_lag`. It rose 2x at `n = 4` and 3.4x at `n = 8`, and the
+rise is if anything understated -- the lag window is `diagnostics_lag_interval`
+*counter* ticks but the recorder only runs on geodesic steps, so the accumulation
+arms measure over five geodesics against the baseline's ten. More net distance
+covered over half as many turns.
+
+**The real result is `transport_curve`, and it is large.** Curve is a ratio of two
+quantities measured over the same window, so unlike lag and speed it is directly
+comparable across arms. The baseline cancels 68% of its travel; `n = 8` cancels
+30%. The frame stops churning and starts going somewhere. `tangent_participation`
+says why: the mean of `n` tangents has 2.3x the effective rank of one batch's, and
+`tangent_concentration` falls to match, so the aim is no longer one batch's
+leading spike with a noise tail behind it.
+
+**And it costs loss, monotonically.** Target degrades `1.70769 -> 1.70848 ->
+1.70897`. At `n = 8` that is `1.3e-3`, about 4.5x the `2.9e-4` same-config spread,
+so it is real rather than noise. Source stays inside its `2e-3` floor throughout.
+Step time is unchanged: the geodesic and its `eigh` were never the cost, the
+tangent build was, and this does not skip that.
+
+**The confound, which is the reason this stays open rather than becoming a
+default.** The agreement meter reads how much consecutive aims agree, and
+averaging `n` batches makes consecutive aims agree more *by construction*. So
+`turn_fraction` rising 2.6x is partly the meter reading its own input filter
+rather than a frame that needs to turn further. The controller self-corrects some
+of this -- `agreement_ceiling` rose 2.1x, which is exactly its job, since the
+attainable ceiling genuinely does rise when the aim spreads over more planes --
+but 2.6x against 2.1x says the correction is incomplete. Some of the extra
+turning is the meter fooling itself.
+
+That is a testable statement, and the test is an arm that accumulates tangents
+while metering agreement on the *unaveraged* aim. Until that runs, the geometry
+win and the loss cost cannot be attributed cleanly to accumulation rather than to
+a controller running hot on a smoothed signal.
 
 ### How we work here
 
