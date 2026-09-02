@@ -956,6 +956,8 @@ from `k`, `d` and `r`, the `[0,1]` clamp is structural, `peak` is measured per
 run, and `k` is chosen by the settling rule above. Whether something cleaner
 exists for `eta` is open, and the shape of an answer would tie it to the signal
 the frame can resolve above batch noise, which the meter already measures.
+(Since superseded in part: the peak became a derived ceiling, and `k` turned out
+to be a second gain rather than a free choice. See the `k` sweep below.)
 
 *A stated property, not a bug:* the meter reads persistence, and persistence is
 confounded with batch noise. At larger batches the aim repeats better, so the
@@ -1080,12 +1082,17 @@ fleet gain it only means some matrix clamped -- so it stops being a drift
 instrument here.
 
 *Where the constants stand now.* `floor` derived from `k`, `d`, `r`. The `[0,1]`
-clamp structural. `G` derived per step from the fleet's participation. `k` chosen
-by the settling rule, and bounded by `k <= r` -- the code clamps with
-`min(planes, r)` but the rule should read `k = min(16, r)`, which matters for any
-model tracked at a rank below 16. That leaves **`eta` as the only bare number
-left**, and P2's history is now a story of deleting the others one at a time:
-`2.87` to a running peak, the peak to a fleet reading.
+clamp structural. The ceiling derived per step from the fleet's participation,
+and measured invariant across a sixteenfold batch range. `k = min(16, r)`, which
+the code enforces with `min(AGREEMENT_PLANES, rank)`.
+
+That reads as one bare number, `eta`, but the `k` sweep says it is really
+**one-and-a-half**: `k` is a second gain on the same quantity, `agreement_ceiling
+x k` being flat within 7% across an eightfold range. The two are redundant in the
+way `2.87` was redundant with `eta`, and the honest count will not be one until
+that is resolved. P2's history is a story of deleting these one at a time --
+`2.87` to a running peak, the peak to a fleet reading -- and this is the next one
+in the queue, not a settled state.
 
 ### Open leads, ranked by what they would settle
 
@@ -1173,12 +1180,10 @@ left**, and P2's history is now a story of deleting the others one at a time:
    run in two), so "find the cliff, take half" is available and honest. A derived
    form would tie it to the signal the frame can resolve above batch noise, which
    the meter already measures as `excess` above `floor`. Nothing beyond a sketch.
-9. **Re-run the `k` sweep under the fleet gain.** `k = 4` and `k = 8` posted the
-   best geometry in the session and were set aside only because their *running
-   peaks* were still moving at step 300. The fleet gain has no peak, so that
-   objection does not transfer and the sweep should be redone -- `k` now enters
-   the gain as `r / k`, so it changes the yardstick as well as the meter, which
-   is a different experiment from the one already run.
+9. **CLOSED -- `k` is a gain on the turn, not a measurement width.** Swept 4, 8,
+   16, 32 under the derived ceiling. It moves the turn scale 4.3x and target loss
+   by less than the same-config spread. It is a second knob doing `eta`'s job,
+   which is a redundancy of the same kind as the fitted `2.87` was. See below.
 10. **CLOSED -- the fleet gain is stable enough to divide by.** Logged across 1k
    it settles into a +-7% band after acquisition and needs no smoothing, while
    rising ~47% over the run as participation grows. Stable as a divisor, and
@@ -1301,6 +1306,91 @@ happened, and the lag window -- measured in those ticks but recorded only on ste
 that actually turn -- stopped aligning with its own recorder. Scaling the window
 to compensate produced zero samples. Any patch that suppresses a geodesic must
 decrement that counter.
+
+### The `k` sweep: `k` turns out to be a gain
+
+Swept the meter width under the derived ceiling, 300 steps, LFM, rank 128, seed 1.
+Every figure is a run mean; the `transport_*` reads are 12 window samples each.
+
+| read | `k = 4` | `k = 8` | `k = 16` | `k = 32` |
+|---|---:|---:|---:|---:|
+| target loss | 1.70820 | 1.70769 | 1.70769 | 1.70753 |
+| source loss | 3.04407 | 3.04515 | 3.04537 | 3.04453 |
+| `turn_fraction` | 0.1354 | 0.2003 | 0.3292 | 0.5845 |
+| `agreement_ceiling` | 0.4664 | 0.2400 | 0.1227 | 0.0623 |
+| `agreement_ceiling` x `k` | 1.866 | 1.920 | 1.964 | 1.994 |
+| `transport_speed` | 0.00142 | 0.00189 | 0.00287 | 0.00489 |
+| `transport_curve` | 0.753 | 0.701 | 0.626 | 0.582 |
+| `tangent_participation` | 0.01623 | 0.01671 | 0.01714 | 0.01747 |
+
+`agreement_ceiling x k` is flat within 7% across an eightfold range of `k`. That is
+the derivation confirmed exactly: the ceiling is `effective_rank / k`, and the
+aim's effective rank is a property of the gradient, not of the meter --
+`tangent_participation` moves 8% across the same range.
+
+The consequence is that `k` scales the turn. Halving it roughly halves the turn
+scale and the frame's speed with it, so `k` and `eta` are two knobs setting one
+quantity. That is the same kind of redundancy the fitted `2.87` had, and it should
+be treated the same way.
+
+**Why the `/ k` does not cancel, which is the part worth understanding.** The
+ceiling is derived from the claim that a top-`k` meter can reproduce at most
+`effective_rank` directions, so for `k` past that rank the extra planes should
+contribute little and mean agreement should fall as `1/k` -- cancelling the
+ceiling's own `1/k` and leaving the ratio flat. Measured, it does not. The turn
+scale rises roughly as `k^0.7`, so agreement falls much more slowly than `1/k`:
+planes well beyond the spectrum's effective rank still carry persistent signal.
+**`tangent_participation` predicts how the aim's energy is spread; it does not
+predict how deep the persistence goes, and the ceiling uses it for the second.**
+That gap is the open design question, not which `k` to pick.
+
+**And loss cannot pick between them.** Target moves `6.7e-4` across the whole
+sweep, with three of the four arms inside `1.6e-4`, against a `2.9e-4`
+same-config spread -- while the frame's speed changes 3.4x. At this horizon the
+tracking rate is not visible in the loss, so neither `k` nor `eta` can be chosen
+by it. `transport_curve` does separate them, and it favours the fast end: at
+`k = 32` the frame cancels 58% of its travel, at `k = 4` it cancels 75%. Lag and
+spin favour the slow end, but trivially so, because a frame that turns less has
+less of both. `k = 32` also ran without incident at 1.7x the released frame speed,
+which is headroom worth remembering against the `eta = 0.02` cliff.
+
+### The controller is invariant to a 16x change in batch size
+
+The meter reads whether consecutive aims agree, so the failure mode available to
+it is a noisy aim that never repeats: `excess` collapses to the chance floor and
+the frame stops turning. Tested by shrinking the batch, 16 down to 1, everything
+else held. Run means, 11-12 window samples per `transport_*` figure.
+
+| read | bs16 | bs8 | bs4 | bs2 | bs1 |
+|---|---:|---:|---:|---:|---:|
+| `tangent_participation` | 0.01714 | 0.01603 | 0.01479 | 0.01357 | 0.01232 |
+| `tangent_concentration` | 0.7150 | 0.7338 | 0.7593 | 0.7899 | 0.8293 |
+| `agreement_ceiling` | 0.1227 | 0.1132 | 0.1018 | 0.0912 | 0.0809 |
+| `turn_fraction` | 0.3292 | 0.3300 | 0.3146 | 0.3158 | 0.3356 |
+| `transport_speed` | 0.00287 | 0.00275 | 0.00258 | 0.00261 | 0.00282 |
+| `transport_curve` | 0.626 | 0.625 | 0.631 | 0.632 | 0.622 |
+
+The aim degrades monotonically and measurably: participation falls 28% and
+concentration rises 16%, because at smaller batch a single direction dominates.
+The ceiling, derived from participation, falls 34% with it. The turn scale is flat
+within 6% and the frame's motion is flat within 11% on speed and 2% on curve.
+
+Both ends of the meter move together, so the ratio holds. This is what the derived
+ceiling exists for and it is now demonstrated over a sixteenfold range. The
+counterfactual is quantifiable: held at bs16's ceiling of 0.1227, bs1's excess
+would give a turn scale of 0.221 instead of 0.336 -- a fitted divisor would have
+slowed the tracker by a third at bs1, for no reason other than that it was fitted
+somewhere else.
+
+Target loss is not comparable across this ladder -- 300 steps at bs1 sees a
+sixteenth of the data -- and is not reported.
+
+*The limit this does not clear.* At bs1 concentration is 0.83: the aim is close to
+rank one. The meter reads persistence, and a single direction that dominates every
+batch persists whether or not the frame is skewed, so the controller cannot
+separate "the frame has lag to correct" from "one noisy direction dominates the
+gradient". Nothing broke across 16x, but that is the mechanism to watch on a model
+whose gradient is genuinely rank-poor rather than merely undersampled.
 
 ### How we work here
 
