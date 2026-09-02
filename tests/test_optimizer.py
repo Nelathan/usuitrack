@@ -264,8 +264,8 @@ def test_diagnostics_report_every_documented_metric():
     diagnostics = optimizer.pop_diagnostics()
     assert set(diagnostics) == {
         "transport_speed",
-        "agreement_scale",
-        "agreement_gain",
+        "turn_fraction",
+        "agreement_ceiling",
         "tangent_concentration",
         "tangent_participation",
         "projected_grad_norm",
@@ -282,8 +282,8 @@ def test_diagnostics_report_every_documented_metric():
     assert 1.0 / RANK <= diagnostics["tangent_concentration"] <= 1.0
     assert 1.0 / RANK <= diagnostics["tangent_participation"] <= 1.0
     # Structural, not measured: the controller can only ever scale the turn down.
-    assert 0.0 <= diagnostics["agreement_scale"] <= 1.0
-    assert diagnostics["agreement_gain"] > 0.0
+    assert 0.0 <= diagnostics["turn_fraction"] <= 1.0
+    assert diagnostics["agreement_ceiling"] > 0.0
     assert diagnostics["update_to_param_ratio"] > 0
     assert diagnostics["nonfinite_grads"] == 0.0
 
@@ -483,7 +483,7 @@ def test_agreement_controller_holds_the_frame_until_the_aim_has_repeated():
     assert moved(first, optimizer.state[weight]["basis"].float()) > 100 * held
 
 
-def test_agreement_scale_never_turns_harder_than_the_bare_step():
+def test_turn_fraction_never_exceeds_the_bare_step():
     """`scale <= 1` is a bound on the geodesic, not an observation about it.
 
     Every live plane of the polar tangent has singular value one, so the angle
@@ -503,7 +503,7 @@ def test_agreement_scale_never_turns_harder_than_the_bare_step():
     after = optimizer.state[weight]["basis"].float()
 
     drained = optimizer.pop_diagnostics()
-    assert 0.0 <= drained["agreement_scale"] <= 1.0
+    assert 0.0 <= drained["turn_fraction"] <= 1.0
     # Chordal distance per plane, the same unit `transport_speed` reports, and
     # bounded above by the angle a scale of one would produce.
     residual = after.mT - before.mT @ (before @ after.mT)

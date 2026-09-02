@@ -42,7 +42,7 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 # reports is the tracker's own residual and not a schedule -- though the speed is
 # now read from the frames rather than from `sigma`, which is what keeps that
 # true under any experiment that transforms the tangent between the two.
-BASIS_UPDATE_STEP = 0.01
+GEODESIC_STEPSIZE = 0.01
 
 # Meter width for the agreement controller: how many of the tangent's leading
 # planes the persistence read spans. One plane is too noisy to steer with -- its
@@ -149,12 +149,12 @@ class UsuiTrack(Optimizer):
         # reads the moment's own smear rather than an arbitrary window.
         self.diagnostics_lag_interval = 10
         # Agreement controller state. One `[d, AGREEMENT_PLANES]` bf16 buffer per
-        # matrix -- an eighth of the basis at rank 128 -- plus one scalar gain for
-        # the whole model. It feeds a ratio and never the update, so bf16 is
+        # matrix -- an eighth of the basis at rank 128 -- plus one scalar ceiling
+        # for the whole model. It feeds a ratio and never the update, so bf16 is
         # ample.
         self._agreement_previous: dict[Tensor, Tensor] = {}
         self._agreement_pending: list[Tensor] = []
-        self._agreement_gain: Tensor | None = None
+        self._agreement_ceiling: Tensor | None = None
         self._lag_snapshots: dict[Tensor, Tensor] = {}
         self._lag_path: dict[Tensor, Tensor] = {}
         self._lag_sampled: set[Tensor] | None = None
@@ -320,17 +320,21 @@ class UsuiTrack(Optimizer):
             not move together. It also grew with rank and shared its unit with
             nothing else here, which made it unreadable against the lag it was
             meant to be compared with.
-        ``agreement_scale``, ``agreement_gain``
+        ``turn_fraction``, ``agreement_ceiling``
             The turn controller's own output, and the yardstick it divides by.
-            ``agreement_scale`` is the mean fraction of ``eta`` the frame
-            actually took, in ``[0, 1]``: falling means the aim has stopped
-            repeating and the tracker is settling, pinned at one means every
-            matrix is clamped and the controller has run out of range.
-            ``agreement_gain`` is the fleet divisor, one scalar per step. It
-            should rise with ``tangent_participation``; a gain that goes flat
-            while participation moves means the divisor has stopped tracking the
-            aim's spread. Read them with ``eta`` in mind -- the two multiply, so
-            a displacement says nothing about which of them produced it.
+            They are not two views of one number. ``turn_fraction`` is what the
+            frame *did*: the mean fraction of ``eta`` actually taken, in
+            ``[0, 1]``. Falling means the aim has stopped repeating and the
+            tracker is settling; pinned at one means every matrix is clamped and
+            the controller has run out of range above it. ``agreement_ceiling``
+            is what the frame was *measured against*: the fleet's attainable
+            agreement, one scalar per step, and the denominator the fraction is
+            formed from. It should rise with ``tangent_participation``, since
+            that is what it is derived from; a ceiling that goes flat while
+            participation moves means the yardstick has stopped tracking the
+            aim's spread, which is the failure a frozen anchor has by
+            construction. Read the fraction with ``eta`` in mind -- the two
+            multiply, so a displacement says nothing about which produced it.
         ``tangent_concentration``, ``tangent_participation``
             Where that motion went, both in ``[1/r, 1]`` and both free from the
             same eigenvalues. Concentration is the leading plane's share of the
@@ -520,7 +524,7 @@ class UsuiTrack(Optimizer):
             # transport is exact because the geodesic is a rigid rotation.
             self._apply_matrix_update_buckets(matrix_updates, group)
             self._apply_basis_updates(matrix_updates, group)
-        self._commit_agreement_gain()
+        self._commit_agreement_ceiling()
 
         # One sample per step, not per matrix: the quantity that means something
         # is the whole step's motion against the whole model's norm, so the
@@ -870,7 +874,8 @@ class UsuiTrack(Optimizer):
         how many planes the aim actually occupies. The aim's effective rank is
         `(sum lambda)^2 / sum lambda^2`, and a top-`k` meter can at best reproduce
         that many directions, so `effective_rank / k` is the agreement a matrix
-        could reach. The fleet median of that is the divisor `G`.
+        could reach. The fleet median of that is the ceiling the meter is read
+        against.
 
         Why the fleet and not each matrix: per matrix, a matrix's own effective
         rank predicts its own attainable agreement with a 3.6x spread -- worse
@@ -878,11 +883,11 @@ class UsuiTrack(Optimizer):
         within 6% of the fleet median of the ceilings actually observed. The
         signal is in the fleet, not the individual, which is also what makes one
         global yardstick defensible: the ceilings span only 2.4x across the middle
-        80%. Dividing by a shared `G` therefore leaves the differences between
+        80%. Dividing by a shared ceiling therefore leaves the differences between
         matrices intact, so a matrix that holds its aim longer keeps turning
         instead of having that normalized away.
 
-        `G` is recomputed every step from eigenvalues already in hand, with a
+        The ceiling is recomputed every step from eigenvalues already in hand, with a
         one-step lag so the median spans the whole model rather than whichever
         bucket is in flight. Nothing is remembered, which is the property a
         running peak could not have: measured, the attainable ceiling *rises ~47%
@@ -919,14 +924,14 @@ class UsuiTrack(Optimizer):
             self._agreement_previous[entry.param] = current.to(torch.bfloat16)
 
         scale = torch.zeros(head.shape[0], device=tangents.device, dtype=torch.float32)
-        gain = self._agreement_gain
+        ceiling = self._agreement_ceiling
         ready = [index for index, past in enumerate(stored) if past is not None and past.shape == head.shape[1:]]
-        if ready and gain is not None:
+        if ready and ceiling is not None:
             rows = torch.tensor(ready, device=tangents.device)
             cross = head[rows].mT @ torch.stack([stored[index] for index in ready]).float()
             agreement = cross.square().flatten(1).sum(-1) / keep
             excess = (agreement - floor).clamp_min(0.0)
-            scale[rows] = (excess / gain.clamp_min(1e-12)).clamp(0.0, 1.0)
+            scale[rows] = (excess / ceiling.clamp_min(1e-12)).clamp(0.0, 1.0)
 
         # Next step's divisor, per matrix and so free of any assumption that one
         # rank spans the fleet: `effective_rank / k` with both read from this
@@ -938,7 +943,7 @@ class UsuiTrack(Optimizer):
 
         diagnostics = self._diagnostics_sink()
         if diagnostics is not None:
-            diagnostics.add("agreement_scale", scale.sum(), count=scale.shape[0])
+            diagnostics.add("turn_fraction", scale.sum(), count=scale.shape[0])
 
         # The geodesic reads its per-plane angles as `sqrt(eigenvalues)`, and the
         # polar factor's own singular values are all one, so handing it `scale^2`
@@ -948,7 +953,7 @@ class UsuiTrack(Optimizer):
         return annealed, values
 
     @torch.no_grad()
-    def _commit_agreement_gain(self) -> None:
+    def _commit_agreement_ceiling(self) -> None:
         """Fold this step's attainable ceilings into the divisor the next one uses.
 
         Median rather than mean, because the fleet contains matrices whose aim is
@@ -958,11 +963,11 @@ class UsuiTrack(Optimizer):
 
         if not self._agreement_pending:
             return
-        self._agreement_gain = torch.cat(self._agreement_pending).median()
+        self._agreement_ceiling = torch.cat(self._agreement_pending).median()
         self._agreement_pending.clear()
         diagnostics = self._diagnostics_sink()
         if diagnostics is not None:
-            diagnostics.add("agreement_gain", self._agreement_gain)
+            diagnostics.add("agreement_ceiling", self._agreement_ceiling)
 
     def _lag_sample(self) -> set[Tensor]:
         """The matrices the snapshot instruments follow, chosen once.
@@ -1118,7 +1123,7 @@ class UsuiTrack(Optimizer):
 
     @staticmethod
     def _basis_update_step_size(group: dict) -> float:
-        return BASIS_UPDATE_STEP
+        return GEODESIC_STEPSIZE
 
     @staticmethod
     def _basis_update_due(group: dict) -> bool:

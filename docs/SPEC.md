@@ -489,8 +489,8 @@ against a long quiet interval reads as zero.
 |---|---|
 | `transport_speed` | chordal distance the subspace moved in one geodesic, per plane, measured from the frames before and after: `||Q_now - Q_old (Q_old^T Q_now)||_F / sqrt(r)`. Every motion metric below shares this unit, so they can be divided by one another |
 | `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
-| `agreement_scale` | the controller's own output: mean turn scale in `[0,1]`, so a logged point says how much of `eta` the frame is actually taking. Without it an `eta` ladder is blind, since `eta` and the scale multiply |
-| `agreement_gain` | the fleet divisor `G`, one scalar per step. Rises as `tangent_participation` rises; a flat or collapsing gain means the controller has stopped tracking the aim's spread |
+| `turn_fraction` | the controller's own output: mean turn scale in `[0,1]`, so a logged point says how much of `eta` the frame is actually taking. Without it an `eta` ladder is blind, since `eta` and the scale multiply |
+| `agreement_ceiling` | the fleet divisor `G`, one scalar per step. Rises as `tangent_participation` rises; a flat or collapsing gain means the controller has stopped tracking the aim's spread |
 | `tangent_participation` | `(sum_i lambda_i)^2 / (r sum_i lambda_i^2)`, in `[1/r, 1]`: the effective number of planes carrying the aim, as a fraction of `r`. The bulk of the same spectrum concentration reads the head of |
 | `projected_grad_norm` | norm of the clipped gradient inside the held frame |
 | `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |

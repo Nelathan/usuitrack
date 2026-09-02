@@ -892,7 +892,7 @@ anchor stops setting new peaks after ~step 150 and never sets another through
 step 1000, so it does not drift with run length at this horizon. Its scale floors
 near `0.15` from ~step 400 and holds, and lag flattens at `0.0037` from ~step
 600: the frame settles and stays settled. Longer horizons remain untested, and
-`agreement_scale_max` is the instrument that would show it.
+`turn_fraction_max` is the instrument that would show it.
 
 **The periodic bumps are the data.** Both arms dip and bump at *identical* steps
 (~475, ~700) under two different controllers on the same seed and data order.
@@ -1065,7 +1065,7 @@ remembered extremum, no horizon dependence, and no fitted constant anywhere in
 the controller.
 
 *Two properties to carry forward.* The `r / k` factor assumes one rank across the
-fleet; mixed ranks need it per bucket. And `agreement_scale_max` changes meaning
+fleet; mixed ranks need it per bucket. And `turn_fraction_max` changes meaning
 between the two anchors -- under the peak it flagged a new record, under the
 fleet gain it only means some matrix clamped -- so it stops being a drift
 instrument here.
@@ -1196,7 +1196,7 @@ left**, and P2's history is now a story of deleting the others one at a time:
 
 The orthogonalized tangent and the agreement controller were three stacked
 monkeypatches on `oja_geodesic_from_eigh` for the whole investigation. They are
-now `UsuiTrack._anneal_tangent` and `_commit_agreement_gain`, and the projector's
+now `UsuiTrack._anneal_tangent` and `_commit_agreement_ceiling`, and the projector's
 geodesic went back to being pure geometry -- it takes whatever horizontal tangent
 it is handed and holds no opinion about how far the frame should turn. That
 separation is what keeps the released rule measurable against the bare geodesic
@@ -1383,7 +1383,7 @@ Most of these were ablated on a single model.
 
 | constant | where | status |
 |---|---|---|
-| `MIN_BASIS_UPDATE_STEP = 0.01` | step-size floor | P2; the load-bearing one |
+| `MIN_GEODESIC_STEPSIZE = 0.01` | step-size floor | P2; the load-bearing one |
 | rank cap `min(m,n)/2` | `effective_rank` | settled by structure and bottleneck stability, but the *fraction* is still a choice |
 | `grad_clip_norm = 1.0` | raw clip | now mandatory; the threshold itself is untested across models |
 | `beta = 0.9`, `eps = 1e-8` | moment | `beta` measured by sweep, see P2; `eps` inherited |
@@ -1730,7 +1730,7 @@ does not rank checkpoints -- so the verdict is the samples, reviewed by the user
 better than the Adafactor-era runs, and notably more directional. The earlier
 runs wandered between sample rounds; this one holds a heading. Telemetry:
 `nonfinite_grads` 0, no `eigh` retries, `rotation_rad_sum` at the
-`MIN_BASIS_UPDATE_STEP` floor within roughly three logging intervals,
+`MIN_GEODESIC_STEPSIZE` floor within roughly three logging intervals,
 `tangent_concentration` ~0.865 with no trend -- far above LFM's ~0.39, which is a
 fact about this model's gradients rather than about the tracker, and a warning
 that any step rule built on concentration has to survive both operating points.
