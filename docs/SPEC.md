@@ -20,9 +20,13 @@ basis-tracking path; see the [README](../README.md) for results and usage.
 - **`ndim == 2` is a shape gate, not the precondition.** Lookup tables and
   multiplicative gates pass it and break the method, for reasons no numerical
   guard can see. See "Parameter eligibility".
-- **Raw sigma is the controller, not a raw number to be tamed.** Normalizing or
-  capping the geodesic angle removes the self-annealing that makes the tracker
-  settle. Both have been tried and reverted.
+- **The requirement is that frame motion can anneal; raw sigma is one mechanism
+  for that, not the rule itself.** What the tracker owes is the ability to settle
+  -- motion that falls as the frame approaches its equilibrium. Two specific
+  scalar normalizations (by `sigma_max`, by the tangent's Frobenius norm) were
+  tried and reverted for failing that. Do not read those two results as a ban on
+  every reweighting of the tangent's spectrum, and do not read raw `sigma` as the
+  goal.
 - **Passing tests over a mechanism that never fires is not evidence.** Guards
   and code paths that no configuration reaches will pass every test they have.
 - **Exact implementation of a formula does not validate the formula's premise.**
@@ -168,54 +172,93 @@ The denominator is floored at `1e-12`. With
 
 $$\Delta^\top\Delta=V\operatorname{diag}(\sigma_i^2)V^\top,$$
 
-the exact full-rank Grassmann step uses a constant
+the frame does **not** move along `Delta` itself. Two transforms sit between the
+aim and the geodesic, and they are one design: every plane turns by the same
+angle, and how large that angle is comes from time rather than from the spectrum.
 
-$$\eta=0.01.$$
+**Polar tangent.** `Delta` is replaced by its polar factor
 
-It is not scheduled. A `max(0.01, 1/t)` anneal previously sat here, answering a
-problem that no longer exists: while an upstream factored second moment warmed
-up, the Gram whose eigenspace the tracker targets was itself shifting, so the
-frame chased a moving target and a hot start was the correct compensation. The
-target is now the leading eigenspace of `G_c^T G_c` from the first step and moves
-only as the model does.
+$$\operatorname{polar}(\Delta)=\Delta V\operatorname{diag}(1/\sigma_i)V^\top,$$
 
-Removing the schedule also makes the tracker observable. `sigma` already
-self-anneals -- a poorly fitted frame gives a large residual and turns hard, a
-well-fitted one settles -- so a decaying schedule on top of it made frame motion
-the product of two annealing terms, and no reading could separate "the tracker
-settled" from "the clock ran out". With a constant step, `rotation_rad_sum` is
-`sigma` up to that constant. EIGH initialization already places the frame on the
-first gradient's leading eigenspace rather than at random, so the geodesic
-maintains a fit rather than searching for one. With
-`basis_update_interval=k`, phase one still runs for every matrix gradient while
-geodesics occur only on matrix steps divisible by `k`. The frame update is
+with numerically dead planes (`sigma_i <= 1e-6 sigma_max`) held at zero rather
+than divided by, preserving the identity that a zero-singular plane does not
+move. This is the same distrust of magnitude the weight update already applies:
+Newton-Schulz discards the projected moment's singular values because direction
+survives a noisy batch and magnitude does not, and the tangent's singular values
+only decide how motion is divided between planes. It costs two `[r,r]` matmuls
+and reuses the eigendecomposition the geodesic already needs.
+
+**Agreement annealing.** Bare polar has no fixed point -- it turns by `eta`
+forever -- and the spectrum cannot supply one: measured under this transform it
+is a smooth power law, `sigma^2 ~ k^{-1.5}` across four decades, with no edge
+separating signal from noise. The time axis can. With `H_t` the leading
+`k = min(16, r)` normalized plane directions of `Delta_t`,
+
+$$a_t=\frac{\lVert H_t^\top H_{t-1}\rVert_F^2}{k},\qquad
+s_t=\operatorname{clamp}\!\left(\frac{a_t-k/(d-r)}{G_t},\,0,\,1\right),$$
+
+and the geodesic runs on `s_t polar(Delta)`, so every live plane turns by exactly
+`eta s_t`. `a_t` is the mean squared cosine of the principal angles between
+consecutive top-`k` aims: it asks whether a `k`-dimensional aim persists and
+forgives rotation inside it. A skewed frame re-measures its own lag every step
+and reads high; an aligned frame emits uncorrelated batch noise and reads low.
+
+Neither anchor is fitted. `k/(d-r)` is the agreement of two random `k`-subspaces
+of the horizontal complement, so an aim agreeing only by chance stops the frame.
+The divisor `G_t` is the fleet median of `(\sum\lambda)^2/(\sum\lambda^2 k)` --
+each matrix's own effective aim rank over the meter width -- computed every step
+from eigenvalues already in hand, with a one-step lag so the median spans the
+whole model rather than one bucket. It is a fleet quantity because per matrix it
+does not work: a matrix's own effective rank predicts its own attainable
+agreement with a 3.6x spread, worse than no per-matrix term, while the fleet
+median lands within 6% of the fleet median of the ceilings observed. Nothing is
+remembered; the attainable ceiling rises ~47% over a run as the aim spreads over
+more planes, so any frozen anchor describes a spectrum the model has left.
+
+`s_t <= 1` is structural, so the frame can never turn harder than bare polar at
+the same `eta` -- a bound, not a measurement. With no stored aim the scale is
+zero and the frame is held for one basis update.
+
+$$\eta=0.01,$$
+
+not scheduled. A `max(0.01, 1/t)` anneal previously sat here, answering a problem
+that no longer exists: while an upstream factored second moment warmed up, the
+Gram whose eigenspace the tracker targets was itself shifting, so the frame
+chased a moving target and a hot start was the correct compensation. The target
+is now the leading eigenspace of `G_c^T G_c` from the first step and moves only
+as the model does. Removing the schedule also makes the tracker observable: with
+a constant step and a measured `transport_speed`, frame motion is one annealing
+term rather than the product of two, so "the tracker settled" is separable from
+"the clock ran out". EIGH initialization already places the frame on the first
+gradient's leading eigenspace rather than at random, so the geodesic maintains a
+fit rather than searching for one. With `basis_update_interval=k`, phase one
+still runs for every matrix gradient while geodesics occur only on matrix steps
+divisible by `k`. The frame update is
 
 $$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta\sigma_i))
 +(\Delta V)\operatorname{diag}
-\left(\frac{\sin(\eta\sigma_i)}{\sigma_i}\right)\right]V^\top.$$
+\left(\frac{\sin(\eta\sigma_i)}{\sigma_i}\right)\right]V^\top,$$
 
+which is exact for whatever horizontal tangent it is handed; the `sigma_i` it
+sees are the per-plane turns already decided above, not the aim's raw spectrum.
 The zero-singular-value limit is `sin(eta sigma) / sigma -> eta`.
 
-**`sigma` is a contrast ratio, not a magnitude.** Both `A` and `R` are quadratic
-in the gradient, so the division by `mean(diag R)` cancels gradient scale
-exactly: rescaling `G_c` by any constant leaves `Delta`, every `sigma_i`, and the
-frame update bit-identical (verified across a 1000x range). What `sigma`
-measures is the out-of-frame coupling against the mean in-frame energy per
-plane. It is therefore already scale-free in the gradient, and unaffected by
-where `grad_clip_norm` sits. It is *not* rank-free: it is a nuclear norm over
-`r` planes and grows roughly linearly in `r` (~37.6 at rank 64 against ~80 at
-rank 128 on the same problem), so a step size tuned at one rank does not
-transfer to another.
-
-`sigma` is raw: neither normalized nor clamped. That is the mechanism, not an
-oversight. A poorly fitted basis produces large `sigma` and turns hard; a
-well-fitted one produces small `sigma` and settles. Normalizing the angle
-(by `sigma_max` or by the tangent's Frobenius norm) forces a constant turn every
-refresh, re-inflates the residual tail, and prevents convergence -- tried,
-rejected. Capping the angle costs the other end, the large-`sigma` acquisition
-the schedule is hot for. Measured on a 2B DiT under the previous harmonic schedule, the per-step angle
-annealed `0.7 -> 0.11 -> 0.038 -> 0.035` rad with no bound applied; under a
-constant step the same self-annealing is what `sigma` alone produces.
+**Raw `sigma` is a contrast ratio, not a magnitude, and it is no longer the
+step.** Both `A` and `R` are quadratic in the gradient, so the division by
+`mean(diag R)` cancels gradient scale exactly: rescaling `G_c` by any constant
+leaves `Delta` and every `sigma_i` bit-identical (verified across a 1000x range).
+What `sigma` measures is out-of-frame coupling against mean in-frame energy per
+plane. It is scale-free in the gradient and unaffected by `grad_clip_norm`, but
+*not* rank-free -- a nuclear norm over `r` planes, growing roughly linearly in
+`r` (~37.6 at rank 64 against ~80 at rank 128 on the same problem). Driving the
+frame with it directly was the released rule until the controller above replaced
+it, and the reason is that its self-annealing is an acquisition transient only:
+`sigma` falls sharply over roughly twenty steps, then flattens and declines a few
+percent across the remaining ~900. Rescaling it by a constant (`sigma_max`, the
+tangent's Frobenius norm) cannot fix that, because a ratio cannot shrink as its
+numerator does; capping the angle fails at the other end, costing acquisition.
+Both were tried and reverted, and neither is what the agreement controller does:
+it reads a different axis entirely.
 
 Equal-rank tangent-Gram eigendecompositions are batched. With
 `S=Q_raw^T Q_raw`, one near-identity step using the converged steady-state
@@ -229,7 +272,7 @@ second tracker state and requires a full matrix gradient on every step.
 
 ### 5. Accumulate momentum
 
-$$M_t=\beta M_{t-1}+(1-\beta)Z_t,\qquad \beta=0.95.$$
+$$M_t=\beta M_{t-1}+(1-\beta)Z_t,\qquad \beta=0.9.$$
 
 There is no EMA bias correction.
 
@@ -428,8 +471,12 @@ moment, and step tensor in their separate optimizer.
 
 Optional, off by default, and structurally incapable of costing anything when
 off: every accumulation site is guarded by one attribute read. Set
-`diagnostics_enabled = True` and drain with `pop_diagnostics()`, which returns a
-plain dict of floats -- no wandb, no trainer, no assumptions about the caller.
+`diagnostics` to `"core"` or `"full"` and drain with `pop_diagnostics()`, which
+returns a plain dict of floats -- no wandb, no trainer, no assumptions about the
+caller. The two live tiers are split by cost, not by usefulness: `"core"` is
+every read derivable from tensors the step already formed, while `"full"` adds
+the three that need a frame snapshot over `diagnostics_lag_matrices` sampled
+matrices.
 
 Measurements accumulate on-device every step; the single device-to-host read
 happens inside `pop_diagnostics()`. A drained value is therefore the mean over
@@ -440,17 +487,40 @@ against a long quiet interval reads as zero.
 
 | key | what it measures |
 |---|---|
-| `rotation_rad_sum` | `eta * sum_i sigma_i` of one geodesic: total frame motion summed over all `r` planes, not a per-plane angle |
+| `transport_speed` | chordal distance the subspace moved in one geodesic, per plane, measured from the frames before and after: `||Q_now - Q_old (Q_old^T Q_now)||_F / sqrt(r)`. Every motion metric below shares this unit, so they can be divided by one another |
 | `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
+| `agreement_scale` | the controller's own output: mean turn scale in `[0,1]`, so a logged point says how much of `eta` the frame is actually taking. Without it an `eta` ladder is blind, since `eta` and the scale multiply |
+| `agreement_gain` | the fleet divisor `G`, one scalar per step. Rises as `tangent_participation` rises; a flat or collapsing gain means the controller has stopped tracking the aim's spread |
+| `tangent_participation` | `(sum_i lambda_i)^2 / (r sum_i lambda_i^2)`, in `[1/r, 1]`: the effective number of planes carrying the aim, as a fraction of `r`. The bulk of the same spectrum concentration reads the head of |
 | `projected_grad_norm` | norm of the clipped gradient inside the held frame |
 | `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
+| `transport_lag` | net distance a sampled frame covered over `diagnostics_lag_interval` basis updates, same unit as the speed. Also the projected moment's smear: set the interval to `1/(1-beta)` and it reads how far the moment's own history has drifted from the coordinates it was accumulated in |
+| `transport_curve` | `1 - lag / path`: the fraction of that window's travel which cancelled. Zero is a straight drift, approaching one is a frame churning in place |
+| `transport_spin` | `||skew(Q_old^T Q_now)||_F / sqrt(r)`: rotation of the frame's columns *within* their own span. Moves the subspace not at all; scrambles the projected moment one-for-one, because transport is the identity in these coordinates |
 
-`rotation_rad_sum` and `tangent_concentration` are read from the eigenvalues the
-geodesic already computes, so they cost nothing beyond two reductions. The pair
-is meant to be read together: the same total rotation is a confident drift when
-concentration is high and a frame spinning on its noise tail when it is low.
+`transport_lag`, `transport_curve` and `transport_spin` need the frame snapshot
+and appear only under `diagnostics = "full"`; the speed does not, since both
+frames are already in hand when the geodesic runs. Read the four motion reads as a set. High speed with
+low curve is a frame travelling, and it will slow as the aim converges. High
+curve with low speed is a frame sitting on its fixed point. High speed *and*
+high curve is churn: the tracker working hard, going nowhere, and integrating
+batch noise into the frame while it does. Low speed with low curve is ambiguous
+between settled and starved, and spin separates them -- a settled frame is still
+in every sense, a spinning one is renaming the moment's coordinates underneath
+it. A single Grassmann geodesic along a horizontal tangent has `Q_old^T Q_now =
+V cos(theta) V^T`, exactly symmetric, so spin is zero for one ideal step and
+what accumulates over a window is holonomy plus retraction and rounding error.
+
+`transport_speed` is measured from the written frames, not from the eigenvalues
+the geodesic was handed. Those agree only while nothing stands between the aim
+and the frame, and they are not the same quantity the moment anything transforms
+the geodesic -- an orthogonalized tangent turns every live plane by `eta`
+whatever `sigma` said. `tangent_concentration` and `tangent_participation` do
+come free from those eigenvalues. Read speed and concentration together: the same
+speed is a confident drift when concentration is high and a frame spinning on its
+noise tail when it is low.
 
 The tangent Gram is decomposed bare. There is no jitter and no retry: a failing
 `eigh` fails, because its result steers the frame and a silently rescued
@@ -470,8 +540,8 @@ These choices define the current design; they are redesignable.
 3. **Side-Gram `eigh` initialization:** directly solves the one-sided target and
    has explicit fp32, finite-input, symmetrization, and jitter behavior.
 4. **One-state full-gradient basis tracking:** the live frame follows the Oja
-   covariance action on its configured cadence, with harmonic geodesic motion
-   `1/2, 1/3, ...` down to `0.01` and no second basis.
+   covariance action on its configured cadence, with a constant geodesic step
+   `eta = 0.01` and no second basis.
 5. **Moving-frame momentum:** identity coordinates preserve the projected
    moment's spectrum through the chosen frame rotation.
 6. **No second moment on the full gradient:** the tangent and the moment both

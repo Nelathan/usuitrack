@@ -38,9 +38,20 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 # Removing it also makes the tracker observable. `sigma` is already
 # self-annealing, so a decaying schedule on top of it made frame motion the
 # product of two annealing terms, and no reading could separate "the tracker
-# settled" from "the clock ran out". Constant step, and `rotation_rad_sum` is
-# `sigma` up to a fixed factor.
+# settled" from "the clock ran out". Constant step, so what `transport_speed`
+# reports is the tracker's own residual and not a schedule -- though the speed is
+# now read from the frames rather than from `sigma`, which is what keeps that
+# true under any experiment that transforms the tangent between the two.
 BASIS_UPDATE_STEP = 0.01
+
+# Meter width for the agreement controller: how many of the tangent's leading
+# planes the persistence read spans. One plane is too noisy to steer with -- its
+# reading plateaus by step 75 and carries ~40% interval noise -- while 16 declines
+# smoothly over a whole run. Widening `k` weakens the question rather than merely
+# smoothing it: the meter is a sum of squared cosines of principal angles, so it
+# asks whether a `k`-dimensional aim persists and forgives rotation inside it.
+# Clamped to the rank actually tracked, which matters below rank 16.
+AGREEMENT_PLANES = 16
 
 
 @dataclass
@@ -51,6 +62,7 @@ class MatrixUpdate:
     original_shape: tuple[int, ...]
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
+    transport_speed: Tensor | None = None
 
 
 class UsuiTrack(Optimizer):
@@ -67,7 +79,7 @@ class UsuiTrack(Optimizer):
         self,
         params: Iterable[Tensor],
         lr: float = 1e-3,
-        beta: float = 0.95,
+        beta: float = 0.9,
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         rank: int = 32,
@@ -123,15 +135,28 @@ class UsuiTrack(Optimizer):
             else None
         )
         self._pending_matrix_updates: dict[Tensor, MatrixUpdate] = {}
-        self.diagnostics_enabled = False
-        # Convergence instrument, off even when diagnostics are on: it is the
-        # only read that goes to zero iff the frame actually stops, and it is
-        # the one diagnostic that costs persistent bytes. Sampled over a few
-        # matrices rather than carried per parameter -- see pop_diagnostics().
-        self.diagnostics_lag_enabled = False
+        # "off", "core" or "full". The line between the two live tiers is state
+        # and flops, not usefulness: `core` is everything derivable from tensors
+        # the step already formed, so it can be left on for a whole training run
+        # without a decision. `full` adds the reads that need a frame snapshot
+        # -- `transport_lag`, `transport_curve`, `transport_spin` -- which is
+        # `[d,r]` over `diagnostics_lag_matrices` sampled matrices, a fixed cost
+        # that does not grow with the model. Off is one attribute read.
+        self.diagnostics = "off"
         self.diagnostics_lag_matrices = 32
-        self.diagnostics_lag_interval = 5
+        # The window the snapshot spans. This is also the projected moment's
+        # memory, so `1 / (1 - beta)` is the interval at which `transport_lag`
+        # reads the moment's own smear rather than an arbitrary window.
+        self.diagnostics_lag_interval = 10
+        # Agreement controller state. One `[d, AGREEMENT_PLANES]` bf16 buffer per
+        # matrix -- an eighth of the basis at rank 128 -- plus one scalar gain for
+        # the whole model. It feeds a ratio and never the update, so bf16 is
+        # ample.
+        self._agreement_previous: dict[Tensor, Tensor] = {}
+        self._agreement_pending: list[Tensor] = []
+        self._agreement_gain: Tensor | None = None
         self._lag_snapshots: dict[Tensor, Tensor] = {}
+        self._lag_path: dict[Tensor, Tensor] = {}
         self._lag_sampled: set[Tensor] | None = None
         self._diagnostics: DiagnosticsAccumulator | None = None
         self._step_update_norm_sq: Tensor | None = None
@@ -226,7 +251,7 @@ class UsuiTrack(Optimizer):
         per site and no device work at all.
         """
 
-        if not self.diagnostics_enabled:
+        if self.diagnostics == "off":
             return None
         if self._diagnostics is None:
             self._diagnostics = DiagnosticsAccumulator()
@@ -236,28 +261,76 @@ class UsuiTrack(Optimizer):
     def pop_diagnostics(self) -> dict[str, float]:
         """Telemetry accumulated since the last call, as a plain dict of floats.
 
-        Set ``diagnostics_enabled = True`` and call this on whatever cadence the
+        Set ``diagnostics`` to ``"core"`` or ``"full"`` and call this on the cadence the
         surrounding trainer already logs at -- every step is supported but not
         the intent, since this is where the accumulated device tensors are read
         back to the host. An empty dict means either telemetry is off or nothing
         has happened since the last read, and is always safe to skip logging.
 
+        Two live tiers, split by cost rather than by usefulness.
+        ``diagnostics = "core"`` is every read derivable from tensors the step
+        already formed -- no state, no decomposition, no extra pass -- so it can
+        be left on for a whole run without a decision. ``"full"`` adds the three
+        reads that need a frame snapshot, which is ``[d,r]`` over
+        ``diagnostics_lag_matrices`` sampled matrices: 16 MB at rank 128 on a
+        1024-wide model, and a fixed cost that does not grow with the model
+        because the sample count is fixed. It buys the only reads that can tell
+        a converged frame from one orbiting a fixed point, so "full" is the tier
+        to run when the question is about the tracker rather than the loss.
+
         Means are over samples (matrix x step) since the last read;
         ``nonfinite_grads`` is a total. What is here answers a specific question, in this
         order of load-bearing-ness:
 
-        ``rotation_rad_sum``
-            How far the frame turned, as the sum of the per-plane angles of one
-            geodesic -- the tangent's nuclear norm times the step size. Not the
-            angle any single plane moves through. Falling is convergence; a
-            Since the step size is a constant, this is ``sigma`` up to that
-            constant, so it reads directly as the tracker's residual.
-        ``tangent_concentration``
-            Where that motion went, in ``[1/r, 1]``: the fraction of the
-            tangent's energy in its leading direction. High means a confident
-            aim drifting; low means the frame is spinning on a near-isotropic
-            noise tail. Distinguishes a long smooth turn from churn, which
-            ``rotation_rad_sum`` alone cannot.
+        ``transport_speed``, ``transport_curve``, ``transport_spin``
+            The frame's motion, read as three quantities that only mean
+            something together. All three are per-plane RMS sines, so they are
+            comparable to each other and across ranks.
+
+            ``transport_speed`` is how far the subspace moved in one geodesic.
+            ``transport_curve`` is `1 - lag / path` over the last
+            ``diagnostics_lag_interval`` basis updates: the fraction of that
+            travel which cancelled, zero for a straight drift and approaching
+            one for a frame churning in place. ``transport_spin`` is rotation of
+            the frame's columns *within* the span they already had -- motion
+            that moves the subspace not at all and scrambles the projected
+            moment one-for-one, since transport is the identity in these
+            coordinates.
+
+            How to read them. High speed is fine if curve is low: the frame is
+            travelling, and it will slow as the aim converges. High curve is
+            fine if speed is low: small motion that mostly cancels is a frame
+            sitting on its fixed point. High speed *and* high curve is churn --
+            the tracker is working hard and going nowhere, and it is integrating
+            batch noise into the frame while it does. Low speed and low curve is
+            ambiguous between a settled frame and a starved one, and spin is
+            what separates them: a settled frame is still in every sense, while
+            a frame with spin is quietly rotating its own coordinates under a
+            moment that assumes they are fixed.
+
+            ``transport_curve`` and ``transport_spin`` need the frame snapshot
+            and so appear only at ``diagnostics = "full"``. ``transport_speed``
+            does not: the frames before and after the geodesic are both already
+            in hand, so it is one matmul and a norm.
+
+            This replaced ``rotation_rad_sum``, which was `sum_i eta sigma_i` --
+            the tangent's nuclear norm. That is a real quantity but not a
+            distance: displacement follows ``||sigma||_2`` and it followed
+            ``sum_i sigma_i``, so the two differ by `sqrt(participation)` and do
+            not move together. It also grew with rank and shared its unit with
+            nothing else here, which made it unreadable against the lag it was
+            meant to be compared with.
+        ``tangent_concentration``, ``tangent_participation``
+            Where that motion went, both in ``[1/r, 1]`` and both free from the
+            same eigenvalues. Concentration is the leading plane's share of the
+            tangent's energy -- the head of the spectrum. Participation is the
+            effective number of planes carrying it, ``(sum lambda)^2 / (r sum
+            lambda^2)`` -- the bulk. They separate because the spectrum is a
+            power law with no edge: a high head does not imply a short tail.
+            High concentration with low participation is a confident aim
+            drifting; low concentration with high participation is a frame
+            turning on a near-isotropic noise tail, which is a mechanism for
+            integrating batch noise into the basis.
         ``projected_grad_norm``, ``grad_to_moment_ratio``
             Scale of the gradient inside the frame, and how much of
             the moment is this batch rather than history. The ratio is against
@@ -277,13 +350,17 @@ class UsuiTrack(Optimizer):
             Read it beside ``tangent_concentration``: disagreement with a
             concentrated spectrum is structured drift, disagreement with a flat
             one is noise.
-        ``basis_lag_rms_sin``
-            Only present when ``diagnostics_lag_enabled``. RMS sine of the
-            principal angles between each sampled frame and its own snapshot
-            ``diagnostics_lag_interval`` basis updates ago. Zero iff every
-            tracked plane has stopped. This is the only metric here that can
-            distinguish a frame that has converged from one orbiting a fixed
-            point at constant radius; every other read is floored by aim noise.
+        ``transport_lag``
+            Only present at ``diagnostics = "full"``. The net distance each
+            sampled frame covered over the last ``diagnostics_lag_interval``
+            basis updates -- the numerator ``transport_curve`` divides. Zero iff
+            every tracked plane has stopped. Read directly, it is also the
+            projected moment's smear: under identity transport a contribution
+            from `k` updates ago has been misaligned by exactly these principal
+            angles, so setting ``diagnostics_lag_interval`` to the moment's
+            memory ``1 / (1 - beta)`` makes this read the fraction of the
+            moment's own history that no longer names the direction it was
+            accumulated in.
         ``nonfinite_grads``
             How many incoming matrix gradients arrived non-finite and were
             sanitized at the clip. This is the one guard left on the matrix path,
@@ -432,6 +509,7 @@ class UsuiTrack(Optimizer):
             # transport is exact because the geodesic is a rigid rotation.
             self._apply_matrix_update_buckets(matrix_updates, group)
             self._apply_basis_updates(matrix_updates, group)
+        self._commit_agreement_gain()
 
         # One sample per step, not per matrix: the quantity that means something
         # is the whole step's motion against the whole model's norm, so the
@@ -689,7 +767,7 @@ class UsuiTrack(Optimizer):
             # fails, which is what you want from a decomposition whose result
             # steers the frame.
             eigenvalues, eigenvectors = torch.linalg.eigh(grams)
-            self._record_basis_motion_diagnostics(diagnostics, eigenvalues, step_size)
+            self._record_tangent_spectrum_diagnostics(diagnostics, eigenvalues)
             geometry_buckets: dict[tuple, list[int]] = {}
             for index, entry in enumerate(bucket_entries):
                 tangent = entry.oja_tangent
@@ -699,8 +777,13 @@ class UsuiTrack(Optimizer):
                 selected_entries = [bucket_entries[index] for index in indices]
                 frames = torch.stack([entry.projector.canonical_basis() for entry in selected_entries])
                 selected_tangents = torch.stack([entry.oja_tangent for entry in selected_entries if entry.oja_tangent is not None])
-                selected_values = eigenvalues[indices]
                 selected_vectors = eigenvectors[indices]
+                selected_tangents, selected_values = self._anneal_tangent(
+                    selected_entries,
+                    selected_tangents,
+                    eigenvalues[indices],
+                    selected_vectors,
+                )
                 new_frames = SubspaceProjector.oja_geodesic_from_eigh(
                     frames,
                     selected_tangents,
@@ -708,8 +791,20 @@ class UsuiTrack(Optimizer):
                     selected_vectors,
                     step_size,
                 )
+                self._record_followed_step(selected_entries, frames, new_frames)
                 for entry, new_frame in zip(selected_entries, new_frames, strict=True):
                     basis = new_frame.mT if side is ProjectionSide.RIGHT else new_frame
+                    # Round-to-nearest, deliberately, and this is the one write
+                    # in the optimizer where that is the right call. Stochastic
+                    # rounding exists to stop a sub-ulp *update* vanishing, and
+                    # the frame has no sub-ulp update to lose -- the geodesic
+                    # moves it by a real angle every time. What bf16 storage
+                    # costs the frame is `transport_spin`, in-span rotation that
+                    # scrambles the projected moment's coordinates for no
+                    # subspace progress, and that is variance rather than bias:
+                    # measured, stochastic rounding here makes it `sqrt(2)` times
+                    # worse at every window, which is exactly the extra variance
+                    # of a full-ulp uniform draw over a half-ulp bound.
                     entry.projector.basis = basis.to(
                         device=entry.projector.basis.device,
                         dtype=entry.projector.basis.dtype,
@@ -720,21 +815,229 @@ class UsuiTrack(Optimizer):
                     state["projection_side_is_right"] = side is ProjectionSide.RIGHT
         self._record_basis_lag(pending, group)
 
+    @torch.no_grad()
+    def _anneal_tangent(
+        self,
+        entries: list[MatrixUpdate],
+        tangents: Tensor,
+        eigenvalues: Tensor,
+        eigenvectors: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """Turn every plane by the same angle, scaled by how much the aim repeats.
+
+        Two decisions, taken together because neither survives alone.
+
+        **Every live plane turns by the same angle.** The tangent is replaced by
+        its polar factor, which is the same distrust of magnitude the weight
+        update already applies: Newton-Schulz throws away the projected moment's
+        singular values because direction is what survives a noisy batch and
+        magnitude is not, and the tangent's singular values deserve no more
+        credit. They only decide how the frame's motion is divided between
+        planes, and the leading plane -- which owns most of the displacement --
+        is measurably the least persistent thing in the aim. `polar(Delta) =
+        Delta V diag(1/sigma) V^T` falls straight out of the eigendecomposition
+        the geodesic already needs, so this costs two `[r,r]` matmuls and no
+        Newton-Schulz. Numerically dead planes are held still rather than divided
+        by, preserving the identity that a zero singular plane does not move.
+
+        **How far it turns comes from time, not from the spectrum.** Bare polar
+        has no fixed point: it turns by `eta` forever, whether or not the frame
+        has arrived. And the spectrum cannot supply one, because measured under
+        this transform it is a smooth power law -- `sigma^2 ~ k^-1.5` across four
+        decades -- with no edge separating signal from noise. The time axis can. A
+        skewed frame emits a residual that repeats, since it is re-measuring its
+        own lag every step, while an aligned frame emits uncorrelated batch
+        noise. So the turn is scaled by `agreement`, the mean squared cosine of
+        the principal angles between this step's top-`k` aim and the previous
+        step's.
+
+        **The normalization carries no fitted constant.** Chance agreement between
+        two random `k`-subspaces of the `(d-r)`-dimensional horizontal complement
+        is `k/(d-r)`, the `floor` below, subtracted so that an aim agreeing only
+        by chance stops the frame. The top of the range is not perfect agreement:
+        a single-batch aim never repeats exactly, so what is attainable is set by
+        how many planes the aim actually occupies. The aim's effective rank is
+        `(sum lambda)^2 / sum lambda^2`, and a top-`k` meter can at best reproduce
+        that many directions, so `effective_rank / k` is the agreement a matrix
+        could reach. The fleet median of that is the divisor `G`.
+
+        Why the fleet and not each matrix: per matrix, a matrix's own effective
+        rank predicts its own attainable agreement with a 3.6x spread -- worse
+        than using no per-matrix term at all -- while the fleet median lands
+        within 6% of the fleet median of the ceilings actually observed. The
+        signal is in the fleet, not the individual, which is also what makes one
+        global yardstick defensible: the ceilings span only 2.4x across the middle
+        80%. Dividing by a shared `G` therefore leaves the differences between
+        matrices intact, so a matrix that holds its aim longer keeps turning
+        instead of having that normalized away.
+
+        `G` is recomputed every step from eigenvalues already in hand, with a
+        one-step lag so the median spans the whole model rather than whichever
+        bucket is in flight. Nothing is remembered, which is the property a
+        running peak could not have: measured, the attainable ceiling *rises ~47%
+        over a run* as the gradient's principal subspace flattens and the aim
+        spreads over more planes, so an anchor frozen during acquisition is
+        describing a spectrum the model has since left.
+
+        `scale <= 1` is structural, so the frame can never turn harder than bare
+        polar at the same `eta` -- a bound rather than a measurement. It matters:
+        normalizing the other way, with acquisition running 4x hot, was tried and
+        diverged inside 14 steps. With no history there is no evidence the aim
+        repeats, so the scale is zero and the frame holds; that costs exactly one
+        basis update and is what keeps the first turn off the stability cliff.
+
+        Honest limit: the meter plateaus above its floor rather than reaching it,
+        so this anneals the turn by ~4x and then holds. It buys acquisition and a
+        derived scale; it is not a stopping condition for the frame.
+        """
+
+        sigma = eigenvalues.clamp_min(0.0).sqrt()
+        live = sigma > 1e-6 * sigma.amax(dim=-1, keepdim=True).clamp_min(1e-30)
+        inverse = torch.where(live, 1.0 / sigma.clamp_min(1e-30), torch.zeros_like(sigma))
+        # Normalized columns of `Delta V`: the tangent's plane directions. `eigh`
+        # returns ascending, so flipping puts the leading plane first and the
+        # meter's `head` is a plain prefix.
+        directions = ((tangents @ eigenvectors) * inverse.unsqueeze(-2).to(tangents.dtype)).flip(-1)
+        rank = directions.shape[-1]
+        keep = min(AGREEMENT_PLANES, rank)
+        head = directions[..., :keep].float()
+        floor = keep / max(1, directions.shape[-2] - rank)
+
+        stored = [self._agreement_previous.get(entry.param) for entry in entries]
+        for entry, current in zip(entries, head.unbind(0), strict=True):
+            self._agreement_previous[entry.param] = current.to(torch.bfloat16)
+
+        scale = torch.zeros(head.shape[0], device=tangents.device, dtype=torch.float32)
+        gain = self._agreement_gain
+        ready = [index for index, past in enumerate(stored) if past is not None and past.shape == head.shape[1:]]
+        if ready and gain is not None:
+            rows = torch.tensor(ready, device=tangents.device)
+            cross = head[rows].mT @ torch.stack([stored[index] for index in ready]).float()
+            agreement = cross.square().flatten(1).sum(-1) / keep
+            excess = (agreement - floor).clamp_min(0.0)
+            scale[rows] = (excess / gain.clamp_min(1e-12)).clamp(0.0, 1.0)
+
+        # Next step's divisor, per matrix and so free of any assumption that one
+        # rank spans the fleet: `effective_rank / k` with both read from this
+        # matrix's own spectrum.
+        spectrum = eigenvalues.clamp_min(0.0).float()
+        energy = spectrum.sum(dim=-1).clamp_min(1e-12)
+        attainable = energy.square() / spectrum.square().sum(dim=-1).clamp_min(1e-12) / keep
+        self._agreement_pending.append(attainable)
+
+        diagnostics = self._diagnostics_sink()
+        if diagnostics is not None:
+            diagnostics.add("agreement_scale", scale.sum(), count=scale.shape[0])
+
+        # The geodesic reads its per-plane angles as `sqrt(eigenvalues)`, and the
+        # polar factor's own singular values are all one, so handing it `scale^2`
+        # is what makes every live plane turn by exactly `eta * scale`.
+        annealed = (directions.flip(-1) @ eigenvectors.mT) * scale.to(tangents.dtype).reshape(-1, 1, 1)
+        values = scale.square().unsqueeze(-1).expand_as(eigenvalues).to(eigenvalues.dtype)
+        return annealed, values
+
+    @torch.no_grad()
+    def _commit_agreement_gain(self) -> None:
+        """Fold this step's attainable ceilings into the divisor the next one uses.
+
+        Median rather than mean, because the fleet contains matrices whose aim is
+        near-rank-one and the controller should not be steered by them. Committed
+        once per step, after every group, so the fleet is the model.
+        """
+
+        if not self._agreement_pending:
+            return
+        self._agreement_gain = torch.cat(self._agreement_pending).median()
+        self._agreement_pending.clear()
+        diagnostics = self._diagnostics_sink()
+        if diagnostics is not None:
+            diagnostics.add("agreement_gain", self._agreement_gain)
+
+    def _lag_sample(self) -> set[Tensor]:
+        """The matrices the snapshot instruments follow, chosen once.
+
+        Deterministic, so two runs of the same config measure the same tensors
+        and their curves are comparable.
+        """
+
+        if self._lag_sampled is None:
+            matrices = [param for group in self.param_groups for param in group["params"]]
+            self._lag_sampled = set(matrices[: max(0, self.diagnostics_lag_matrices)])
+        return self._lag_sampled
+
+    @torch.no_grad()
+    def _record_followed_step(self, entries: list[MatrixUpdate], before: Tensor, after: Tensor) -> None:
+        """Distance each sampled frame actually moved, measured from the frames.
+
+        Measured from the frames, which is the only reason this method exists.
+        `transport_speed` used to be read from the tangent's eigenvalues *before*
+        the geodesic ran -- what the aim proposed rather than what the frame did.
+        Those agree only while nothing stands between them. An orthogonalized
+        tangent turns every live plane by `eta` regardless of what `sigma` said,
+        and measured on a real run the proposal read 2.2x the motion followed, so
+        every ortho arm's speed was reporting a turn that never happened.
+
+        `transport_curve` is a ratio, so its numerator and denominator have to
+        be the same kind of measurement. This is the denominator: the same
+        chordal distance `transport_lag` reports, over one update instead of a
+        window, taken from the frame that was actually written.
+        """
+
+        sample = self._lag_sample()
+        indices = [index for index, entry in enumerate(entries) if entry.param in sample]
+        if not indices:
+            return
+        start = before[indices].float()
+        end = after[indices].float()
+        residual = end - start @ (start.mT @ end)
+        followed = residual.flatten(1).norm(dim=-1) / math.sqrt(end.shape[-1])
+        for entry, distance in zip((entries[index] for index in indices), followed.unbind(0), strict=True):
+            entry.transport_speed = distance
+        # Published here rather than from the eigenvalues, because the frame is
+        # the thing the name promises. The two agree in the release and come
+        # apart under any experiment that transforms the geodesic -- measured, an
+        # orthogonalized tangent turns every plane by `eta` while the raw
+        # spectrum proposed 2.2x that, so the eigenvalue read was reporting an
+        # aim the frame never followed.
+        diagnostics = self._diagnostics
+        if diagnostics is not None:
+            diagnostics.add("transport_speed", followed.sum(), count=len(indices))
+
     def _record_basis_lag(self, entries: list[MatrixUpdate], group: dict) -> None:
-        """Principal-angle distance between each sampled frame and its own past.
+        """Where each sampled frame ended up against where it has been.
 
-        The one read that can show convergence. `rotation_rad_sum` cannot: it is
-        floored by single-batch noise in the aim, so a frame orbiting a fixed
-        point at constant radius reports the same rotation forever as one that
-        is genuinely still travelling. Comparing the frame to *itself* some
-        refreshes back cancels that -- an orbit returns, a drift does not.
+        `transport_speed` says how fast the frame moves and cannot say whether
+        that motion goes anywhere: it is floored by single-batch noise in the
+        aim, so a frame orbiting a fixed point at constant radius reports the
+        same speed forever as one genuinely travelling. Comparing the frame to
+        *itself* some refreshes back cancels that -- an orbit returns, a drift
+        does not. Three reads come out of the one comparison, and they are only
+        meaningful together.
 
-        Reported as an RMS sine of the principal angles, which is exact and
-        needs no decomposition: with `C = Q_old^T Q_now`, the residual
-        `R = Q_now - Q_old C` has `||R||_F^2 = sum_i sin^2(theta_i)`. Forming
-        `R` by subtracting the vectors rather than the squared cosines is what
-        keeps it well conditioned at the small angles that matter here. It goes
-        to zero if and only if every tracked plane has stopped moving.
+        `transport_lag` is the net distance covered over the window, in the same
+        per-plane RMS-sine unit as the speed. Exact and needing no
+        decomposition: with `C = Q_old^T Q_now`, the residual `R = Q_now -
+        Q_old C` has `||R||_F^2 = sum_i sin^2(theta_i)`. Subtracting the vectors
+        rather than the squared cosines is what keeps it well conditioned at the
+        small angles that matter here.
+
+        `transport_curve` is `1 - lag / path`, the fraction of the window's
+        travel that cancelled. Zero is a straight drift; approaching one is a
+        frame churning in place. This is what distinguishes a tracker that is
+        settling from one that is merely slow -- speed alone cannot, since
+        halving the step size halves both a productive drift and a useless
+        orbit.
+
+        `transport_spin` is rotation of the frame's columns *inside* the span
+        they already had, which moves the subspace not at all and scrambles the
+        moment one-for-one, since transport is the identity in these
+        coordinates. It is the skew part of `C`: a single Grassmann geodesic
+        along a horizontal tangent gives `C = V cos(theta) V^T`, exactly
+        symmetric, so a nonzero skew is either genuine holonomy -- the product
+        of several such symmetric steps need not be symmetric -- or retraction
+        and rounding error. Both break identity transport, so this is the
+        measurement that says whether the moment's coordinates still mean what
+        they meant, rather than an argument that they should.
 
         Sampled over `diagnostics_lag_matrices` parameters, not carried per
         parameter: this is the only diagnostic that costs persistent bytes
@@ -744,52 +1047,63 @@ class UsuiTrack(Optimizer):
         """
 
         diagnostics = self._diagnostics_sink()
-        if diagnostics is None or not self.diagnostics_lag_enabled:
+        if diagnostics is None or self.diagnostics != "full":
             return
-        if group["basis_update_step"] % max(1, self.diagnostics_lag_interval):
-            return
-        if self._lag_sampled is None:
-            # Deterministic sample, so two runs of the same config measure the
-            # same tensors and their curves are comparable.
-            matrices = [param for candidate in self.param_groups for param in candidate["params"]]
-            self._lag_sampled = set(matrices[: max(0, self.diagnostics_lag_matrices)])
+        # The path has to accumulate on every basis update while the snapshot is
+        # only taken on the window boundary, so this runs unconditionally and the
+        # window check happens per entry below.
+        due = group["basis_update_step"] % max(1, self.diagnostics_lag_interval) == 0
+        sample = self._lag_sample()
         for entry in entries:
-            if entry.param not in self._lag_sampled:
+            if entry.param not in sample:
+                continue
+            if entry.transport_speed is not None:
+                walked = self._lag_path.get(entry.param)
+                self._lag_path[entry.param] = entry.transport_speed if walked is None else walked + entry.transport_speed
+            if not due:
                 continue
             frame = entry.projector.canonical_basis().float()
             previous = self._lag_snapshots.get(entry.param)
             self._lag_snapshots[entry.param] = frame.clone()
+            path = self._lag_path.pop(entry.param, None)
             if previous is None or previous.shape != frame.shape:
                 continue
-            residual = frame - previous @ (previous.mT @ frame)
-            rank = frame.shape[1]
-            diagnostics.add("basis_lag_rms_sin", residual.norm() / math.sqrt(rank))
+            root = math.sqrt(frame.shape[1])
+            overlap = previous.mT @ frame
+            lag = (frame - previous @ overlap).norm() / root
+            diagnostics.add("transport_lag", lag)
+            diagnostics.add("transport_spin", (overlap - overlap.mT).norm() / (2.0 * root))
+            if path is not None:
+                diagnostics.add("transport_curve", 1.0 - lag / path.clamp_min(1e-12))
 
     @staticmethod
-    def _record_basis_motion_diagnostics(
+    def _record_tangent_spectrum_diagnostics(
         diagnostics: DiagnosticsAccumulator | None,
         eigenvalues: Tensor,
-        step_size: float,
     ) -> None:
-        """How far the frame turns, and how concentrated that turn is.
+        """The shape of the aim's spectrum: how concentrated, how many planes.
 
-        Both come free from the eigenvalues the geodesic already needs. The
-        angle is the sum of the per-plane rotations -- the tangent's nuclear
-        norm scaled by the step size -- so it is a measure of total motion
-        across all `r` planes, not of how far any one plane moves.
-        Concentration, the leading eigenvalue's share of the trace, is what
-        separates a confident drift from a frame spinning on its noise tail:
-        the same total angle can be either.
+        `tangent_concentration` is the leading eigenvalue's share of the trace and
+        `tangent_participation` the spectrum's effective rank over `r`. Together
+        they separate a confident drift from a frame spinning on its noise tail --
+        the same displacement can be either.
+
+        This used to publish `transport_speed` from these eigenvalues too, as the
+        displacement the geodesic *would* produce. That reading is gone: speed is
+        measured from the frames in `_record_followed_step`, because the two agree
+        only while nothing transforms the geodesic between the two points.
         """
 
         if diagnostics is None:
             return
         spectrum = eigenvalues.clamp_min(0.0)
-        rotation = step_size * spectrum.sqrt().sum(dim=-1)
-        concentration = spectrum.amax(dim=-1) / spectrum.sum(dim=-1).clamp_min(1e-12)
+        rank = spectrum.shape[-1]
+        energy = spectrum.sum(dim=-1).clamp_min(1e-12)
+        concentration = spectrum.amax(dim=-1) / energy
+        participation = energy.square() / spectrum.square().sum(dim=-1).clamp_min(1e-12) / rank
         samples = int(spectrum.shape[0])
-        diagnostics.add("rotation_rad_sum", rotation.sum(), count=samples)
         diagnostics.add("tangent_concentration", concentration.sum(), count=samples)
+        diagnostics.add("tangent_participation", participation.sum(), count=samples)
 
     @staticmethod
     def _basis_update_step_size(group: dict) -> float:

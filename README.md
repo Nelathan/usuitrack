@@ -96,7 +96,7 @@ particular trainer -- it is a plain dict of floats, so it drops straight into
 whatever logging you already have:
 
 ```python
-matrix_opt.diagnostics_enabled = True
+matrix_opt.diagnostics = "core"   # or "full"; "off" is the default
 ...
 if step % 10 == 0:
     for key, value in matrix_opt.pop_diagnostics().items():
@@ -109,12 +109,26 @@ the last read rather than a sample of one step, and the hot path stays free of
 device syncs. Call it on your logging cadence, not every step. An empty dict
 means nothing has happened since the last read and is safe to skip.
 
-The two that answer the title question are `rotation_rad_sum` (how far the frame
-turned -- summed across all `r` planes, so it is total motion, not a per-plane
-angle) and `tangent_concentration` (where that motion went, as the leading
-direction's share of the tangent's energy). A frame drifting toward a real
-signal turns with high concentration; a frame churning on this batch's noise
-shows the same total motion spread flat across every plane.
+Two tiers, split by cost rather than by usefulness. `"core"` is everything that
+falls out of tensors the step already formed, so it can stay on for a whole run
+without a decision. `"full"` adds the three reads that need a frame snapshot,
+which is a fixed cost over a fixed sample of matrices.
+
+The one that answers the title question is `transport_speed`: how far the frame
+moved in one update, as an RMS angle per tracked plane. Switch to `"full"` and
+`transport_curve` answers the follow-up -- how much of that motion actually went
+anywhere, rather than cancelling.
+
+`tangent_concentration` answers a different question, and it is the more
+interesting one over a long run: how structured the space being tracked still
+is. It is the leading direction's share of the tangent's energy, so it falls as
+the gradient's principal subspace flattens and the easy structure gets used up.
+Measured on a 1k finetune it reads `0.79` early and `0.68` by the end, while
+`tangent_participation` climbs from `0.014` to `0.020` -- the same story from the
+other side, with more planes carrying comparable energy. Read together they say
+how much anisotropy is left to track, not whether the frame is chasing noise;
+speed, curve and spin are what answer that.
+
 `pop_diagnostics()`'s docstring documents the rest.
 
 UsuiTrack is built for full-parameter training; LoRA is the comparison
@@ -141,7 +155,14 @@ In short: each matrix keeps a small orthonormal basis (`rank` columns) and a
 projected first moment in that basis. The basis moves via an exact
 Grassmann-geodesic step driven by an Oja covariance tangent, so momentum
 transports through basis motion as a rigid rotation instead of being
-re-projected and losing energy. Direction comes from a leverage-balanced
+re-projected and losing energy. Every tracked plane turns by the same angle --
+the tangent's magnitudes decide only how motion is split between planes, and on
+a single batch they are the least trustworthy thing in it -- and how large that
+angle is comes from how much this step's aim agrees with the previous step's. A
+frame that is still skewed keeps re-measuring its own lag, so its aim repeats and
+it turns; a fitted frame sees uncorrelated batch noise and slows. Both ends of
+that meter are geometry rather than tuning, so the tracker carries no fitted
+constant beyond the step size itself. Direction comes from a leverage-balanced
 Newton-Schulz polar map ([Aurora](https://github.com/tilde-research/aurora-release),
 from Tilde Research), using the optimal coefficient schedule from
 Amsel, Persson, Musco, and Gower's ["The Polar

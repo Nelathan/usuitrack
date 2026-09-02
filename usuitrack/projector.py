@@ -123,11 +123,14 @@ class SubspaceProjector:
     @staticmethod
     def oja_geodesic_from_eigh(frame: Tensor, tangent: Tensor, eigenvalues: Tensor, eigenvectors: Tensor, step_size: float) -> Tensor:
         sigma = eigenvalues.clamp_min(0.0).sqrt()
-        # Raw sigma, deliberately unnormalized and unclamped. The step is
-        # self-annealing: a poorly fitted basis gives large sigma and a large
-        # turn, a well-fitted one gives small sigma and settles. Normalizing or
-        # capping the angle removes exactly that behaviour -- measured on a real
-        # run the angle falls 0.7 -> 0.035 rad on its own.
+        # Pure geometry: the exact Grassmann geodesic along whatever horizontal
+        # tangent it is handed, at whatever magnitude that tangent carries. It
+        # deliberately holds no opinion about how far the frame *should* turn.
+        # That question moved to the optimizer, which hands this an
+        # orthogonalized tangent scaled by the agreement controller, so `sigma`
+        # arriving here is the per-plane turn already decided rather than the
+        # aim's raw singular values. Keeping the two apart is what lets the
+        # controller be measured against this as a baseline.
         rotation = step_size * sigma
         sin_over_sigma = torch.where(sigma > 1e-7, torch.sin(rotation) / sigma.clamp_min(1e-12), torch.full_like(sigma, step_size))
         moved = ((frame @ eigenvectors) * torch.cos(rotation).unsqueeze(-2) + (tangent @ eigenvectors) * sin_over_sigma.unsqueeze(-2)) @ eigenvectors.mT

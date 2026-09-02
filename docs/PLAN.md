@@ -27,18 +27,11 @@ state, FLOPs, both `adafactor_*` constructor arguments, the two fused kernels
 that carried it, and the `row_mute_fraction` diagnostic that existed to watch it.
 
 Measured on LFM2.5-350M, rank 128, bs16 x seq1024, 1k steps, LR `2e-4`, one
-variable apart:
-
-| conditioning | target | source | s/step | matrix state |
-|---|---:|---:|---:|---:|
-| both consumers (was default) | 1.681140 | 3.094790 | 0.7483 | 97.4 MB |
-| moment only, raw aim | 1.686383 | 3.113945 | 0.7533 | 97.4 MB |
-| neither | 1.684664 | 3.115753 | **0.7299** | **95.9 MB** |
-
-`0.0035` of target loss for 2.5% of walltime and 1.5% of state. Note that
-removing it from the moment as well was *better* than keeping it there once the
-aim read raw -- there was no configuration in which conditioning the moment
-alone paid.
+variable apart across three arms: conditioning bought `0.0035` of target loss for
+2.5% of walltime and 1.5% of matrix state. Removing it from the moment as well
+was *better* than keeping it there once the aim read raw -- there was no
+configuration in which conditioning the moment alone paid. (Numbers in wandb;
+this file carries the reasoning.)
 
 **The reason it is a good deletion is not the walltime.** The Oja action is
 `(G^T G) B^T`, and a frame fitted on `G` **is** the leading eigenspace of
@@ -299,48 +292,988 @@ is second order. P1's note that "if a second moment is needed the shape is a
 projected one at `[m,r]`" stands as a fallback, but the case for needing one is
 weaker after this measurement, not stronger.
 
-### Where the tracker actually stands, and why it is not deletable
+### Where the tracker actually stands
 
-The step-size sweep (constant `eta`, no moment, seeded, 1k steps, `eta` from
-frozen to `0.3`) settled several things and one of them is a correction.
+A step-size sweep (constant `eta`, no moment, seeded, 1k steps, frozen through
+`0.3`) plus random-init and periodic-refit controls. Reasoning only; numbers are
+in wandb.
 
-**Tracking does real geometric work.** A frozen frame loses essentially all its
-alignment within 200 steps -- `sigma` 50 -> 91 -> 98 -> **101, saturated** -- while
-tracking at `0.01` holds 74 and is still improving at step 1000. That is a 26%
-better residual, sustained.
+**Oja tracking works** EIGH initialization hands the tracker `sigma ~ 50` and
+the frame settles at 74, which looked like the aim degrading a good subspace.
+But refitting by EIGH *mid-training*  
+raised `sigma` from 79 to 90 every time, lowered projected-grad norm and left it
+lower, and cost target loss. A single-batch eigendecomposition cannot find a
+better frame once training is underway.
 
-**No step size recovers the quality of the initial fit.** EIGH hands the tracker
-`sigma ~ 50`. Every arm, at every step size across a 100x range, rises to 80+ and
-then settles at best to 74. `0.003` and `0.01` are indistinguishable; above `0.01`
-alignment degrades monotonically and motion efficiency collapses (net displacement
-per unit turning falls 7.5x from `eta=0.01` to `0.3`). **The aim, not the step
-size, is what limits the tracker** -- a bad formula run slowly is still a bad
-formula.
+**`sigma ~ 50` was a property of the data, not of EIGH.** Early in training the
+gradient is nearly low-rank, so any method fits it easily. As the model moves the gradient's effective rank grows and more energy necessarily sits outside a
+rank-128 frame, so `sigma` rises. **The climb from 50 to 74 is the problem
+getting harder, not the tracker getting worse.** Oja's frame is an implicit
+average over hundreds of batches; a fresh fit is one noisy sample. After the
+early phase, averaging wins, and that is what the refit control measures.
 
-**Loss barely notices any of it.** The entire 100x sweep spans `0.0057` of target
-loss. Frozen costs only `0.0038` against the best tracked arm -- the same
-magnitude as the Adafactor effect P1 deleted. Source is flat to slightly better
-frozen.
+**The equilibrium at 74 is the aim's own fixed point.** Random initialization
+starts at `sigma = 116` and converges *up* to 75; EIGH starts at 50 and converges
+*down* to 74. Every equilibrium quantity matches from both directions --
+projected-grad norm, lag, concentration. So the aim acquires correctly and is not
+broken; 74-75 is simply where this formula lives.
 
-**That last number does not argue for deleting tracking, and reading it that way
-was an error of criterion.** A frozen basis confines every weight update to one
-rank-128 subspace forever; the rest of the parameter space is unreachable. For
-continual pretraining -- the product target -- that is disqualifying whatever a
-1k-step loss says. Loss at this horizon cannot see a capability constraint.
-Periodic EIGH refitting is the fallback if Oja tracking cannot be fixed.
+**No step size improves it.** Across a 100x range `sigma` never goes below ~74.
+`0.003` and `0.01` are indistinguishable; above `0.01` alignment degrades
+monotonically and motion efficiency collapses 7.5x (net displacement per unit
+turning). The aim, not the step size, sets the equilibrium -- which is why the
+open work is a better formula and not a better schedule.
 
-**What it does say is that update quality is robust to subspace quality.** Even a
-badly aligned frame produces good updates, which is a real and useful property --
-but it means loss is a blunt instrument for tracker work, and tracker changes
-must be judged on `sigma`, lag, and capture rather than on loss deltas that sit
-near the noise floor.
+**Update quality is robust to subspace quality, so loss is a blunt instrument
+here.** The entire 100x step-size sweep spans `0.0057` of target loss, and a
+frozen basis costs only `0.0038`. Tracker changes must be judged on `sigma`,
+lag, capture and concentration; loss deltas at this scale sit within a few
+multiples of the noise floor and cannot resolve them.
 
-**Open, and the first thing to run when experiments resume: random basis
-initialization.** If Oja from a random frame converges to the same `sigma ~ 74`
-it settles at from an EIGH start, then 74 is Oja's own equilibrium and EIGH
-initialization is simply a better place than its aim can hold. If random
-converges somewhere worse, the aim cannot acquire at all. Either answer localizes
-the defect.
+**Tracking is not deletable regardless of what loss says.** A frozen basis
+confines every update to one rank-128 subspace forever, so the rest of the
+parameter space is unreachable. For continual pretraining -- the product target
+-- that is disqualifying at any loss. Periodic EIGH refitting was the assumed
+fallback and is now measured as *worse than tracking*, so that safety net is
+gone: the tracker has to be good because there is nothing to fall back to.
+
+**Early subspace quality matters more than late.** Random init recovers fully by
+step 500 -- identical geometry to the EIGH arm -- and still finishes `0.0038`
+worse on target, the same cost as never tracking at all. Damage done in the
+first couple hundred steps is not repaid by later alignment. Whatever a new aim
+does, it must not be slow to acquire.
+
+**Ordering fix: correct, and null at the operating point.** The geodesic now runs
+after the parameter update so one frame serves the projection, the tangent and
+the lift. At `eta=0.01` the frame turns about a degree per step, so the effect is
+within noise; it mattered mainly as a confound on the high-`eta` arms, where
+per-step rotation was 10-30x larger. It also removes the last alibi for the
+plateau: 74 with the frame held fixed through the whole step.
+
+### The frame's motion is three quantities, not one
+
+`rotation_rad_sum` is deleted. It was `sum_i eta sigma_i`, the tangent's nuclear
+norm -- a real quantity, but not a distance, and in a unit no other metric here
+shared. Displacement follows `||sigma||_2` and it followed `sum_i sigma_i`, so
+the two differ by `sqrt(participation)` and do not move together; it also grew
+with rank, which made it unreadable against the lag it was supposed to be
+compared with. Every arm measured before this was ranked with two motion metrics
+in incompatible units -- `basis_lag_rms_sin` divided by `sqrt(r)` and the lab
+probe's `frame_displacement` did not.
+
+What replaces it is a triple, all per-plane RMS sines so they divide by each
+other. **`transport_speed`** is how far the subspace moved in one geodesic,
+`sqrt(sum_i sin^2(eta sigma_i) / r)`, free from the eigenvalues already in hand.
+**`transport_curve`** is `1 - lag/path` over the lag window: the fraction of the
+travel that cancelled. **`transport_spin`** is the skew part of `Q_old^T Q_now`,
+rotation of the frame's columns inside the span they already had.
+
+How they read together, which is the only way they read at all. High speed with
+low curve is a frame travelling, and it will slow as the aim converges. High
+curve with low speed is a frame on its fixed point. High speed *and* high curve
+is churn -- working hard, going nowhere, integrating batch noise into the basis
+while it does. Low speed with low curve is ambiguous between settled and
+starved, and spin separates them.
+
+**Curve is what the step-size sweep could not see.** Halving `eta` halves a
+productive drift and a useless orbit identically, which is why a 100x sweep
+moved `sigma` by nothing: speed is not a quality. Curve is the first read that
+is scale-free in `eta`.
+
+**Spin is the identity-transport audit, and it came free.** Transport is the
+identity in frame coordinates, which is exact for subspace motion and wrong for
+in-span rotation -- that renames every coordinate the moment is stored in while
+moving the subspace not at all. A horizontal-tangent geodesic gives
+`Q^T Q+ = V cos(theta) V^T`, exactly symmetric, so the skew part is zero for one
+ideal step and everything that accumulates over a window is holonomy plus
+rounding. That makes "is identity transport still valid" a measurement rather
+than an argument, and P7 answers it: yes, at a cost of 0.6% of the moment's
+total smear.
+
+**`transport_lag` is the moment's smear, read directly.** Under identity
+transport a contribution from `k` updates ago has been misaligned by exactly the
+principal angles over those `k` updates, so the lag interval is not a free knob:
+at `1/(1 - beta)` it reads the fraction of the moment's own history that no
+longer names the direction it was accumulated in. Default is now `10`, tracking
+the new `beta` default of `0.9`.
+
+**A withdrawal.** An earlier reading in this session put "directness" at 0.72 for
+the raw baseline against 0.45 for ortho, concluding ortho cancels more. That was
+arithmetic on interval-means of per-matrix norms with `r = 128` assumed uniform,
+not a measurement. It is not evidence and is withdrawn; the instrument now
+computes the ratio per matrix, against the path of the same matrix the snapshot
+follows, and the 300-step arms will settle it.
+
+### Diagnostics are three tiers, split by cost and not by usefulness
+
+`off` is one attribute read. **`core`** is every read derivable from tensors the
+step already formed -- no state, no decomposition, no extra pass -- so it can be
+left on for a whole run without a decision: `transport_speed`,
+`tangent_concentration`, `tangent_participation`, `projected_grad_norm`,
+`grad_to_moment_ratio`, `grad_moment_cosine`, `update_to_param_ratio`,
+`nonfinite_grads`. **`full`** adds the three that need a frame snapshot --
+`transport_lag`, `transport_curve`, `transport_spin` -- at `[d,r]` over 32
+sampled matrices. That is 16 MB at rank 128 on a 1024-wide model and a fixed
+cost that does not grow with the model, since the sample count is fixed. The
+VRAM-first rule did not have to adjudicate this; the state rule did, and `full`
+ships in the release rather than living in the lab.
+
+`tangent_participation` is new and free: `(sum lambda)^2 / (r sum lambda^2)`, the
+effective plane count, in the same `[1/r, 1]` range as concentration. The pair is
+head and bulk, and on a power law with no edge those genuinely separate. It
+replaces the entire ten-metric spectrum-shape family.
+
+**Twenty-six lab metrics deleted, not demoted.** The `sigma_energy_top*`,
+`sigma_p*_over_max` and `plane_persist_*` families were built for two questions
+that are now answered -- where a rank threshold would cut (nowhere; smooth power
+law across four decades) and whether the aim repeats (31-38x floor raw, ~3x
+under ortho). Keeping them "for study" is how the count gets back to 41. The
+study tier is currently empty and that is correct; it refills with the
+moment-weighted plane smear when that is built.
+
+### Annealing needs the last tangent, not the last basis
+
+The controller question, settled on the geometry rather than by trying things.
+**The previous basis alone carries nothing**: at window 1 the net displacement
+*is* the path, so curve is identically zero, and spin is exactly zero because the
+overlap is symmetric. Curve does not exist below window 2.
+
+The window *could* be had in production -- one `[d,r]` snapshot refreshed every
+`n` steps plus a scalar path accumulator, one basis-sized buffer. It is dead for
+a different reason: **curve at window `n` cannot respond faster than `n` steps.**
+
+So the signal is the previous tangent, and the **polar** one. Curve is an
+autocorrelation statement -- net-over-path is determined entirely by how
+correlated successive tangent directions are -- so tangent agreement is a
+low-latency estimator of the same quantity, at window 1 and readable before the
+step rather than after it. Polar over raw on two counts: raw inner products are
+dominated by `sigma_1` at concentration ~0.68, so the correlation measures
+whether two consecutive batches were loud in the same plane, which is magnitude
+leaking into a persistence question; and top-`k` polar costs `[d,k]`, an eighth
+of a frame snapshot at `k=16`.
+
+That gives a division the project could not state before: **the cheap proxy runs
+in the update, the expensive truth runs in `full`, and the proxy can now be
+checked against it.** Running agreement annealing at `diagnostics = "full"` asks
+directly whether its meter tracks curve.
+
+### `beta` default is `0.9`
+
+Was `0.95`, which the sweep recorded as dominated on both axes. `0.9` is the best
+target and the better short-run choice.
+
+**And the `beta = 0` method rule is retired.** It existed because frame rotation
+under the moment was a confound that could not be separated from the tracker's
+own motion. Speed, curve and spin read the frame and nothing else at any `beta`,
+while `beta = 0` makes `grad_moment_cosine` return nothing, pins
+`grad_to_moment_ratio` at 1, and stops `transport_lag` meaning smear because
+there is no memory to smear. The cost is that the 500-step `beta = 0` arms stop
+being like-for-like; they remain a self-consistent family of their own.
+
+### First read under the transport metrics: three arms at 300 steps
+
+`beta=0.9`, rank 128, LR `2e-4`, seed 1, one variable apart. Reasoning only; the
+numbers are in wandb.
+
+**Ortho beats the raw aim by `0.0018` on target at neutral source**, 6x the noise
+floor and the same sign as the 500-step read, at about half the size. Agreement
+annealing adds `0.0003` over ortho, which is one sigma and is not a result. So
+the ordering survives a step-count change and a `beta` change, and the margin is
+small enough that mechanism reads have to carry the decision -- which is what
+this section has said about loss all along.
+
+**Moment smear falls 9.5x across the three arms.** `transport_lag` at the
+moment's own memory reads `0.114`, `0.035`, `0.012`: the projected moment goes
+from losing 11.4% of its direction to frame motion down to 1.2%. That is large,
+clean and monotone in the arm ordering, and it buys `0.0018` of loss. Both
+halves of that belong in the record. The mechanism the instrument was built to
+see is real, and the loss barely notices -- the same shape P1 found for
+Adafactor.
+
+**The raw aim generates holonomy, and that is the strongest thing in the run.**
+Bench measurement puts bf16 rounding at `5.6e-4` per update, random-walking to
+`1.77e-3` over a window of ten. The raw arm reads `0.01232` against the ortho arms' `0.00167`
+and `0.00122`, a 7x separation. *An earlier claim that the ortho arms sit "on the
+bf16 floor" is withdrawn*: `top16 + anneal16` later read `0.00071`, less than
+half the supposed floor, and the estimate came from extrapolating a `d=256, r=32`
+synthetic to a `d=1024, r=128` model when spin is normalized by `sqrt(r)`. The 7x
+separation stands; "at the floor" was never established. So
+the raw aim does not merely move the frame further; it twists the frame's basis
+against the moment stored in it, for no subspace progress. Orthogonalizing the
+tangent removes essentially all of it. No metric in the previous set could have
+produced this, and it is a mechanism argument for ortho independent of the loss.
+
+**Corrected `transport_curve` runs the other way from the buggy read**, and this
+matters because the buggy version made ortho look like it bought quiet by
+cancelling more. It does not. Raw reads `0.702`, ortho `0.660`, annealed `0.630`
+-- the raw aim is the churniest frame of the three, and every geometric read is
+monotone in the same direction: the frame gets slower, straighter, less twisted
+and slightly better on loss, all at once. The arithmetic checks independently,
+since ortho's true path is `10 sin(eta) = 0.1000`, giving `0.653` against `0.660`
+measured.
+
+**An instrument correction, made mid-session.** `transport_speed` is read from
+the eigenvalues *before* the geodesic runs, so it reports what the aim proposed.
+In the release that is also what was followed, because nothing stands between
+the two. Under the harness's orthogonalized tangent it is not: every live plane
+turns by `eta` regardless of `sigma`, so the proposed speed ran about 2x the
+followed one and every `transport_curve` built on it was inflated by that
+factor. Speed and curve were discarded for both ortho arms and the arms re-run.
+The cause was this session's own cull -- the lab probe measured *proposed* and
+*followed* separately and the deleted comment said exactly why; collapsing them
+into the proposed one lost the denominator. `full` now accumulates the path from
+the frames actually written, so curve's numerator and denominator are the same
+kind of measurement. Lag, spin and loss were never affected: they are read from
+frames, not from eigenvalues.
+
+### The reframing: ortho has no fixed point, and that is the whole story
+
+This supersedes the reading that ortho is simply the better aim. It is a better
+*shape* and a broken *magnitude*, and separating those two is the design
+decision this section has actually been circling.
+
+**`polar(Delta)` has unit singular values for every live plane, and `live` is a
+relative threshold.** So a frame with a tiny residual turns by exactly the same
+`eta` per plane as a frame with a huge one -- the motion is independent of how
+well the frame fits. Measured directly: across a 10,000x range of residual
+magnitude, raw displacement moves `8.46e-1 -> 8.46e-3 -> 8.51e-5` while bare
+ortho reads `5.657e-2` in every case. At the smallest residual it turns 665x
+harder than the residual justifies.
+
+The fixed point survives only at exactly `Delta = 0`, where `live` is empty. That
+is a measure-zero basin, not an attractor, so
+`test_a_fitted_frame_is_a_fixed_point_of_its_own_gradient` still passes while the
+property it was written to protect is gone in practice.
+
+**This explains three separate observations that were being treated as
+unrelated.** Metrics being flat through an ortho run is not the tracker settling
+into an equilibrium -- it is a constant angle per refresh, forced by
+construction, and it could not have been anything else. The stability cliff
+between `eta = 0.01` and `0.02`, with `0.005` merely worse rather than better, is
+what marginal stability looks like: `eta` alone sets the motion and nothing pulls
+it back. And the reason annealing improves `transport_lag` and almost nothing
+else is that it is supplying, from outside, the restoring force the aim gave up.
+
+**Bare ortho therefore violates this section's own hard constraint** -- *frame
+motion must be able to anneal as the frame reaches equilibrium* -- and it should
+not ship on a loss delta of `0.0018`, whatever the loss says. The earlier note
+that "the mechanism was never the constraint; settling is" was right, and bare
+ortho is the mechanism that cannot settle.
+
+### Scaled ortho: the arm that makes the annealing question moot, or does not
+
+Restore `||sigma||_2 / sqrt(r)`, the RMS singular value, as a per-matrix scalar
+on the polar factor. Every plane still turns by the same angle *as every other
+plane*, so the leading plane stops owning the turn -- but the overall size of the
+turn tracks the residual again, so a converging frame slows down on its own.
+
+**It is a pure shape intervention against the raw aim.** A raw geodesic moves
+`eta ||sigma||_2` to first order; this moves `sqrt(r sin^2(eta ||sigma||_2 /
+sqrt(r)))`, the same number. Verified to four significant figures across four
+decades of residual. So raw and scaled-ortho differ in exactly one thing -- how
+the same total displacement is distributed across planes -- and any difference
+between them is attributable to the spectrum alone. That is a cleaner contrast
+than any arm run so far, all of which changed shape and magnitude together.
+
+**And it costs nothing.** No `[d,k]` agreement buffer, no frame snapshot, no
+previous tangent. It is two extra reductions on eigenvalues the geodesic already
+has. If it works, the "do we keep the n-1 tangent for annealing" question is not
+decided -- it is deleted, which is the better outcome.
+
+**It diverged, twice, and the reason retires the magnitude framing entirely.**
+First in a small-angle form -- `theta = eta ||sigma||_2 / sqrt(r)` -- which asks
+for 4.95 rad per plane when `sigma_max` is large, because raw's displacement is
+only safe while it is concentrated in ~2 planes where `sin` saturates and bounds
+their contribution. Then in an exact form, `theta = arcsin(sqrt(sum_i sin^2(eta
+sigma_i) / n))`, which is bounded by construction and reproduces raw's chordal
+distance at any magnitude. That one crashed too, alone on the GPU, in 36 seconds.
+
+**And the exact form's angle *is* `transport_speed`.** `arcsin` of the RMS sine
+is the RMS angle, so bare scaled ortho is precisely bare ortho at an effective
+`eta` equal to the raw aim's measured speed, `0.0232` -- and bare ortho is known
+to diverge at `0.02`. The arm was doomed before it ran and the session's own
+metric said so in one line. Check the instrument before spending the GPU.
+
+### The stability cliff is set by how motion is distributed, not by how much
+
+The comparison that settles it needs no further runs:
+
+| arm | frame speed | distribution | outcome |
+|---|---:|---|---|
+| raw `sigma`, `eta=0.01` | **0.0232** | `sigma`-weighted, ~2 effective planes | stable |
+| bare ortho, `eta=0.02` | 0.0200 | equal across 128 | diverges |
+| scaled ortho (`eta_eff` 0.0232) | 0.0232 | equal across 128 | diverges |
+
+**The raw aim moves the frame further per step than the ortho arm that dies, and
+survives.** So total displacement is not the stability criterion; its
+distribution across planes is. Bare ortho does not survive because it discards
+magnitude -- it survives because `eta = 0.01` happens to sit under a ceiling of
+roughly `0.015` rad per plane. That ceiling exists because equal angles drive all
+126 noise-tail planes at full rate, and above some rate the frame decorrelates
+from the gradient faster than the aim can re-fit it. This is P2 lead 1's "a
+mechanism for integrating noise into the frame", now with a failure mode attached
+rather than an argument.
+
+It also explains the `eta` sweep that started this: `0.02` explodes, `0.005` is
+merely under-tracking, and the window is narrow because 126 of 128 planes are
+being turned on noise. `tangent_participation` reads `0.018` -- 2.3 effective
+planes of 128 -- which is the same fact from the spectrum's side.
+
+**The fix that follows is a ceiling, not a bound on magnitude.** `theta =
+min(arcsin(...), eta)` makes `eta` the *maximum* angle rather than the only one:
+bare ortho during acquisition, where both sit at the cap, and annealing below it
+once the residual shrinks. With the clip in place the exact and small-angle forms
+agree to three decimals, since they differ only at angles the clip removes -- so
+chordal becomes a correctness choice rather than a behavioural one. Worth keeping
+anyway: it is free, bounded by `pi/2` where the small-angle form is unbounded,
+and it leaves the clip as the only nonlinearity in the path.
+
+### The three candidates are one family, differing only in where magnitude comes from
+
+Reading `install_agreement_annealing` carefully: every plane leaves it with the
+same singular value and the tangent is `polar(Delta) * scale`. That is *exactly*
+the shape of scaled ortho. These are not rival families:
+
+| | shape | magnitude | anneals on | state |
+|---|---|---|---|---|
+| bare ortho | equal angles | none, fixed `eta` | nothing | zero |
+| scaled ortho | equal angles | `||sigma||_2 / sqrt(r)` | how well the frame fits | zero |
+| agreement anneal | equal angles | cross-step agreement | whether the aim repeats | `[d,k]` |
+
+So the question was never "do we keep the `n-1` tangent". It is: **once the shape
+is orthogonalized, which signal restores the magnitude?** That also explains why
+raw and bare ortho fail in complementary ways -- raw carries magnitude but lets
+one plane own the shape (7x the spin floor, holonomy); bare ortho fixes the shape
+and throws the magnitude away (no fixed point, marginal stability). Each fixes
+the other's defect and reintroduces its own.
+
+*A trap recorded so it is not walked into again.* `scaled-ortho + anneal` and
+`bare-ortho + anneal` measure identical to four decimals on every metric, and
+that is a **composition artifact, not a result**. The harness installs ortho last
+so it is outermost, and the first thing `annealed` does is renormalize its
+incoming tangent to unit directions -- discarding whatever magnitude ortho just
+computed. They agree because they are the same computation. Scaling has never
+actually been tested alongside annealing.
+
+### Two closures from the same session
+
+**The Polar-Express retraction stays at one step.** Measured across angles
+`0.005` to `0.1` rad and across 1 to 128 turning planes, a single degree-5 step
+lands orthonormality error at `2-4e-7`; two steps and five steps buy nothing.
+The memory of a 15-step retraction is of the lab fork, and going back to 5 would
+be pure weight. Nothing to change.
+
+**The bare-`eigh` deletion holds, but P5's evidence base was narrower than it
+reads.** It was deleted because it "never fired once" across four LFM runs and
+Anima. It has since fired in four configurations: unannealed `agree16`,
+`eta=0.02`, and both forms of bare scaled ortho -- and a jittered retry does not
+rescue any of them, it fails again on the retry. So the deletion note is right
+that a silently rescued decomposition would be worse. The honest restatement is
+that it never fires *on arms that are already stable*, and it now serves as the
+project's de-facto divergence detector.
+
+### `grad_moment_cosine` reads the step, not the subspace
+
+It converges to `-0.019` and it is the same `-0.019` on all three of raw, ortho
+and annealed ortho, to three decimals. The projected moment is 131k elements, so
+a single sample's cosine has a noise floor near `0.003` and this is a mean over
+hundreds of matrices and 300 steps. It is structural, stable, and **independent
+of the frame** -- which is the finding.
+
+A systematically negative cosine means the batch gradient anti-correlates with
+the direction just stepped along. Moving downhill along a direction reduces the
+gradient's component on it; overshooting flips the sign. So this reads the step
+size against local curvature, and it says the step lands slightly past where the
+averaged direction stops being downhill.
+
+It agrees with P11 from an independent direction -- P11 found `2e-4` beat `4e-4`
+on both axes and had not found its floor -- and it is the first metric here that
+reads the *step* rather than the subspace. Worth remembering when the learning
+rate lane reopens: this is a cheaper signal than a sweep.
+
+### The design decision, settled on ten arms at 300 steps
+
+All at `beta=0.9`, rank 128, LR `2e-4`, seed 1, one variable apart. Noise floor
+`3e-4` on target, `2e-3` on source.
+
+| arm | planes | `eta` | target | lag | spin | curve |
+|---|---:|---:|---:|---:|---:|---:|
+| ortho + anneal16 | 128 | 0.02 | **1.7074** | 0.0197 | 0.00142 | 0.630 |
+| ortho + anneal16 | 128 | 0.01 | 1.7076 | 0.0119 | 0.00122 | 0.630 |
+| bare ortho | 128 | 0.01 | 1.7081 | 0.0347 | 0.00167 | 0.660 |
+| bare ortho | 128 | 0.00354 | 1.7085 | 0.0151 | 0.00149 | 0.598 |
+| top16 + anneal16 | 16 | 0.01 | 1.7090 | **0.0046** | **0.00071** | 0.730 |
+| top16 | 16 | 0.01 | 1.7092 | 0.0123 | 0.00128 | 0.665 |
+| top16 | 16 | 0.0283 | 1.7094 | 0.0323 | 0.00148 | 0.679 |
+| raw `sigma` | 128 | 0.01 | 1.7097 | 0.1136 | 0.01235 | 0.702 |
+
+**Full-spectrum rotation is the operative variable, and it survives a transport
+control in both directions.** Turning only the top 16 planes was matched to
+full-rank's displacement (`eta = 0.0283`) and full-rank was matched down to
+top-16's (`eta = 0.00354`); full rank wins at both rates, by `1.3e-3` and
+`7e-4`. Within top-16, transport changes nothing at all. The sharpest single
+comparison: `ortho` at `eta=0.00354` has *worse* frame geometry than `top16` at
+`eta=0.01` -- lag `0.0151` against `0.0123` -- and a better target. Matched
+transport, similar lag, opposite loss ordering.
+
+**Top-`k` rotation is partial basis freezing, which is why it loses.** Freezing
+112 of 128 planes costs `1.1e-3` against full-rank ortho, roughly a third of the
+`0.0038` a fully frozen basis costs, which is about the right proportion. The
+headroom it buys is real -- `top16` survives at `eta=0.0283` where full-rank
+diverges at `0.02`, confirming the tail sets the stability cliff -- but the
+planes you stop driving are the planes you stop tracking, and that is
+disqualifying for the same reason a frozen basis is.
+
+**`transport_lag` is not an objective, and treating it as one was this section's
+main error today.** `top16 + anneal16` posts the best geometry of any arm on
+every axis -- lag `0.0046`, 2.6x better than the best-target arm, and the lowest
+spin measured -- with a mediocre target. **A frozen basis has zero lag.** Its
+curve gives it away: `0.730`, the highest cancellation in the set, sitting beside
+the lowest lag, which is what "barely moving net while still turning" means. Lag
+falls into exactly the trap already recorded for capture -- it explains a result,
+it does not rank designs. The same caution now applies to spin and curve. They
+are the right instruments for asking *what the frame is doing*; none of them
+ranks a design.
+
+**What each arm contributes, restated as one mechanism.** Raw `sigma` lets one
+plane own the turn, which shows up as 7x the spin of any other arm -- genuine
+holonomy, the frame twisting its own coordinates against the moment. Orthogonal-
+izing the shape removes that and buys `1.6e-3`. Orthogonalizing alone then has no
+magnitude and cannot settle, and sits close enough to the stability cliff that a
+float-level perturbation crossed it inside 300 steps. Agreement annealing
+supplies the magnitude from a time signal, and its lag falls 4.3x over the run --
+`0.0506 -> 0.0119`, still descending at step 300 -- where every non-annealed arm
+is flat from step 75. That is the only arm that actually settles.
+
+**Doubling `eta` under annealing is safe and marginally better.** `0.02` posts
+`1.7074` against `0.01`'s `1.7076` -- inside noise, so read it as "no worse and
+stable", not as a gain. It matters because `0.02` is the rate at which bare ortho
+diverges: annealing's damping outruns the instability at an opening rate that
+kills the unannealed aim.
+
+**So the design is full-rank orthogonalized rotation with an agreement-annealed
+magnitude**, at a cost of one `[d,16]` bf16 buffer per matrix. The zero-state
+alternatives each fail a different half, and the reason is structural rather than
+empirical: **every inward state signal plateaus.** `sigma`, capture,
+concentration and participation are all flat after ~20 steps, so no aim reading
+its own fit can anneal -- which is P2 fact 3, written long before scaled ortho
+was built and sufficient to falsify it without a run. Only a cross-step signal
+declines. Annealing must come from the time axis, and the `n-1` polar tangent is
+the cheapest access to it.
+
+*A trap for the `k` sweep.* The annealing meter's `k` and the rotation's plane
+count are separate knobs and were briefly conflated. Rotation stays full-rank;
+`k` selects only how many plane directions the agreement meter compares. Sweeping
+`k` in `{4, 16, 32}` is open and cheap; sweeping the *rotation* rank is closed.
+
+### The annealing meter's normalizer is derived now, and `2.87` is gone
+
+**What the fitted divisor actually was.** `install_agreement_annealing` divided
+the meter's floor-relative excess by `reference = 2.87`, LFM's measured
+acquisition value less its floor. Unfolding the arithmetic: the agreement is
+`||head^T stored||_F^2 / k`, the mean squared cosine of the principal angles
+between this step's top-`k` plane subspace and last step's, so it is already
+bounded in `[0,1]` and already scale-free. Both ends of its range are known
+without measuring anything -- two random `k`-subspaces inside the `(d-r)`
+horizontal complement agree at `k/(d-r)`, which the code already computed as
+`floor`, and an aim that repeats exactly agrees at 1.
+
+With `N = (d-r)/k`, the shipped scale was `(N*a - 1) / 2.87` and the
+anchor-at-perfect form is `(N*a - 1) / (N - 1)`. **The same function up to a
+constant**, measured at `17.2` against a predicted `19.2` at step 50, the gap
+being the cap clipping the fitted values. So `reference` never carried the
+annealing *shape* -- only the units, and therefore where `cap` bit. It is
+redundant with `eta`, and it does not transfer: Anima at rank 64 lands near
+`N = 92` against LFM's `56`.
+
+**Anchoring at perfect agreement does not work, and the reason is useful.** Real
+agreement lives in `[chance, ~0.07]`, so anchoring at 1 leaves 93% of the range
+unused and forces `eta` up ~19x. That throws away the property the design
+depends on -- `turn <= eta` is a safety bound only while `eta` is itself under
+the bare-ortho cliff. It also has higher across-matrix variance, because the
+fitted `cap` had been silently clipping a tail of high-agreement matrices.
+
+**The first replacement -- each matrix's own running peak -- worked and is now
+superseded.** `scale = excess / peak`, with `peak` the largest excess that matrix
+had produced: chance agreement still mapping to zero turn, the top anchor
+measured per *run* rather than fitted per *model*, acquisition setting new peaks
+so `scale = 1` at the safe upper bound. Everything below about it holds as
+measurement. It is replaced not because it measured badly but because a peak is a
+single-sample estimator of a level that has to govern a whole run -- see "One
+gain for the fleet".
+
+Measured at 300 steps, `beta=0.9`, rank 128, `eta=0.01`, one variable apart:
+
+| arm | target | source | lag | spin | capture |
+|---|---:|---:|---:|---:|---:|
+| fitted `2.87` (was shipped) | 1.70757 | 3.0440 | 0.01191 | 0.00122 | 0.4243 |
+| derived running-max | 1.70783 | 3.0432 | **0.00572** | **0.00084** | 0.4158 |
+
+Lag halves, spin falls 31%, target and source unchanged, speed unchanged. **A
+control run with the fitted divisor and the cold-start fix reproduced the shipped
+arm to five decimals on every axis**, so the anchor is the entire effect.
+
+**Cold start was a real bug.** With no history the meter returned `scale = 1`,
+making the first basis update a full bare-ortho turn at `eta`. Harmless at
+`0.01`; at the 19x `eta` the perfect-anchor form needs, it failed `eigh`
+immediately. It is zero now -- no evidence the aim repeats, no turn -- at a cost
+of one basis update.
+
+### The decay anchor is falsified, and its failure is a fact about the aim
+
+The running peak is still a *remembered* number, so the obvious next move was to
+delete it by estimating the attainable ceiling instead. Writing the lag-`L`
+excess as `E0 * rho^L`, the ceiling is `E0 = excess1^2 / excess2` and the scale
+`excess1 / E0` collapses to `excess2 / excess1` -- the ceiling cancels, leaving
+the aim's own two-lag autocorrelation and no anchor at all.
+
+**It does not anneal.** The scale sat at `0.818 -> 0.803` across 300 steps and
+the arm landed beside bare ortho (lag `0.0296` against bare ortho's `0.0347`), a
+constant-magnitude controller wearing a meter.
+
+The reason is the useful part: **the agreement's decay shape is stationary while
+its level is not.** `excess1` falls ~4x over a run while `excess2/excess1` holds
+at ~0.81 throughout. The aim's persistence *timescale* does not change; only its
+amplitude does. So annealing has to read amplitude, and reading amplitude
+requires a level reference. An anchor is not an implementation detail waiting to
+be eliminated -- it is structural, which is also why `2.87` worked.
+
+### `k` is a monotone dial, and the anchor's settling picks it
+
+All at `eta=0.01`, full-rank turn, derived anchor, 300 steps:
+
+| `k` | target | lag | spin | capture | anneal depth | intervals still re-peaking |
+|---:|---:|---:|---:|---:|---:|---|
+| 4 | 1.70782 | **0.00385** | **0.00052** | 0.4112 | 4.6x | **8 of 12** |
+| 8 | 1.70786 | 0.00431 | 0.00062 | 0.4126 | 3.9x | **8 of 12** |
+| 16 | 1.70783 | 0.00572 | 0.00084 | 0.4158 | 3.2x | 4 of 12 |
+| 32 | 1.70795 | 0.00800 | 0.00110 | **0.4195** | 2.7x | 2 of 12 |
+
+Target spans `1.3e-4` against a `3e-4` floor, so **loss cannot choose here** and
+there is no interior optimum -- narrower `k` anneals deeper, settles harder, and
+captures less, monotonically. Note `k=4` beats `top16+anneal16` on both lag and
+spin while turning all 128 planes, so that arm's geometry never required freezing
+anything.
+
+What chooses is the anchor. `k=4` and `k=8` are still setting new peaks in the
+*final* logged interval, so their annealing depth is not a number -- it is
+whatever the run length made it. **`k = 16` is the narrowest meter whose
+normalizer stops moving inside the run**, and that is the selection rule, not a
+preference. Widening `k` is a weaker question, not merely a noisier one: the
+Frobenius norm of `head^T stored` sums squared cosines of *principal angles*, so
+it asks whether the subspace persists and forgives rotation inside it.
+
+*Prediction on the record that came out right:* `a_k` rises with `k`, because
+relaxing the constraint outruns diluting it. Measured `0.544 / 0.615 / 0.664`
+early for `k = 4 / 16 / 32`.
+
+### At 1k the loss says nothing, and that is the finding
+
+| arm (1k) | target | source | lag | spin | capture |
+|---|---:|---:|---:|---:|---:|
+| fitted `2.87` | **1.66868** | 3.0840 | 0.0083 | 0.0011 | 0.4044 |
+| derived running-max | 1.66920 | **3.0828** | **0.0037** | **0.0007** | 0.3964 |
+
+**A prediction failed here and it is worth recording as failed.** The argument
+was that a 300-step comparison is biased toward fast trackers -- the first ~100
+steps reward a frame that chases -- so the derived arm, travelling half as far
+net, should pull ahead by 1k. It did not. The fitted arm's target edge *grew*
+slightly, from `2.6e-4` at 300 to `5.2e-4` at 1k.
+
+By this project's own noise rule that is still not a result: `5.2e-4` is `1.7x`
+the `3e-4` floor on one seed, below the "few multiples" bar, and source moves the
+other way by `1.2e-3` against a `2e-3` floor. **The two are indistinguishable on
+loss at 1k**, which means the decision cannot be made on loss and has to rest on
+geometry, honesty and the absence of fitted constants -- where the derived arm
+wins on every axis: 2.2x the lag, 1.5x the spin, and no model-fitted number.
+
+**The horizon worry about the running max is answered for 1k.** The derived
+anchor stops setting new peaks after ~step 150 and never sets another through
+step 1000, so it does not drift with run length at this horizon. Its scale floors
+near `0.15` from ~step 400 and holds, and lag flattens at `0.0037` from ~step
+600: the frame settles and stays settled. Longer horizons remain untested, and
+`agreement_scale_max` is the instrument that would show it.
+
+**The periodic bumps are the data.** Both arms dip and bump at *identical* steps
+(~475, ~700) under two different controllers on the same seed and data order.
+That is the corpus, not the tracker.
+
+### `transport_speed` was measuring the aim, not the frame
+
+It was computed from the tangent's eigenvalues *before* the geodesic ran --
+`sqrt(sum_i sin^2(eta sigma_i) / r)`, the displacement the aim proposed. The
+ortho hook replaces those eigenvalues inside the geodesic, so the frame turned by
+`eta` while the metric reported the raw spectrum's proposal. Measured, that is
+`2.2x` the motion actually followed: logged `0.0217` for bare ortho at
+`eta = 0.01`, where a float64 check of the geodesic gives exactly `sin(eta)`, and
+a direct probe of a live frame gives `0.0102` per optimizer step.
+
+The docstring on `_record_followed_step` had **predicted this exact factor** and
+the reading was left in place anyway; `transport_curve` was migrated to the
+followed distance and the published scalar was not. It now reads from the frames
+at every diagnostics tier, since `frames` and `new_frames` are both already in
+hand -- one matmul, no snapshot, no state. `_record_basis_motion_diagnostics` is
+renamed `_record_tangent_spectrum_diagnostics`, because concentration and
+participation are all it reads now.
+
+**Scope of the damage: none to conclusions.** Every arm was measured through the
+same instrument, so all ratios hold, and every ranking here rests on lag, spin,
+capture and target, which read the written frames. What it invalidates is
+absolute speed readings, and specifically any claim that an ortho arm's logged
+speed described its frame. *One thing to re-check rather than assume:* the
+ten-arm table matched `top16` to full-rank displacement at `eta = 0.0283`. If
+that matching used logged speed, it matched two proposals.
+
+A probe also settled the question the discrepancy raised: the frame receives
+**one** geodesic per optimizer step, moving exactly `eta`. The three geodesic
+calls per step are the three shape buckets. Dynamics were never wrong -- only the
+reading.
+
+### `eta` changed jobs and its justification did not follow
+
+`eta` was documented as a trust radius on a *linearized* step: accurate where you
+stand, degrading as you walk. That justification is dead. The geodesic here is
+exact -- verified in float64 that displacement is precisely `sin(eta)`, on a true
+Stiefel geodesic whose polar retraction holds orthonormality at `2-4e-7`. There
+is no linearization error left to bound.
+
+What is uncertain is the *heading*, estimated from one noisy batch. So `eta` is
+now "how far to walk on a direction we only half believe" -- a trust radius on
+the aim, not on the curve. That reframing is what makes `eta * scale` coherent
+rather than a category error: the meter is a confidence estimate on the aim and
+`eta` is the full-confidence distance, so the product is the right composition.
+
+**The binding constraint is statistical, not geometric.** A horizontal tangent
+can sign off 90 degrees of rotation and roughly 45 is the largest defensible
+single turn; `eta = 0.01 rad` is `0.57` degrees and the measured cliff is
+`0.02 rad`, `1.15` degrees. We die **40x below** where geometry would stop us.
+What kills the frame is integrating batch noise into it, step after step, so
+`eta` is a statistical parameter wearing a geometric name.
+
+`eta = 0.01` is therefore *calibratable* rather than derived -- find the cliff,
+take half. It is the last bare constant in the controller: `floor` is derived
+from `k`, `d` and `r`, the `[0,1]` clamp is structural, `peak` is measured per
+run, and `k` is chosen by the settling rule above. Whether something cleaner
+exists for `eta` is open, and the shape of an answer would tie it to the signal
+the frame can resolve above batch noise, which the meter already measures.
+
+*A stated property, not a bug:* the meter reads persistence, and persistence is
+confounded with batch noise. At larger batches the aim repeats better, `scale`
+sits near its peak longer, and the frame turns harder for longer. That is
+arguably correct -- a quieter aim deserves more trust -- but it means **annealing
+depth depends on batch size**, and Anima at 64k tokens per step will not anneal
+like LFM at 16k.
+
+### Capture tracks lag, so it cannot rank this family either
+
+Sorting the arms by lag sorts them by `projected_grad_norm` too, monotonically:
+`0.0347 -> 0.4350`, `0.0119 -> 0.4243`, `0.0057 -> 0.4158`, `0.0046 -> 0.4072`.
+A frame that keeps moving captures more of *this batch's* gradient, noise
+included. So capture falls into the same trap already recorded for lag and for
+`tangent_concentration`: it explains a result, it does not rank a design.
+
+This weakens the case against `top16 + anneal16`, whose only remaining defect was
+the lowest capture in the set. **The "churn" reading of that arm is withdrawn** --
+churn requires high speed *and* high curve, and its speed was ordinary. Low
+speed with high curve is the doc's own description of a frame sitting on its
+fixed point. What it actually is: a clean, quiet frame on a subspace that catches
+less gradient, which is a position on the settling/capture axis rather than a
+failure. It is still not worth freezing 112 planes for, because `k = 4` reaches
+better geometry with a full-rank turn.
+
+### One gain for the fleet, derived from the aim's effective rank
+
+**The running peak had to go, and the objection was never empirical.** A peak is
+one sample deciding a level that governs the rest of training. It settled by step
+150 at 1k and did not drift, which is evidence it had not yet broken -- not
+evidence it was right.
+
+**What the per-matrix dump showed.** 92 matrices, 400 steps, `k=16`, logging
+every matrix's raw `excess` each step rather than the fleet mean that had been
+hiding this:
+
+| quantity | p10 | p50 | p90 | max | p90/p10 |
+|---|---:|---:|---:|---:|---:|
+| peak `excess` | 0.0855 | 0.1495 | 0.2018 | 0.2581 | **2.36x** |
+| settled `excess` (steps >= 300) | 0.0108 | 0.0215 | 0.0458 | 0.0584 | 4.24x |
+| ratio peak/settled | 3.57 | 5.41 | 11.35 | **23.33** | 3.18x |
+
+Two readings, and they point opposite ways. **The peaks are tight** -- 2.36x
+across the middle 80% -- so the matrices are alike enough that a single global
+gain is a defensible approximation. **The depths are not:** the running peak
+hands the median matrix a 5.4x anneal, the p90 matrix 11.4x, and one matrix 23x,
+none of it chosen. That is the concrete form of "a one-time max is bad".
+
+**A candidate died here, cleanly.** Giving each matrix its own ceiling from its
+own `tangent_participation` -- `participation * r / k`, the aim's effective rank
+over the meter width -- leaves a **3.63x** spread between predicted ceiling and
+observed peak, *worse* than the 2.36x you get with no per-matrix term at all.
+Per-matrix participation does not predict per-matrix peak. It added noise.
+
+**But the same quantity works at the fleet level, and that is the result.**
+
+```
+median participation * r / k  =  0.01766 * 128 / 16  =  0.1413
+median observed peak                                 =  0.1495
+```
+
+6% apart. So the gain is not a constant to fit -- it is the fleet's effective aim
+rank divided by the meter width, computed every step from eigenvalues the
+geodesic already has. `scale = clamp(excess / G, 0, 1)`, one yardstick for
+everyone, so matrices that hold their aim longer keep turning rather than having
+their differences normalized away.
+
+Measured at 300 steps against the arm it replaces:
+
+| arm | target | source | lag | spin | curve | capture |
+|---|---:|---:|---:|---:|---:|---:|
+| fitted `2.87` | 1.70757 | 3.0440 | 0.01191 | 0.00122 | 0.630 | 0.4243 |
+| derived running-max | 1.70783 | 3.0432 | 0.00572 | 0.00084 | 0.687 | 0.4158 |
+| fleet gain | 1.70803 | 3.0456 | 0.00593 | 0.00086 | 0.683 | 0.4170 |
+
+**Confirmed at 1k, all three arms on the same metric code:**
+
+| arm (1k) | target | source | lag | spin | capture |
+|---|---:|---:|---:|---:|---:|
+| fitted `2.87` | 1.66868 | 3.0840 | 0.00829 | 0.00106 | 0.4044 |
+| derived running-max | 1.66906 | 3.0832 | 0.00375 | 0.00066 | 0.3962 |
+| fleet gain | 1.66893 | 3.0843 | **0.00362** | **0.00064** | 0.3967 |
+
+Fleet and running-max are indistinguishable -- `1.3e-4` on target against a
+`2.9e-4` same-config spread, `1.1e-3` on source against a `2e-3` floor, which
+also clears the one number that was marginal at 300 steps. Both beat the fitted
+divisor by 2.3x on lag and 1.6x on spin at equal loss.
+
+**And the gain moves, which is the whole argument.** Logged over the run it reads
+`0.092` at step 25, climbing to `0.13-0.15` and holding there in a +-7% band --
+no smoothing needed. It rises because `tangent_participation` rises (`0.0136` to
+`0.0195` over 1k) as the gradient's principal subspace flattens and the aim
+spreads over more planes. The attainable agreement ceiling genuinely **increases
+by ~47% across a run**.
+
+That is what separates the two anchors even though they produce the same numbers
+today. The running peak froze this level at ~step 150 and never revisited it; the
+fleet gain tracks it. At 1k the drift is small enough not to show. On Anima's
+2400 steps, or any longer run, an anchor frozen during acquisition is describing
+a spectrum the model has since left behind.
+
+**It matches rather than beats, which is the point.** Every axis lands inside the
+`2.9e-4` spread measured between two runs of the *same* config, except source at
+`2.4e-3` against a `2e-3` floor -- the one number not clearly inside noise and the
+reason a 1k pair is running. What it buys is subtraction: no per-matrix state, no
+remembered extremum, no horizon dependence, and no fitted constant anywhere in
+the controller.
+
+*Two properties to carry forward.* The `r / k` factor assumes one rank across the
+fleet; mixed ranks need it per bucket. And `agreement_scale_max` changes meaning
+between the two anchors -- under the peak it flagged a new record, under the
+fleet gain it only means some matrix clamped -- so it stops being a drift
+instrument here.
+
+*Where the constants stand now.* `floor` derived from `k`, `d`, `r`. The `[0,1]`
+clamp structural. `G` derived per step from the fleet's participation. `k` chosen
+by the settling rule, and bounded by `k <= r` -- the code clamps with
+`min(planes, r)` but the rule should read `k = min(16, r)`, which matters for any
+model tracked at a rank below 16. That leaves **`eta` as the only bare number
+left**, and P2's history is now a story of deleting the others one at a time:
+`2.87` to a running peak, the peak to a fleet reading.
+
+### Open leads, ranked by what they would settle
+
+1. **CLOSED -- few-plane rotation lost; orthogonalizing the tangent won.** The
+   premise was right and the conclusion inverted. Concentration is `0.69`-`0.71`
+   and `tangent_participation` reads `0.017`-`0.019`, so in energy terms the
+   tangent is effectively rank 2.3 out of 128 -- the tail really is near-isotropic
+   noise. But turning *only* the top planes (`rank1-plane-500`) was worse than
+   baseline on target and left lag and spin at baseline levels, while
+   orthogonalizing the tangent so every plane turns by the *same* angle was better
+   than baseline on both. The tail is not the problem; the leading plane's
+   magnitude dominating the turn is. Both are ways of distrusting the spectrum and
+   only one of them works.
+2. **Cross-covariance aim, `G^T M`.** Salvaged in full from `TRACKER_REDESIGN.md`
+   before that document was deleted, because it was the one derivation there
+   worth keeping.
+
+   *The proposal.* Today's Oja action is `G^T (G Q)` -- the gradient acting on its
+   own projection, the gradient twice. Replace the second `G` with the moment the
+   design already stores: `A' = G^T M` on the right, `M G^T` on the left. Same
+   shape as today's action, same cost class, **zero new bytes**.
+
+   *Horizontality has to be re-derived, and the naive construction breaks it.*
+   Today's code forms `R = sym(Q^T A)` and subtracts `QR`, which works only
+   because `A = SQ` for symmetric `S = G^T G`, making `Q^T A = Q^T S Q` exactly
+   symmetric -- the `sym()` in the code is float hygiene, not conceptual work. But
+   `Q^T G^T M` has no reason to be symmetric; its transpose is `M^T G Q`, and
+   equality would need a relationship between `M` and `GQ` that does not hold.
+   Symmetrizing first therefore removes only *half* the in-subspace component and
+   leaves the tangent carrying a piece inside `span(Q)` -- contaminating `sigma`
+   with a quantity that corresponds to no subspace motion at all.
+
+   *The fix is exact and cheap:* skip the Rayleigh step and project directly.
+   `(I - QQ^T)X` is horizontal for any `X`, symmetric or not, since
+   `Q^T(I - QQ^T)X = 0` always. So `Delta = G^T M - Q(Q^T G^T M)` is horizontal by
+   construction, at one matmul of today's shape.
+
+   *What it would buy, as an identity rather than an analogy.* If the frame has
+   settled and `M`'s EMA has converged under a fixed `Q`, then `M -> E[G] Q` and
+   `E[G^T M] = (E[G]^T E[G]) Q`. Against today's target that is exactly
+
+   ```
+   E[G^T G] = E[G]^T E[G] + Cov(G)
+   ```
+
+   Today's aim tracks the leading eigenspace of **signal plus per-batch noise**;
+   this one tracks **signal alone**. A direction can carry large energy every
+   batch while averaging toward zero across them -- bursty but not persistent --
+   and it contributes to the first term and not the second. That is the
+   persistence weighting the current aim structurally lacks, arrived at by asking
+   a different question of the same data rather than by adding state.
+
+   *The tension since it was proposed:* tracker work now runs at `beta=0`, where
+   there is no moment to read. It needs a moment reintroduced for the aim alone,
+   or a separate cheap persistence estimate -- and note the agreement meter is now
+   exactly such an estimate, arrived at from the other direction.
+3. **Position vs velocity control, reopened -- and the evidence has flipped.** The
+   arc's centerpiece argued Oja is open-loop velocity control that random-walks
+   on noise, and that EIGH-aimed position control is strictly better. The refit
+   control measures the opposite on the current mechanism: a fresh
+   eigendecomposition mid-training is *worse* than the tracked frame. Whatever is
+   wrong with the aim, "replace it with position control" is no longer the
+   obvious fix, and the arc's argument should be treated as superseded rather
+   than pending.
+4. **Rotation-coupled `beta`.** Damp the moment by how far the frame just turned,
+   so memory shortens exactly when rotation makes it stale. Costs nothing new.
+   Blocked behind the tracker work, since the optimum moves with tracking speed.
+5. **Agreement `cos(Z, M)` as a step-size input.** Instrumented and understood but
+   not used. Same `beta=0` tension as lead 2.
+6. **Does tracking's value grow with horizon? -- partly answered, and the
+   answer was no.** The prediction was that a 300-step comparison favours fast
+   trackers, so a slower-net-travelling frame should pull ahead by 1k. Measured,
+   the gap moved the other way by `2.6e-4`, and both deltas are under this
+   harness's noise bar. Frozen `sigma` saturates by step 200, so the *geometric*
+   gap is bounded; whether a bounded geometric gap ever produces a loss gap is
+   still open, and now needs a horizon past 1k to ask. The frozen-vs-tracked pair
+   is the shape of the test.
+7. **Re-sweep rank and LR.** The biggest levers on loss, and the current
+   `rank=128` / `2e-4` pair is inherited from before the aim's shape and its
+   magnitude rule both changed. A substantial algorithm change invalidates the
+   sweep behind it, and this one has not been redone in a long time. Debt, not
+   today's work.
+8. **Is `eta` derivable, or only calibratable?** The last bare constant in the
+   controller. Its cliff is measurable (`0.02`, where a fixed seed diverges one
+   run in two), so "find the cliff, take half" is available and honest. A derived
+   form would tie it to the signal the frame can resolve above batch noise, which
+   the meter already measures as `excess` above `floor`. Nothing beyond a sketch.
+9. **Re-run the `k` sweep under the fleet gain.** `k = 4` and `k = 8` posted the
+   best geometry in the session and were set aside only because their *running
+   peaks* were still moving at step 300. The fleet gain has no peak, so that
+   objection does not transfer and the sweep should be redone -- `k` now enters
+   the gain as `r / k`, so it changes the yardstick as well as the meter, which
+   is a different experiment from the one already run.
+10. **CLOSED -- the fleet gain is stable enough to divide by.** Logged across 1k
+   it settles into a +-7% band after acquisition and needs no smoothing, while
+   rising ~47% over the run as participation grows. Stable as a divisor, and
+   non-stationary in exactly the way a frozen peak cannot follow.
+11. **CLOSED -- `beta` default is now `0.9`.** It was `0.95`, which the sweep
+   recorded as dominated on both axes; `0.9` is the best target and the better
+   short-run choice. `0.5` remains the best trade and `0.0` the best retention if
+   the values call ever changes. The `beta = 0` *method* rule is retired with it:
+   it existed because frame rotation under the moment could not be separated from
+   the tracker's own motion, and speed, curve and spin now read the frame at any
+   `beta`, while `beta = 0` blinds both moment metrics and stops `transport_lag`
+   meaning smear.
+12. **P5's remaining constants, P6's frame guard, P12's five syncs per step.**
+   Unchanged and independent of the above.
+13. **The composed lab arms need re-asking, not re-running.** `--basis-planes`
+   and `--accumulate-tangents` survived the cleanup but now compose with a
+   released polar tangent and a released controller. Truncation ranks planes of a
+   tangent whose singular values are all `scale`, so its top `k` no longer means
+   what it meant; accumulation averages away the batch noise the meter reads, so
+   the two overlap. Both docstrings carry the note. Neither arm's earlier numbers
+   transfer.
+
+### Shipped: the tracker's rule moved from the harness into the release
+
+The orthogonalized tangent and the agreement controller were three stacked
+monkeypatches on `oja_geodesic_from_eigh` for the whole investigation. They are
+now `UsuiTrack._anneal_tangent` and `_commit_agreement_gain`, and the projector's
+geodesic went back to being pure geometry -- it takes whatever horizontal tangent
+it is handed and holds no opinion about how far the frame should turn. That
+separation is what keeps the released rule measurable against the bare geodesic
+rather than fused with it.
+
+Two things changed in the move, both because the release is not the harness.
+
+*Keyed by parameter, not by call order.* The harness keyed each matrix's stored
+aim by its position within a step's basis pass, which needed a reset hook wired
+into the training loop and failed silently into "no history, scale pins to 1" if
+that hook was ever missed. The optimizer has `entry.param`, so the key is the
+thing itself.
+
+*`r / k` is no longer factored out of the median.* The harness computed
+`median(participation) * r / k` with one global `r`, which PLAN flagged as
+assuming a single rank across the fleet. The release computes each matrix's
+`effective_rank / k` from its own spectrum and takes the median of *that*, which
+is what the derivation actually says and drops the assumption entirely. The two
+agree exactly at uniform rank, which is the regime every measurement above was
+taken in -- LFM at rank 128 throughout -- so no result is invalidated. It matters
+for any model where `effective_rank()` clamps narrow modules below the configured
+rank, which is most of them.
+
+Unverified in this move: nothing has been trained against the released code path.
+The unit tests cover the bound (`scale <= 1`, so the turn never exceeds bare
+polar at the same `eta`) and the cold start (no stored aim means no turn), and
+`eta = 0.01` carries over unchanged because every arm in the table above ran at
+`--basis-step 0.01`. But the first real evidence that the port is faithful is a
+smoke run reproducing the fleet-gain row, and it has not been run.
+
+### How we work here
+
+Recorded so a fresh session inherits the method, not just the findings.
+
+**The user steers; the assistant reads terrain.** Bring evidence, name the
+uncertainty, propose the cut -- then let the direction be chosen. Do not
+disappear into autonomy on questions that are the user's to answer.
+
+**Fail early: ask and verify.** Before building on a premise, find the cheapest
+check that could falsify it. Several of today's best results came from a check
+that cost minutes and overturned an hour's plan. State predictions *before*
+running, so a wrong one is visible as wrong.
+
+**Rules here are values or observations, and both are open to revision through
+discussion.** Nothing in these docs is settled because it is written down. When a
+measurement contradicts a rule, the rule moves.
+
+**Plausibility is not correctness.** Verify claims from other agents and from
+past documents, including ones this project wrote. Reality wins; the doc is the
+bug. When a prediction fails, say so plainly and reason about why -- that is the
+most informative thing that happens in a session.
+
+**Synthetic gradients are inadmissible for design decisions.** They have a clean
+spectral cliff and no step-to-step correlation; `tangent_concentration` reads
+~0.03 on synthetic against 0.68-0.82 on real gradients. Use them only to check
+that an implementation is wired correctly.
+
+**Loss is not always the instrument.** For tracker work it is blunt -- a 100x
+step-size sweep spans `0.006` -- so mechanism reads decide, and loss only vetoes.
+Know which question a metric can actually answer before quoting it.
+
+**Measure run-to-run noise before believing a delta.** It is `3e-4` on target and
+`2e-3` on source for this harness with a seed. Deltas below a few multiples of
+that are not results.
+
+**Docs carry reasoning, not evidence trails.** `SPEC.md` describes only the
+current state and never history. `PLAN.md` holds open questions, insights, and
+the reasoning behind decisions; the numbers live in wandb. Both files are
+committed -- an earlier version of this line claimed `PLAN.md` was not, which
+was simply false and is withdrawn.
+
+**The release keeps a minimal surface.** Experiment knobs live in the harness or
+on local-only branches, never as optimizer arguments. Deleting a losing option is
+part of finishing an experiment.
+
+**One GPU, so experiments are serial.** Each 1k-step LFM run is ~13 minutes, which
+makes breadth affordable and makes it worth queueing arms rather than guessing.
 
 ### What is missing before any of this can be judged
 
@@ -374,10 +1307,20 @@ read answers.
 
 **Goal.** An aim that prefers persistent structure to single-batch bursts, and a
 step size that reads geometry rather than a clock -- knowing on its own when to
-turn hard and when to settle. Hard constraint unchanged: no normalization that
-forces a constant angle per refresh. A constant *multiplier* is not that and
-remains allowed; a hot start measurably warmed the basis sooner and improved
-early capture. Returning to a constant is not the goal.
+turn hard and when to settle. Hard constraint, restated: **frame motion must be
+able to anneal as the frame reaches equilibrium.** The old wording banned "any
+normalization that forces a constant angle per refresh", which generalised a
+result about two scalar rescalings into a ban on spectral reweighting. That
+generalisation is still wrong -- reweighting the spectrum is legal -- but the
+specific thing it banned turns out to have been banned correctly: **bare ortho
+*is* a constant angle per refresh, and it cannot settle**, which is why it beats
+the raw aim on loss and still should not ship. The distinction that matters is
+between reweighting the spectrum, which is allowed, and discarding its magnitude,
+which removes the only restoring force in the aim. Scaled ortho does the first
+without the second. Note the shipped
+raw `sigma` does not currently satisfy it either: it anneals for ~20 steps and
+then plateaus. A constant *multiplier* remains allowed; a hot start measurably
+warmed the basis sooner and improved early capture.
 
 ---
 
@@ -443,7 +1386,7 @@ Most of these were ablated on a single model.
 | `MIN_BASIS_UPDATE_STEP = 0.01` | step-size floor | P2; the load-bearing one |
 | rank cap `min(m,n)/2` | `effective_rank` | settled by structure and bottleneck stability, but the *fraction* is still a choice |
 | `grad_clip_norm = 1.0` | raw clip | now mandatory; the threshold itself is untested across models |
-| `beta = 0.95`, `eps = 1e-8` | moment | inherited |
+| `beta = 0.9`, `eps = 1e-8` | moment | `beta` measured by sweep, see P2; `eps` inherited |
 | `AURORA_PP_ITERATIONS = 1`, `AURORA_PP_BETA = 0.5` | direction map | inherited from the method |
 | `1e-12` floors, `1e-7` sigma threshold | numerical | probably fine, unaudited |
 
@@ -687,10 +1630,37 @@ ai-toolkit adapter, which exists for good reasons. A library-side
 `study/rotation-clamp-eligibility`. Show a concrete alternative before arguing
 for one.
 
-**P7. bf16 basis storage.** The geodesic runs in fp32; the moved frame is
-written back in the parameter dtype, so a bf16 model rounds the frame every
-basis update. Only synthetic evidence exists, which is inadmissible here.
-Whatever P4 settles is the instrument for looking at it.
+**P7. CLOSED -- bf16 basis storage costs 0.6% of the moment's smear.**
+`transport_spin` is the instrument this was waiting for, and unlike a loss delta
+it measures a numerical property, so a synthetic gradient is admissible: the
+question is what rounding does to a frame, not what a gradient distribution
+does to a tracker.
+
+The frame's own geodesic has `Q^T Q+ = V cos(theta) V^T`, exactly symmetric, so
+an ideal step has zero spin. Measured, fp32 reads `7e-8` at window 1 and grows
+*linearly* with the window -- genuine holonomy, coherently accumulating at
+`9e-6` per update. bf16 reads `5.6e-4` at window 1, where exact arithmetic gives
+zero, and `spin^2` is exactly linear in the window with **zero intercept**: a
+pure random walk at `5.6e-4` rad per basis update, with no measurement floor.
+So bf16 rounding does inject real in-span rotation, and in-span rotation is the
+one motion that scrambles the projected moment's coordinates for no subspace
+progress at all.
+
+It is also immaterial. Over the moment's memory at `beta=0.9`, spin is `0.0018`
+against `0.0194` of smear from the frame's legitimate motion; in quadrature that
+raises total smear from 1.936% to 1.948%. The other channels are weaker on
+inspection: the projection is `grad @ basis.mT` on a bf16 gradient, so an fp32
+frame is rounded into the same bf16 matmul regardless, and the only surviving
+path is the lift, ~0.2% relative on a direction Newton-Schulz has already
+stripped the magnitude from. Against `+50%` of matrix optimizer state, this is
+not a trade worth making. **Keep bf16.**
+
+*Stochastic rounding on the basis write was tested and is worse*, by `sqrt(2)`
+at every window. Stochastic rounding exists to stop a sub-ulp *update* from
+vanishing; the frame has no sub-ulp update to lose, since the geodesic moves it
+by a real angle every time. What bf16 costs the frame is variance rather than
+bias, and SR trades a half-ulp bound for a full-ulp uniform draw -- exactly the
+`sqrt(2)` observed. Recorded at the write site so it is not re-proposed.
 
 **P8. `nan_to_num` placement.** Moved from the tangent's Gram onto the tangent
 itself so it also covers the geodesic's separate read. Strictly safer, same
@@ -714,6 +1684,12 @@ concentration turns out to be low, full-spectrum rotation is the reason.
 
 - **Normalizing the rotation angle by `sigma_max`.** Forces a constant top-angle
   per refresh, re-inflates the residual tail, prevents convergence. Reverted.
+  *Re-derived independently and the arc was right.* Bare ortho is the same family
+  -- a different normalization, the same discarded magnitude -- and it reproduces
+  the same failure: motion that does not depend on fit, so it cannot converge.
+  The arc's wording is worth keeping because it named the mechanism ("prevents
+  convergence") rather than the recipe, which is what let it apply to a
+  normalization it never saw.
 - **Per-step Frobenius normalization of the gradient inside the basis update.**
   Made `sigma` a scale-free ratio, so it could not self-anneal and a good basis
   and a garbage basis read identically. Removed.

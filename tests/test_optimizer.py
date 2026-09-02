@@ -257,14 +257,17 @@ def test_diagnostics_are_inert_until_enabled():
 def test_diagnostics_report_every_documented_metric():
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics_enabled = True
+    optimizer.diagnostics = "core"
     # Three steps: the first fits the frame, so basis motion only exists after it.
     _run(params, optimizer, 3)
 
     diagnostics = optimizer.pop_diagnostics()
     assert set(diagnostics) == {
-        "rotation_rad_sum",
+        "transport_speed",
+        "agreement_scale",
+        "agreement_gain",
         "tangent_concentration",
+        "tangent_participation",
         "projected_grad_norm",
         "grad_to_moment_ratio",
         "grad_moment_cosine",
@@ -275,8 +278,12 @@ def test_diagnostics_report_every_documented_metric():
     assert all(isinstance(value, float) for value in diagnostics.values())
     assert all(value == value for value in diagnostics.values()), diagnostics
 
-    assert diagnostics["rotation_rad_sum"] > 0
+    assert diagnostics["transport_speed"] > 0
     assert 1.0 / RANK <= diagnostics["tangent_concentration"] <= 1.0
+    assert 1.0 / RANK <= diagnostics["tangent_participation"] <= 1.0
+    # Structural, not measured: the controller can only ever scale the turn down.
+    assert 0.0 <= diagnostics["agreement_scale"] <= 1.0
+    assert diagnostics["agreement_gain"] > 0.0
     assert diagnostics["update_to_param_ratio"] > 0
     assert diagnostics["nonfinite_grads"] == 0.0
 
@@ -284,7 +291,7 @@ def test_diagnostics_report_every_documented_metric():
 def test_pop_diagnostics_clears_the_window():
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics_enabled = True
+    optimizer.diagnostics = "core"
     _run(params, optimizer, 2)
 
     assert optimizer.pop_diagnostics()
@@ -298,7 +305,7 @@ def test_pop_diagnostics_clears_the_window():
 def test_nonfinite_gradients_are_counted_not_averaged():
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics_enabled = True
+    optimizer.diagnostics = "core"
     _run(params, optimizer, 2)
     optimizer.pop_diagnostics()
 
@@ -317,7 +324,7 @@ def test_diagnostics_do_not_change_the_trajectory():
     quiet_params, quiet = _two_matrix_optimizer()
     torch.manual_seed(0)
     loud_params, loud = _two_matrix_optimizer()
-    loud.diagnostics_enabled = True
+    loud.diagnostics = "core"
 
     torch.manual_seed(1)
     _run(quiet_params, quiet, 4)
@@ -351,7 +358,7 @@ def test_agreement_reads_the_moment_before_this_step_not_after():
     would report perfect agreement where there is no history to agree with."""
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics_enabled = True
+    optimizer.diagnostics = "core"
     _run(params, optimizer, 1)
 
     cosine = optimizer.pop_diagnostics()["grad_moment_cosine"]
@@ -361,18 +368,23 @@ def test_agreement_reads_the_moment_before_this_step_not_after():
 def test_basis_lag_is_off_until_asked_for_and_measures_frame_motion():
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics_enabled = True
+    optimizer.diagnostics = "core"
     _run(params, optimizer, 8)
-    assert "basis_lag_rms_sin" not in optimizer.pop_diagnostics()
+    assert "transport_lag" not in optimizer.pop_diagnostics()
     assert optimizer._lag_snapshots == {}
 
-    optimizer.diagnostics_lag_enabled = True
+    optimizer.diagnostics = "full"
     optimizer.diagnostics_lag_interval = 2
     _run(params, optimizer, 8)
-    lag = optimizer.pop_diagnostics()["basis_lag_rms_sin"]
+    drained = optimizer.pop_diagnostics()
+    lag = drained["transport_lag"]
     # A frame under random gradients keeps moving, so the sine is real but is a
     # sine: bounded by 1 whatever the frame does.
     assert 0.0 < lag <= 1.0, lag
+    # Curve is a fraction of a path that cancelled, so it cannot exceed one and
+    # cannot be negative unless the lag exceeded the path that produced it.
+    assert 0.0 <= drained["transport_curve"] < 1.0, drained["transport_curve"]
+    assert drained["transport_spin"] >= 0.0
 
 
 def test_basis_lag_metric_is_the_sine_of_the_principal_angle():
@@ -398,3 +410,102 @@ def test_basis_lag_metric_is_the_sine_of_the_principal_angle():
         rotated[:, 0] = frame[:, 0] * math.cos(theta) + outside[:, 0] * math.sin(theta)
         # One plane of four moved by theta, so the RMS sine is sin(theta)/2.
         assert abs(rms_sin(rotated, frame) - math.sin(theta) / 2) < 1e-5, theta
+
+
+def test_spin_separates_in_span_rotation_from_subspace_motion():
+    """The property spin exists for: it must see the motion lag is blind to.
+
+    Rotating a frame's columns among themselves moves the subspace not at all,
+    so lag reads zero -- and it renames every coordinate the projected moment is
+    stored in, which under identity transport is total corruption. Spin is the
+    skew part of `Q_old^T Q_new`, which is exactly zero for the symmetric
+    overlap a single Grassmann geodesic produces and nonzero here.
+    """
+    torch.manual_seed(0)
+    frame, _ = torch.linalg.qr(torch.randn(64, 8))
+
+    def reads(current, previous):
+        root = current.shape[1] ** 0.5
+        overlap = previous.mT @ current
+        lag = float((current - previous @ overlap).norm() / root)
+        spin = float((overlap - overlap.mT).norm() / (2.0 * root))
+        return lag, spin
+
+    # A pure in-span rotation: same span, different columns.
+    theta = 0.2
+    rotation = torch.eye(8)
+    rotation[0, 0] = rotation[1, 1] = math.cos(theta)
+    rotation[0, 1], rotation[1, 0] = -math.sin(theta), math.sin(theta)
+    lag, spin = reads(frame @ rotation, frame)
+    assert lag < 1e-6, lag
+    assert spin > 0.05, spin
+
+    # One exact Grassmann geodesic: the overlap is `V cos(theta) V^T`, symmetric,
+    # so all of the motion lands in lag and none of it in spin.
+    tangent = torch.randn(64, 8)
+    tangent = tangent - frame @ (frame.mT @ tangent)
+    values, vectors = torch.linalg.eigh(0.5 * (tangent.mT @ tangent + (tangent.mT @ tangent).mT))
+    moved = SubspaceProjector.oja_geodesic_from_eigh(frame, tangent, values, vectors, 0.05)
+    lag, spin = reads(moved, frame)
+    assert lag > 1e-3, lag
+    assert spin < 1e-5, spin
+
+
+def test_agreement_controller_holds_the_frame_until_the_aim_has_repeated():
+    """No history means no evidence the aim repeats, so the first turn is zero.
+
+    This is the property that keeps the first basis update off the stability
+    cliff. Before it was there the cold start took a full-magnitude turn at an
+    `eta` chosen for a scale near 0.05, and `eigh` on the tangent Gram failed
+    outright. It costs exactly one basis update.
+
+    "Held" is not bitwise identity: a scale of zero still runs the geodesic and
+    its Polar-Express retraction, so the frame comes back changed at the
+    retraction's own error. That is the level the check is written against.
+    """
+
+    def moved(before, after):
+        residual = after.mT - before.mT @ (before @ after.mT)
+        return float(residual.norm() / math.sqrt(RANK))
+
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+
+    _run([weight], optimizer, 1)
+    first = optimizer.state[weight]["basis"].clone().float()
+    _run([weight], optimizer, 1)
+    # Step two has a stored aim but no gain yet, so the frame is still held.
+    held = moved(first, optimizer.state[weight]["basis"].float())
+    assert held < 1e-5, held
+
+    _run([weight], optimizer, 3)
+    assert moved(first, optimizer.state[weight]["basis"].float()) > 100 * held
+
+
+def test_agreement_scale_never_turns_harder_than_the_bare_step():
+    """`scale <= 1` is a bound on the geodesic, not an observation about it.
+
+    Every live plane of the polar tangent has singular value one, so the angle
+    the geodesic takes is `eta * scale` exactly. The clamp is therefore the whole
+    guarantee that annealing can only ever slow the frame relative to turning
+    every plane by `eta`, whatever the meter reads.
+    """
+
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer.diagnostics = "core"
+    _run([weight], optimizer, 12)
+
+    before = optimizer.state[weight]["basis"].clone().float()
+    _run([weight], optimizer, 1)
+    after = optimizer.state[weight]["basis"].float()
+
+    drained = optimizer.pop_diagnostics()
+    assert 0.0 <= drained["agreement_scale"] <= 1.0
+    # Chordal distance per plane, the same unit `transport_speed` reports, and
+    # bounded above by the angle a scale of one would produce.
+    residual = after.mT - before.mT @ (before @ after.mT)
+    moved = float(residual.norm() / math.sqrt(RANK))
+    assert moved <= math.sin(0.01) + 1e-6, moved
