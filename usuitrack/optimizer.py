@@ -320,6 +320,17 @@ class UsuiTrack(Optimizer):
             not move together. It also grew with rank and shared its unit with
             nothing else here, which made it unreadable against the lag it was
             meant to be compared with.
+        ``agreement_scale``, ``agreement_gain``
+            The turn controller's own output, and the yardstick it divides by.
+            ``agreement_scale`` is the mean fraction of ``eta`` the frame
+            actually took, in ``[0, 1]``: falling means the aim has stopped
+            repeating and the tracker is settling, pinned at one means every
+            matrix is clamped and the controller has run out of range.
+            ``agreement_gain`` is the fleet divisor, one scalar per step. It
+            should rise with ``tangent_participation``; a gain that goes flat
+            while participation moves means the divisor has stopped tracking the
+            aim's spread. Read them with ``eta`` in mind -- the two multiply, so
+            a displacement says nothing about which of them produced it.
         ``tangent_concentration``, ``tangent_participation``
             Where that motion went, both in ``[1/r, 1]`` and both free from the
             same eigenvalues. Concentration is the leading plane's share of the
