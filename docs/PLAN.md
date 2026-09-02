@@ -1220,12 +1220,35 @@ taken in -- LFM at rank 128 throughout -- so no result is invalidated. It matter
 for any model where `effective_rank()` clamps narrow modules below the configured
 rank, which is most of them.
 
-Unverified in this move: nothing has been trained against the released code path.
-The unit tests cover the bound (`scale <= 1`, so the turn never exceeds bare
-polar at the same `eta`) and the cold start (no stored aim means no turn), and
-`eta = 0.01` carries over unchanged because every arm in the table above ran at
-`--basis-step 0.01`. But the first real evidence that the port is faithful is a
-smoke run reproducing the fleet-gain row, and it has not been run.
+**Verified at 300 steps, same seed and config as the harness arm it replaces:**
+
+| read | harness patch | released | delta |
+|---|---:|---:|---:|
+| target loss | 1.708032 | 1.707686 | `3.5e-4` |
+| source loss | 3.045626 | 3.045372 | `2.5e-4` |
+| `transport_lag` | 0.0059346 | 0.0059782 | 0.7% |
+| `transport_speed` | 0.0017399 | 0.0017538 | 0.8% |
+| `transport_spin` | 0.00085822 | 0.00085934 | 0.13% |
+| `transport_curve` | 0.68314 | 0.68295 | 0.03% |
+| `tangent_participation` | 0.017998 | 0.017958 | 0.22% |
+| `tangent_concentration` | 0.69877 | 0.69926 | 0.07% |
+| `projected_grad_norm` | 0.41695 | 0.41671 | 0.06% |
+| `update_to_param_ratio` | 1.436764e-4 | 1.436760e-4 | `3e-6` |
+| turn scale | 0.204345 | 0.216770 | **6.1%** |
+
+Every physical read lands inside the `2.9e-4` same-config spread or at the
+fraction-of-a-percent level, target and source included. The frame does the same
+thing.
+
+The 6.1% outlier is the metric, not the control law -- if the law had changed,
+lag, speed and spin would have moved with it and they did not. The harness
+accumulated one sample per bucket call (`sum += scale.mean()`), so its average
+was a mean of bucket means; the release accumulates `scale.sum()` against a count
+of matrices, so its average is per matrix. Those differ whenever buckets are
+unequal in size, which they are. The released form is the one that means what the
+name says.
+
+`eta` carries over unchanged: every arm in the table above ran at `0.01`.
 
 ### How we work here
 
