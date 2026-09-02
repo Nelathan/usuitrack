@@ -1184,77 +1184,11 @@ left**, and P2's history is now a story of deleting the others one at a time:
    meaning smear.
 12. **P5's remaining constants, P6's frame guard, P12's five syncs per step.**
    Unchanged and independent of the above.
-13. **The composed lab arms need re-asking, not re-running.** `--basis-planes`
-   was removed outright -- it ranked planes of a tangent whose singular values are
-   all `scale`, so its top `k` meant nothing. `--accumulate-tangents` stays and is
-   open. It composes with the controller rather than beside it: averaging
-   suppresses exactly the batch noise the agreement meter reads, so the two
-   overlap and its earlier numbers do not transfer. Note the mechanism, which is
-   easy to get wrong -- the window is frozen by this patch swallowing `n - 1`
-   geodesics at the *default* cadence, not by `--basis-update-interval n`, which
-   would build no tangent on the skipped steps and average one. Measured at
-   `n = 4` and `n = 8`; see "Tangent accumulation, re-asked" below. The next cut
-   is an arm that averages the tangent but meters agreement on the unaveraged
-   aim, which is the only way to separate the geometry win from the meter reading
-   its own smoothing.
-
-### Shipped: the tracker's rule moved from the harness into the release
-
-The orthogonalized tangent and the agreement controller were three stacked
-monkeypatches on `oja_geodesic_from_eigh` for the whole investigation. They are
-now `UsuiTrack._anneal_tangent` and `_commit_agreement_ceiling`, and the projector's
-geodesic went back to being pure geometry -- it takes whatever horizontal tangent
-it is handed and holds no opinion about how far the frame should turn. That
-separation is what keeps the released rule measurable against the bare geodesic
-rather than fused with it.
-
-Two things changed in the move, both because the release is not the harness.
-
-*Keyed by parameter, not by call order.* The harness keyed each matrix's stored
-aim by its position within a step's basis pass, which needed a reset hook wired
-into the training loop and failed silently into "no history, scale pins to 1" if
-that hook was ever missed. The optimizer has `entry.param`, so the key is the
-thing itself.
-
-*`r / k` is no longer factored out of the median.* The harness computed
-`median(participation) * r / k` with one global `r`, which PLAN flagged as
-assuming a single rank across the fleet. The release computes each matrix's
-`effective_rank / k` from its own spectrum and takes the median of *that*, which
-is what the derivation actually says and drops the assumption entirely. The two
-agree exactly at uniform rank, which is the regime every measurement above was
-taken in -- LFM at rank 128 throughout -- so no result is invalidated. It matters
-for any model where `effective_rank()` clamps narrow modules below the configured
-rank, which is most of them.
-
-**Verified at 300 steps, same seed and config as the harness arm it replaces:**
-
-| read | harness patch | released | delta |
-|---|---:|---:|---:|
-| target loss | 1.708032 | 1.707686 | `3.5e-4` |
-| source loss | 3.045626 | 3.045372 | `2.5e-4` |
-| `transport_lag` | 0.0059346 | 0.0059782 | 0.7% |
-| `transport_speed` | 0.0017399 | 0.0017538 | 0.8% |
-| `transport_spin` | 0.00085822 | 0.00085934 | 0.13% |
-| `transport_curve` | 0.68314 | 0.68295 | 0.03% |
-| `tangent_participation` | 0.017998 | 0.017958 | 0.22% |
-| `tangent_concentration` | 0.69877 | 0.69926 | 0.07% |
-| `projected_grad_norm` | 0.41695 | 0.41671 | 0.06% |
-| `update_to_param_ratio` | 1.436764e-4 | 1.436760e-4 | `3e-6` |
-| turn scale | 0.204345 | 0.216770 | **6.1%** |
-
-Every physical read lands inside the `2.9e-4` same-config spread or at the
-fraction-of-a-percent level, target and source included. The frame does the same
-thing.
-
-The 6.1% outlier is the metric, not the control law -- if the law had changed,
-lag, speed and spin would have moved with it and they did not. The harness
-accumulated one sample per bucket call (`sum += scale.mean()`), so its average
-was a mean of bucket means; the release accumulates `scale.sum()` against a count
-of matrices, so its average is per matrix. Those differ whenever buckets are
-unequal in size, which they are. The released form is the one that means what the
-name says.
-
-`eta` carries over unchanged: every arm in the table above ran at `0.01`.
+13. **CLOSED -- tangent accumulation is removed.** Averaging `n` Oja tangents in
+   a frozen frame cost target loss monotonically in the window, saved no time,
+   and half its geometry gain was the agreement meter reading its own smoothing.
+   Removed from the harness with `--accumulate-polars` and the `--unsmoothed-meter`
+   control that settled it. Numbers below.
 
 ### Tangent accumulation, re-asked under the released controller
 
@@ -1299,20 +1233,49 @@ so it is real rather than noise. Source stays inside its `2e-3` floor throughout
 Step time is unchanged: the geodesic and its `eigh` were never the cost, the
 tangent build was, and this does not skip that.
 
-**The confound, which is the reason this stays open rather than becoming a
-default.** The agreement meter reads how much consecutive aims agree, and
-averaging `n` batches makes consecutive aims agree more *by construction*. So
-`turn_fraction` rising 2.6x is partly the meter reading its own input filter
-rather than a frame that needs to turn further. The controller self-corrects some
-of this -- `agreement_ceiling` rose 2.1x, which is exactly its job, since the
-attainable ceiling genuinely does rise when the aim spreads over more planes --
-but 2.6x against 2.1x says the correction is incomplete. Some of the extra
-turning is the meter fooling itself.
+**The confound, and the arm that settled it.** The agreement meter reads how much
+consecutive aims agree, and averaging `n` batches makes consecutive aims agree
+more *by construction*, so part of `turn_fraction`'s 2.6x rise is the meter
+reading its own input filter. The control arm averages the tangent but computes
+the whole meter -- head comparison and attainable ceiling both -- on unaveraged
+single-batch aims, exactly as the baseline does. Only the tangent the geodesic
+runs on is the window mean.
 
-That is a testable statement, and the test is an arm that accumulates tangents
-while metering agreement on the *unaveraged* aim. Until that runs, the geometry
-win and the loss cost cannot be attributed cleanly to accumulation rather than to
-a controller running hot on a smoothed signal.
+| read | baseline | `n = 8` | `n = 8`, unaveraged meter |
+|---|---:|---:|---:|
+| `turn_fraction` | 0.217 | 0.564 | **0.394** |
+| `agreement_ceiling` | 0.128 | 0.273 | **0.128** |
+| target loss | **1.70769** | 1.70897 | 1.70868 |
+| s/step | 0.765 | 0.753 | 0.882 |
+
+The ceiling reading 0.128 against the baseline's 0.128 is the arm validating
+itself: metering unaveraged aims reproduces the baseline's yardstick exactly.
+
+*Half the confound was real.* `turn_fraction` falls 0.564 to 0.394, removing 49%
+of the rise. *The other half was not.* 0.394 is still 1.8x the baseline, because
+with eight times fewer turns the frame genuinely is more skewed and its aim
+genuinely does repeat more -- the controller responding correctly, not fooling
+itself. *And the loss cost survives the fix entirely*, so it belongs to averaging
+the tangent rather than to a controller running hot.
+
+**Removed, and the deciding argument is where it was measured, not by how much it
+lost.** Accumulation exists to fix a noisy single-batch aim, so the noisier the
+batch the more it should buy. 16k tokens/step is the noisiest regime we run --
+Anima is 64k -- so this was the most favourable condition it will ever see, and it
+lost. At 64k it has strictly less to offer.
+
+`--accumulate-polars`, the one variant never run, is superseded rather than
+untried: averaging each batch's polar factor was a way to measure cross-batch
+persistence instead of magnitude, and the agreement controller measures exactly
+that, every step, with no `[d,r]` accumulator.
+
+*One bug found and worth keeping in mind.* The patch suppressed `n - 1` geodesics
+without telling the optimizer, so `group["basis_update_step"]` counted turns that
+never happened and the lag window -- measured in those ticks but recorded only on
+steps that actually turn -- drifted out of alignment with its own recorder. My
+first fix scaled the window to compensate, which made the coincidence rarer and
+produced zero samples. Any future patch that swallows a geodesic has to decrement
+that counter, not work around it.
 
 ### How we work here
 
