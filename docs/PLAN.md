@@ -958,11 +958,20 @@ exists for `eta` is open, and the shape of an answer would tie it to the signal
 the frame can resolve above batch noise, which the meter already measures.
 
 *A stated property, not a bug:* the meter reads persistence, and persistence is
-confounded with batch noise. At larger batches the aim repeats better, `scale`
-sits near its peak longer, and the frame turns harder for longer. That is
-arguably correct -- a quieter aim deserves more trust -- but it means **annealing
-depth depends on batch size**, and Anima at 64k tokens per step will not anneal
-like LFM at 16k.
+confounded with batch noise. At larger batches the aim repeats better, so the
+turn scale sits near its ceiling longer and the frame turns harder for longer.
+That is arguably correct -- a quieter aim deserves more trust.
+
+**Measured since, and the dependence is weaker than this predicted.** Quartering
+the batch (16 to 4) moved `turn_fraction` by 5%, not by the factor this paragraph
+implies, because the ceiling is derived from participation and participation falls
+with the batch. Both ends of the meter move together. See "Tangent accumulation:
+measured, then removed" for the table. This was written when the divisor was a
+fitted constant, where the dependence would have been real.
+
+Anima is `bs4 x 768px` on a 2B DiT, so its aim is built from far less data per
+step than LFM's, not more. Low batch is the regime to check, and it now has been
+on the LLM side.
 
 ### Capture tracks lag, so it cannot rank this family either
 
@@ -1184,98 +1193,114 @@ left**, and P2's history is now a story of deleting the others one at a time:
    meaning smear.
 12. **P5's remaining constants, P6's frame guard, P12's five syncs per step.**
    Unchanged and independent of the above.
-13. **CLOSED -- tangent accumulation is removed.** Averaging `n` Oja tangents in
-   a frozen frame cost target loss monotonically in the window, saved no time,
-   and half its geometry gain was the agreement meter reading its own smoothing.
-   Removed from the harness with `--accumulate-polars` and the `--unsmoothed-meter`
-   control that settled it. Numbers below.
+13. **CLOSED -- tangent accumulation removed.** Falsified at batch 16, where it
+   cost target loss monotonically in the window, and at batch 4, where the cost
+   disappeared but no gain replaced it. The controller absorbs single-batch noise
+   without it. Numbers below.
 
-### Tangent accumulation, re-asked under the released controller
+### Tangent accumulation: measured, then removed
 
-Averaging `n` Oja tangents in a frozen frame, then taking one geodesic on the
-mean. The window is frozen by swallowing `n - 1` geodesics at the default
-cadence -- not by `--basis-update-interval n`, which builds no tangent on the
-skipped steps and would average one. 300 steps, same seed and config as the
-released baseline.
+Averaged `n` Oja tangents in a frame held still, then took one geodesic on the
+mean. The window was frozen by the patch swallowing `n - 1` geodesics at the
+default cadence, not by `--basis-update-interval n`, which builds no tangent on
+the skipped steps and would average one.
+
+All runs: LFM2.5-350M, rank 128, seed 1, 300 steps.
+
+**Batch 16.**
 
 | read | baseline | `n = 4` | `n = 8` |
 |---|---:|---:|---:|
-| target loss | **1.70769** | 1.70848 | 1.70897 |
-| source loss | 3.04537 | **3.04328** | 3.04470 |
-| `transport_curve` | 0.683 | **0.421** | **0.302** |
-| `transport_lag` | 0.00598 | 0.01170 | 0.02018 |
-| `transport_speed` | 0.00175 | 0.00252 | 0.00351 |
-| `transport_spin` | 0.000859 | 0.000988 | 0.001064 |
+| target loss | 1.70769 | 1.70848 | 1.70897 |
+| source loss | 3.04537 | 3.04328 | 3.04470 |
 | `turn_fraction` | 0.217 | 0.312 | 0.564 |
 | `agreement_ceiling` | 0.128 | 0.219 | 0.273 |
 | `tangent_participation` | 0.0180 | 0.0316 | 0.0421 |
 | `tangent_concentration` | 0.699 | 0.490 | 0.449 |
 | s/step | 0.765 | 0.753 | 0.753 |
 
-**Prediction stated before the run, and wrong:** that four times fewer geodesics
-would lower `transport_lag`. It rose 2x at `n = 4` and 3.4x at `n = 8`, and the
-rise is if anything understated -- the lag window is `diagnostics_lag_interval`
-*counter* ticks but the recorder only runs on geodesic steps, so the accumulation
-arms measure over five geodesics against the baseline's ten. More net distance
-covered over half as many turns.
+Target degrades monotonically in the window; at `n = 8` the gap is `1.3e-3`
+against a `2.9e-4` same-config spread. Source stays inside its `2e-3` floor.
+Step time is unchanged -- the geodesic and its `eigh` were never the cost.
 
-**The real result is `transport_curve`, and it is large.** Curve is a ratio of two
-quantities measured over the same window, so unlike lag and speed it is directly
-comparable across arms. The baseline cancels 68% of its travel; `n = 8` cancels
-30%. The frame stops churning and starts going somewhere. `tangent_participation`
-says why: the mean of `n` tangents has 2.3x the effective rank of one batch's, and
-`tangent_concentration` falls to match, so the aim is no longer one batch's
-leading spike with a noise tail behind it.
+`transport_lag`, `transport_curve` and `transport_spin` were also logged and are
+under-sampled: 12 window measurements for the baseline, 6 at `n = 8`, and 2 once
+the geodesic counter was corrected. Curve read 0.683 for the baseline and 0.302
+at `n = 8`. Recorded, not concluded from.
 
-**And it costs loss, monotonically.** Target degrades `1.70769 -> 1.70848 ->
-1.70897`. At `n = 8` that is `1.3e-3`, about 4.5x the `2.9e-4` same-config spread,
-so it is real rather than noise. Source stays inside its `2e-3` floor throughout.
-Step time is unchanged: the geodesic and its `eigh` were never the cost, the
-tangent build was, and this does not skip that.
-
-**The confound, and the arm that settled it.** The agreement meter reads how much
-consecutive aims agree, and averaging `n` batches makes consecutive aims agree
-more *by construction*, so part of `turn_fraction`'s 2.6x rise is the meter
-reading its own input filter. The control arm averages the tangent but computes
-the whole meter -- head comparison and attainable ceiling both -- on unaveraged
-single-batch aims, exactly as the baseline does. Only the tangent the geodesic
-runs on is the window mean.
+**Control for the meter's own smoothing.** Averaging `n` batches raises
+consecutive-aim agreement by construction, so the turn scale can rise without the
+frame needing to turn further. The arm averages the tangent but computes the whole
+meter -- head comparison and attainable ceiling -- on unaveraged single-batch aims.
 
 | read | baseline | `n = 8` | `n = 8`, unaveraged meter |
 |---|---:|---:|---:|
-| `turn_fraction` | 0.217 | 0.564 | **0.394** |
-| `agreement_ceiling` | 0.128 | 0.273 | **0.128** |
-| target loss | **1.70769** | 1.70897 | 1.70868 |
+| `turn_fraction` | 0.217 | 0.564 | 0.394 |
+| `agreement_ceiling` | 0.128 | 0.273 | 0.128 |
+| target loss | 1.70769 | 1.70897 | 1.70868 |
 | s/step | 0.765 | 0.753 | 0.882 |
 
-The ceiling reading 0.128 against the baseline's 0.128 is the arm validating
-itself: metering unaveraged aims reproduces the baseline's yardstick exactly.
+The ceiling returning to 0.128 confirms the arm meters what it claims.
+`turn_fraction` falls 0.564 to 0.394, so 49% of the rise was the meter reading its
+own input filter and the rest is the frame being more skewed under eight times
+fewer turns. Target loss did not recover, so the cost is in averaging the tangent
+rather than in over-turning. The unaveraged meter costs 18% step time: one extra
+`[r,r]` eigh per matrix per step.
 
-*Half the confound was real.* `turn_fraction` falls 0.564 to 0.394, removing 49%
-of the rise. *The other half was not.* 0.394 is still 1.8x the baseline, because
-with eight times fewer turns the frame genuinely is more skewed and its aim
-genuinely does repeat more -- the controller responding correctly, not fooling
-itself. *And the loss cost survives the fix entirely*, so it belongs to averaging
-the tangent rather than to a controller running hot.
+**Batch 4, without accumulation.** The regime accumulation exists for: the aim is
+built from a quarter of the data, so it is the noisiest we run.
 
-**Removed, and the deciding argument is where it was measured, not by how much it
-lost.** Accumulation exists to fix a noisy single-batch aim, so the noisier the
-batch the more it should buy. 16k tokens/step is the noisiest regime we run --
-Anima is 64k -- so this was the most favourable condition it will ever see, and it
-lost. At 64k it has strictly less to offer.
+| read | batch 16 | batch 4 |
+|---|---:|---:|
+| `turn_fraction` | 0.2168 | 0.2052 |
+| `agreement_ceiling` | 0.1276 | 0.1018 |
+| `tangent_participation` | 0.01796 | 0.01470 |
+| `tangent_concentration` | 0.699 | 0.761 |
+| `transport_speed` | 0.001754 | 0.001739 |
+| `transport_curve` | 0.683 | 0.683 |
 
-`--accumulate-polars`, the one variant never run, is superseded rather than
-untried: averaging each batch's polar factor was a way to measure cross-batch
-persistence instead of magnitude, and the agreement controller measures exactly
-that, every step, with no `[d,r]` accumulator.
+The controller does not starve. The failure mode available to it was the meter
+collapsing to its chance floor as consecutive aims stop agreeing; instead the turn
+scale held within 5% and the frame's motion within 1%.
 
-*One bug found and worth keeping in mind.* The patch suppressed `n - 1` geodesics
-without telling the optimizer, so `group["basis_update_step"]` counted turns that
-never happened and the lag window -- measured in those ticks but recorded only on
-steps that actually turn -- drifted out of alignment with its own recorder. My
-first fix scaled the window to compensate, which made the coincidence rarer and
-produced zero samples. Any future patch that swallows a geodesic has to decrement
-that counter, not work around it.
+The mechanism is in the same table. A noisier aim is a more concentrated one:
+participation falls 18% and concentration rises 9%, because one batch's leading
+direction dominates. The ceiling is derived from participation, so it falls 20%
+alongside. Numerator and denominator move together and the ratio holds. A fitted
+divisor would have sat still while the aim's spread fell, and the turn scale would
+have fallen with it -- this is the clearest evidence so far for the derived
+ceiling over a fitted or frozen anchor.
+
+**Batch 4, with accumulation.**
+
+| read | plain | `n = 4` |
+|---|---:|---:|
+| target loss | 1.77368 | 1.77389 |
+| `turn_fraction` | 0.205 | 0.287 |
+| `agreement_ceiling` | 0.102 | 0.186 |
+| `tangent_participation` | 0.0147 | 0.0283 |
+
+The loss cost is `2.1e-4`, inside the same-config spread, against `1.3e-3` at
+batch 16. It does not become a gain. The participation and ceiling rises are
+measured on the averaged tangent and carry the same smoothing confound as above.
+
+**Removed.** Accumulation exists to fix a noisy single-batch aim. Tested at the
+noisiest batch we run, the aim was not the problem: the controller absorbed the
+noise itself, the frame moved the same distance, and accumulation was loss-neutral
+there and loss-costing at larger batch. Low batch is not a hypothetical regime --
+a larger model at small batch is one we may run -- which is why this was tested
+rather than assumed.
+
+`--accumulate-polars` was never run and is removed as superseded: averaging each
+batch's polar factor measured cross-batch persistence instead of magnitude, which
+is what the agreement controller measures every step with no `[d,r]` accumulator.
+
+**One bug to carry forward.** The patches swallowed `n - 1` geodesics without
+telling the optimizer, so `group["basis_update_step"]` counted turns that never
+happened, and the lag window -- measured in those ticks but recorded only on steps
+that actually turn -- stopped aligning with its own recorder. Scaling the window
+to compensate produced zero samples. Any patch that suppresses a geodesic must
+decrement that counter.
 
 ### How we work here
 
