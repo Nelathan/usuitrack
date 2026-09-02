@@ -1354,12 +1354,17 @@ spin favour the slow end, but trivially so, because a frame that turns less has
 less of both. `k = 32` also ran without incident at 1.7x the released frame speed,
 which is headroom worth remembering against the `eta = 0.02` cliff.
 
-### The controller is invariant to a 16x change in batch size
+### The controller is invariant to an 8x batch change, and the aim collapses at 16x
 
-The meter reads whether consecutive aims agree, so the failure mode available to
-it is a noisy aim that never repeats: `excess` collapses to the chance floor and
-the frame stops turning. Tested by shrinking the batch, 16 down to 1, everything
-else held. Run means, 11-12 window samples per `transport_*` figure.
+The meter reads whether consecutive aims agree, so the failure mode expected of it
+was a noisy aim that never repeats: `excess` collapses to the chance floor and the
+frame stops turning. Tested by shrinking the batch, 16 down to 1, everything else
+held. Run means, 11-12 window samples per `transport_*` figure.
+
+**bs1 did not finish.** It ran 275 of 300 steps and died in
+`torch.linalg.eigh` on the tangent Gram -- error 107, "ill-conditioned or has too
+many repeated eigenvalues". Its column below is what it read up to that point, not
+a completed arm. Every other arm completed.
 
 | read | bs16 | bs8 | bs4 | bs2 | bs1 |
 |---|---:|---:|---:|---:|---:|
@@ -1372,25 +1377,59 @@ else held. Run means, 11-12 window samples per `transport_*` figure.
 
 The aim degrades monotonically and measurably: participation falls 28% and
 concentration rises 16%, because at smaller batch a single direction dominates.
-The ceiling, derived from participation, falls 34% with it. The turn scale is flat
-within 6% and the frame's motion is flat within 11% on speed and 2% on curve.
+The ceiling, derived from participation, falls 34% with it. Across bs16 to bs2 the
+turn scale is flat within 6% and the frame's motion within 11% on speed and 2% on
+curve.
 
-Both ends of the meter move together, so the ratio holds. This is what the derived
-ceiling exists for and it is now demonstrated over a sixteenfold range. The
-counterfactual is quantifiable: held at bs16's ceiling of 0.1227, bs1's excess
-would give a turn scale of 0.221 instead of 0.336 -- a fitted divisor would have
-slowed the tracker by a third at bs1, for no reason other than that it was fitted
+Both ends of the meter move together, so the ratio holds. That is what the derived
+ceiling exists for, and it is demonstrated over an eightfold range. The
+counterfactual is quantifiable: held at bs16's ceiling of 0.1227, bs2's excess
+would give a turn scale of 0.235 instead of 0.316 -- a fitted divisor would have
+slowed the tracker by a quarter at bs2, for no reason other than being fitted
 somewhere else.
 
 Target loss is not comparable across this ladder -- 300 steps at bs1 sees a
 sixteenth of the data -- and is not reported.
 
-*The limit this does not clear.* At bs1 concentration is 0.83: the aim is close to
-rank one. The meter reads persistence, and a single direction that dominates every
-batch persists whether or not the frame is skewed, so the controller cannot
-separate "the frame has lag to correct" from "one noisy direction dominates the
-gradient". Nothing broke across 16x, but that is the mechanism to watch on a model
-whose gradient is genuinely rank-poor rather than merely undersampled.
+**What broke at bs1.** Two readings are available and the evidence is not
+conclusive between them.
+
+*Rank collapse.* At bs1 concentration reads 0.83 and participation 0.0123, an
+effective rank of 1.6 out of 128, so the tangent Gram is one large eigenvalue and
+a long tail of near-equal near-zero ones -- exactly the input `eigh` reports as
+ill-conditioned or having too many repeated eigenvalues, which is the error
+raised. On this reading the aim did not become uninformative, it became
+rank-deficient, and the controller has no view of that: it reads whether the aim
+repeats, and a single dominant direction repeats perfectly well.
+
+*Divergence.* PLAN's standing reading of an `eigh` failure is that the frame
+turned too hard, and that reading has been right before.
+
+*What separates them, as far as the data goes.* Up to the last logged point the
+frame shows no sign of turning hard: `turn_fraction` 0.336 against bs16's 0.329,
+`transport_speed` 0.00282 against 0.00287, `transport_curve` 0.622 against 0.626
+-- all flat. A frame being thrown would show as a speed spike and it does not.
+Against that, the last log lands at step 275 and the crash is somewhere in the
+following 25 steps, so a divergence confined to that window would not appear.
+The spectrum evidence is direct and the divergence evidence is absent rather than
+contradicted, which favours rank collapse without settling it. Re-running bs1 with
+a tighter logging cadence would settle it and has not been done.
+
+So the limit is upstream of the controller. `tangent_concentration` and
+`tangent_participation` both saw it coming, moving monotonically across the whole
+ladder, which makes them the reads to watch on a gradient that is genuinely
+rank-poor rather than merely undersampled.
+
+**This is also the first evidence against removing the `eigh` jitter.** The
+relative Tikhonov shift was deleted on the grounds that `eigh_jitter_retries`
+never fired once across four LFM runs, an Anima run, and ~3300 basis updates -- a
+fair reading of the evidence available then. This is the case it was for. It does
+not settle whether the guard should return: a jitter would have kept bs1 running,
+but a frame tracking a rank-1.6 aim at rank 128 is tracking almost nothing, and
+failing loudly may be the better behaviour. What it does settle is that the
+failure is reachable, and the note in `optimizer.py` saying a failing `eigh` now
+fails should be read as a deliberate choice with a known trigger rather than as a
+condition never observed.
 
 ### How we work here
 
