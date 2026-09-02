@@ -1185,12 +1185,14 @@ left**, and P2's history is now a story of deleting the others one at a time:
 12. **P5's remaining constants, P6's frame guard, P12's five syncs per step.**
    Unchanged and independent of the above.
 13. **The composed lab arms need re-asking, not re-running.** `--basis-planes`
-   and `--accumulate-tangents` survived the cleanup but now compose with a
-   released polar tangent and a released controller. Truncation ranks planes of a
-   tangent whose singular values are all `scale`, so its top `k` no longer means
-   what it meant; accumulation averages away the batch noise the meter reads, so
-   the two overlap. Both docstrings carry the note. Neither arm's earlier numbers
-   transfer.
+   was removed outright -- it ranked planes of a tangent whose singular values are
+   all `scale`, so its top `k` meant nothing. `--accumulate-tangents` stays and is
+   open. It composes with the controller rather than beside it: averaging
+   suppresses exactly the batch noise the agreement meter reads, so the two
+   overlap and its earlier numbers do not transfer. Note the mechanism, which is
+   easy to get wrong -- the window is frozen by this patch swallowing `n - 1`
+   geodesics at the *default* cadence, not by `--basis-update-interval n`, which
+   would build no tangent on the skipped steps and average one.
 
 ### Shipped: the tracker's rule moved from the harness into the release
 
