@@ -142,7 +142,7 @@ class UsuiTrack(Optimizer):
         # -- `transport_lag`, `transport_curve`, `transport_spin` -- which is
         # `[d,r]` over `diagnostics_lag_matrices` sampled matrices, a fixed cost
         # that does not grow with the model. Off is one attribute read.
-        self.diagnostics = "off"
+        self._diagnostics_tier = "off"
         self.diagnostics_lag_matrices = 32
         # The window the snapshot spans. This is also the projected moment's
         # memory, so `1 / (1 - beta)` is the interval at which `transport_lag`
@@ -243,6 +243,35 @@ class UsuiTrack(Optimizer):
         self._pending_matrix_updates.clear()
         super().zero_grad(set_to_none=set_to_none)
 
+    DIAGNOSTIC_TIERS = ("off", "core", "full")
+
+    @property
+    def diagnostics(self) -> str:
+        return self._diagnostics_tier
+
+    @diagnostics.setter
+    def diagnostics(self, tier: str) -> None:
+        """Validated, because the failure this prevents is silent.
+
+        The tiers are read as string comparisons on the hot path, so a typo does
+        not raise -- ``"ful"`` is not ``"off"``, which enables core, and it is not
+        ``"full"``, which leaves out exactly the snapshot reads that were asked
+        for. The run then looks fine and quietly omits its most expensive
+        telemetry. This is a knob set by hand mid-experiment, so it gets a guard.
+
+        Leaving ``"full"`` also drops the snapshot state. Those buffers are only
+        meaningful as a comparison against a live window; kept across a tier
+        change they would make the first reading after re-enabling a comparison
+        against an arbitrarily old frame.
+        """
+
+        if tier not in self.DIAGNOSTIC_TIERS:
+            raise ValueError(f"diagnostics must be one of {self.DIAGNOSTIC_TIERS}, got {tier!r}")
+        if tier != "full":
+            self._lag_snapshots.clear()
+            self._lag_path.clear()
+        self._diagnostics_tier = tier
+
     def _diagnostics_sink(self) -> DiagnosticsAccumulator | None:
         """The live accumulator, or None when telemetry is off.
 
@@ -251,7 +280,7 @@ class UsuiTrack(Optimizer):
         per site and no device work at all.
         """
 
-        if self.diagnostics == "off":
+        if self._diagnostics_tier == "off":
             return None
         if self._diagnostics is None:
             self._diagnostics = DiagnosticsAccumulator()
@@ -1063,7 +1092,7 @@ class UsuiTrack(Optimizer):
         """
 
         diagnostics = self._diagnostics_sink()
-        if diagnostics is None or self.diagnostics != "full":
+        if diagnostics is None or self._diagnostics_tier != "full":
             return
         # The path has to accumulate on every basis update while the snapshot is
         # only taken on the window boundary, so this runs unconditionally and the

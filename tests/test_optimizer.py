@@ -509,3 +509,44 @@ def test_turn_fraction_never_exceeds_the_bare_step():
     residual = after.mT - before.mT @ (before @ after.mT)
     moved = float(residual.norm() / math.sqrt(RANK))
     assert moved <= math.sin(0.01) + 1e-6, moved
+
+
+def test_diagnostics_tier_rejects_a_typo_instead_of_silently_downgrading():
+    """The failure this guards is silent, which is why it is worth a guard.
+
+    Tiers are string comparisons on the hot path: `"ful"` is not `"off"`, so core
+    switches on, and it is not `"full"`, so the snapshot reads stay off. The run
+    then looks healthy while omitting exactly the telemetry that was asked for.
+    """
+
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+
+    with pytest.raises(ValueError, match="diagnostics must be one of"):
+        optimizer.diagnostics = "ful"
+    assert optimizer.diagnostics == "off"
+
+    for tier in ("core", "full", "off"):
+        optimizer.diagnostics = tier
+        assert optimizer.diagnostics == tier
+
+
+def test_leaving_the_full_tier_drops_the_snapshot_state():
+    """Snapshots only mean something against a live window.
+
+    Kept across a tier change, the first reading after re-enabling would compare
+    the frame against one from an arbitrarily distant past and report it as one
+    window's travel.
+    """
+
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer.diagnostics = "full"
+    optimizer.diagnostics_lag_interval = 2
+    _run([weight], optimizer, 6)
+    assert optimizer._lag_snapshots
+
+    optimizer.diagnostics = "core"
+    assert optimizer._lag_snapshots == {}
+    assert optimizer._lag_path == {}
