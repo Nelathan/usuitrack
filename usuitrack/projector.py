@@ -133,6 +133,19 @@ class SubspaceProjector:
         return SubspaceProjector._polar_express_stiefel_correction(moved)
 
     @staticmethod
+    def polar_factor(matrix: Tensor) -> Tensor:
+        """The orthogonal factor of `matrix`, for a matrix already close to it.
+
+        Same map the geodesic uses to pull its result back onto the Stiefel
+        manifold, applied to a square `[r,r]` instead of a tall frame: one
+        Polar Express iteration, exact enough only because the input is a frame
+        overlap whose singular values are cosines of small principal angles.
+        Not a general-purpose polar decomposition.
+        """
+
+        return SubspaceProjector._polar_express_stiefel_correction(matrix)
+
+    @staticmethod
     def _polar_express_stiefel_correction(frame: Tensor) -> Tensor:
         gram = frame.mT @ frame
         a, b, c = _POLAR_EXPRESS_FINAL_COEFFICIENTS

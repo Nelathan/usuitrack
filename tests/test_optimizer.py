@@ -173,7 +173,7 @@ def test_live_kernel_tangent_is_horizontal(side):
     # leading eigenspace of `G^T G`, so the Oja action lands entirely inside it
     # and the horizontal residual is exactly zero, which makes this assertion
     # vacuous.
-    _projected, tangent, _norm = kernel(
+    _projected, _moment, tangent, _norm = kernel(
         torch.randn(ROWS, COLS),
         basis,
         torch.zeros(projected_shape),
@@ -217,7 +217,7 @@ def test_a_fitted_frame_is_a_fixed_point_of_its_own_gradient():
     basis = projector.basis
     assert basis is not None
 
-    _projected, tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
+    _projected, _moment, tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
         gradient, basis, torch.zeros(ROWS, RANK), 1.0, 0.95
     )
     assert float(tangent.abs().max()) < 1e-5, float(tangent.abs().max())
@@ -233,15 +233,62 @@ def test_kernel_matches_a_hand_rolled_step():
     assert basis is not None
 
     moment = torch.randn(ROWS, RANK).mul_(1e-3)
+    untouched = moment.clone()
     expected = moment.clone()
-    projected, _tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
+    projected, blended, _tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
         gradient, basis, moment, 1.0, 0.95
     )
 
     clipped = gradient * (1.0 / gradient.float().norm()).clamp(max=1.0)
     assert torch.allclose(projected, clipped @ basis.mT, atol=1e-6)
     expected.mul_(0.95).add_(projected, alpha=0.05)
-    assert torch.allclose(moment, expected, atol=1e-6)
+    assert torch.allclose(blended, expected, atol=1e-6)
+    # Returned, never written back here. The step commits the moment once, after
+    # the frame rotation, so a kernel that stored it would round it twice.
+    assert torch.equal(moment, untouched)
+    assert blended.dtype is torch.float32
+
+
+def test_polar_factor_of_a_frame_overlap_is_orthogonal():
+    """`_record_frame_rotation` needs the rotation part of the overlap alone."""
+    torch.manual_seed(0)
+    first = torch.linalg.qr(torch.randn(ROWS, RANK))[0]
+    second = torch.linalg.qr(first + 0.01 * torch.randn(ROWS, RANK))[0]
+    overlap = first.mT @ second
+
+    rotation = SubspaceProjector.polar_factor(overlap)
+
+    identity = torch.eye(RANK)
+    # One Polar Express iteration, so orthogonality holds to ~1e-5 rather than
+    # to machine precision. That is two orders below the in-span rotation this
+    # exists to remove, which is what the tolerance has to clear.
+    torch.testing.assert_close(rotation.mT @ rotation, identity, atol=1e-4, rtol=0)
+    # The residue after the rotation is taken out is the symmetric part the
+    # geodesic already accounts for.
+    remainder = overlap @ rotation.mT
+    torch.testing.assert_close(remainder, remainder.mT, atol=1e-4, rtol=0)
+
+
+def test_frame_rotation_is_the_identity_when_transport_is_exact():
+    """In fp32 the geodesic's own overlap is symmetric, so nothing is corrected.
+
+    This is the property that makes the correction safe: it fires on the
+    deviation between the frame computed and the frame stored, and on a path
+    with no rounding there is no deviation.
+    """
+
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    _run(params, optimizer, 4)
+
+    for param in params:
+        if param.ndim != 2:
+            continue
+        entry = optimizer._pending_matrix_updates.get(param)
+        rotation = entry.frame_rotation if entry is not None else None
+        if rotation is None:
+            continue
+        torch.testing.assert_close(rotation, torch.eye(rotation.shape[-1]), atol=1e-5, rtol=0)
 
 
 def test_diagnostics_are_inert_until_enabled():

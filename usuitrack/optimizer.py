@@ -62,6 +62,10 @@ class MatrixUpdate:
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
     transport_speed: Tensor | None = None
+    # The in-span rotation between the frame this step's moment was measured in
+    # and the frame it will be read in next step. `None` when the basis did not
+    # move, which is the only case where identity transport is exact on its own.
+    frame_rotation: Tensor | None = None
 
 
 class UsuiTrack(Optimizer):
@@ -562,6 +566,7 @@ class UsuiTrack(Optimizer):
             # transport is exact because the geodesic is a rigid rotation.
             self._apply_matrix_update_buckets(matrix_updates, group)
             self._apply_basis_updates(matrix_updates, group)
+            self._commit_moments(matrix_updates)
         self._commit_agreement_ceiling()
 
         # One sample per step, not per matrix: the quantity that means something
@@ -609,12 +614,14 @@ class UsuiTrack(Optimizer):
             self._initialize_projector(projector, grad, state)
         projected_grad = projector.project(grad)
 
-        projected_exp_avg = state.get("projected_exp_avg")
+        stored = state.get("projected_exp_avg")
         state["step"] = state.get("step", 0) + 1
-        if projected_exp_avg is None:
-            projected_exp_avg = torch.zeros_like(projected_grad)
-        projected_exp_avg.mul_(group["beta"]).add_(projected_grad, alpha=1.0 - group["beta"])
-        state["projected_exp_avg"] = projected_exp_avg
+        if stored is None:
+            stored = torch.zeros_like(projected_grad)
+            state["projected_exp_avg"] = stored
+        beta = float(group["beta"])
+        projected_exp_avg = stored.to(dtype=torch.float32, copy=True)
+        projected_exp_avg.mul_(beta).add_(projected_grad.float(), alpha=1.0 - beta)
         self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg, group["beta"])
 
         return MatrixUpdate(
@@ -645,14 +652,13 @@ class UsuiTrack(Optimizer):
         ) or (
             self._prepare_tracker_right_tensors if is_right else self._prepare_tracker_left_tensors
         )
-        projected_grad, oja_tangent, raw_grad_norm = prepare(
+        projected_grad, projected_exp_avg, oja_tangent, raw_grad_norm = prepare(
             grad,
             basis,
             state["projected_exp_avg"],
             float(group["grad_clip_norm"]),
             float(group["beta"]),
         )
-        projected_exp_avg = state["projected_exp_avg"]
         # Deliberately outside the compiled kernel: measuring in there would put
         # the reductions in the graph whether or not anyone asked for them.
         self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg, group["beta"])
@@ -718,7 +724,7 @@ class UsuiTrack(Optimizer):
         projected_exp_avg: Tensor,
         grad_clip_norm: float,
         beta: float,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """One fused pass: clip, project in the held frame, aim, accumulate.
 
         Both consumers -- the Oja tangent that steers the basis and the
@@ -736,8 +742,17 @@ class UsuiTrack(Optimizer):
         rayleigh = 0.5 * (rayleigh + rayleigh.mT)
         tangent = action - frame @ rayleigh
         tangent = tangent / rayleigh.diagonal().mean().clamp_min(1e-12)
-        projected_exp_avg.mul_(beta).add_(projected_grad, alpha=1.0 - beta)
-        return projected_grad, tangent, raw_grad_norm
+        # The moment is accumulated in fp32 and handed back rather than rounded
+        # into its bf16 home here. It stays in fp32 for the rest of the step --
+        # through the polar map and through the frame rotation below -- so the
+        # step rounds it exactly once, at the commit, instead of once here and
+        # again after the rotation.
+        # `copy=True` because `.float()` on an already-fp32 moment aliases the
+        # stored tensor, and this must not write through to state: the step
+        # commits once, after the rotation.
+        moment = projected_exp_avg.to(dtype=torch.float32, copy=True)
+        moment.mul_(beta).add_(projected_grad.float(), alpha=1.0 - beta)
+        return projected_grad, moment, tangent, raw_grad_norm
 
     @staticmethod
     def _prepare_tracker_left_tensors(
@@ -746,7 +761,7 @@ class UsuiTrack(Optimizer):
         projected_exp_avg: Tensor,
         grad_clip_norm: float,
         beta: float,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Left-side twin of `_prepare_tracker_right_tensors`."""
 
         grad, raw_grad_norm = UsuiTrack._sanitize_and_clip_grad_tensors(grad, grad_clip_norm)
@@ -759,8 +774,17 @@ class UsuiTrack(Optimizer):
         rayleigh = 0.5 * (rayleigh + rayleigh.mT)
         tangent = action - frame @ rayleigh
         tangent = tangent / rayleigh.diagonal().mean().clamp_min(1e-12)
-        projected_exp_avg.mul_(beta).add_(projected_grad, alpha=1.0 - beta)
-        return projected_grad, tangent, raw_grad_norm
+        # The moment is accumulated in fp32 and handed back rather than rounded
+        # into its bf16 home here. It stays in fp32 for the rest of the step --
+        # through the polar map and through the frame rotation below -- so the
+        # step rounds it exactly once, at the commit, instead of once here and
+        # again after the rotation.
+        # `copy=True` because `.float()` on an already-fp32 moment aliases the
+        # stored tensor, and this must not write through to state: the step
+        # commits once, after the rotation.
+        moment = projected_exp_avg.to(dtype=torch.float32, copy=True)
+        moment.mul_(beta).add_(projected_grad.float(), alpha=1.0 - beta)
+        return projected_grad, moment, tangent, raw_grad_norm
 
     @staticmethod
     def _sanitize_and_clip_grad_tensors(grad: Tensor, grad_clip_norm: float) -> tuple[Tensor, Tensor]:
@@ -874,7 +898,66 @@ class UsuiTrack(Optimizer):
                     state = self.state[entry.param]
                     state["basis"] = entry.projector.basis
                     state["projection_side_is_right"] = side is ProjectionSide.RIGHT
+                self._record_frame_rotation(selected_entries, frames)
         self._record_basis_lag(pending, group)
+
+    @torch.no_grad()
+    def _record_frame_rotation(self, entries: list[MatrixUpdate], old_frames: Tensor) -> None:
+        """The in-span rotation identity transport does not account for.
+
+        Transport is the identity in moving-frame coordinates, which is exact
+        for the geodesic itself: a single Grassmann step along a horizontal
+        tangent gives `Q^T Q+ = V cos(theta) V^T`, symmetric, so the moment's
+        coordinates carry over untouched. What is not exact is the frame that
+        actually gets stored. Rounding the geodesic's result into bf16 rotates
+        the frame's columns *inside* the span they already had -- motion that
+        advances the subspace not at all and scrambles the moment one-for-one.
+        `transport_spin` has always measured it; nothing corrected it.
+
+        So read the overlap from the frames as they are **stored**, not as they
+        were computed -- the rounding is the whole quantity being chased -- and
+        take its orthogonal polar factor. The symmetric part is the geodesic and
+        is already handled by identity transport; the rotation is the residue.
+        An ideal step gives the identity here, so this is a no-op exactly when
+        transport was already right.
+        """
+
+        new_frames = torch.stack([entry.projector.canonical_basis() for entry in entries])
+        overlap = old_frames.mT @ new_frames
+        rotation = SubspaceProjector.polar_factor(overlap)
+        for entry, matrix in zip(entries, rotation.unbind(0), strict=True):
+            entry.frame_rotation = matrix
+
+    @torch.no_grad()
+    def _commit_moments(self, entries: list[MatrixUpdate]) -> None:
+        """Rotate into the new frame, then round once.
+
+        Order is the whole correctness argument. This step's projected gradient
+        was measured in `Q_t` and has already been blended into a moment that is
+        also in `Q_t`, and the weight update lifted through `Q_t` as well. Only
+        now, with nothing left to read in the old coordinates, does the moment
+        move to `Q_{t+1}`. Rotating before the blend would add a `Q_t` gradient
+        onto a `Q_{t+1}` moment, which is the coordinate mismatch the old
+        project-up-project-down transport used to make on every step.
+
+        The moment has been fp32 since it was accumulated, so this is the
+        step's only rounding of it, and stochastic rounding makes that write
+        unbiased -- which matters more here than for the parameter, because a
+        rotation is a rearrangement whose systematic rounding would accumulate
+        against the very coordinates it exists to preserve.
+        """
+
+        for entry in entries:
+            moment = entry.projected_exp_avg
+            rotation = entry.frame_rotation
+            if rotation is not None:
+                is_right = entry.projector._basis_side() is ProjectionSide.RIGHT
+                moment = moment @ rotation if is_right else rotation.mT @ moment
+            stored = self.state[entry.param]["projected_exp_avg"]
+            if self.stochastic_rounding and stored.dtype in (torch.bfloat16, torch.float16):
+                copy_stochastic_(stored, moment)
+            else:
+                stored.copy_(moment)
 
     @torch.no_grad()
     def _anneal_tangent(
