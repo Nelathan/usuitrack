@@ -107,8 +107,9 @@ raw gradient G
   -> projected EMA M
   -> release full gradient; retain rank-sized pending work
   -> exact Oja frame move with identity moment coordinates
-  -> Aurora leverage balance + Newton-Schulz polar map
-  -> full-parameter Muon scale
+  -> Aurora leverage balance (normalization)
+  -> Newton-Schulz polar map (orthogonalization)
+  -> Muon aspect scale, read from the parameter shape
   -> lift through the moved frame Q+
   -> parameter update
 ```
@@ -299,17 +300,21 @@ $$M_+=M.$$
 This is parallel transport along the selected lifted Oja path. Multiplication by the
 old/new frame overlap would answer a different question: represent the surviving
 projection of a fixed old ambient vector. It contracts each rotated plane by a
-principal-angle cosine before Aurora.
+principal-angle cosine before the balanced polar map.
 
-### 7. Aurora direction
+### 7. Balanced polar direction
 
-The leverage-balancing scheme below is
-[Aurora](https://github.com/tilde-research/aurora-release) (Tilde Research).
-Reimplemented here from the method, not a runtime dependency; UsuiTrack takes
-only the rectangular direction map, per the decision note at the end of this
-section.
+Two operations from two lineages, applied in order and worth keeping apart by
+name. The **leverage balancing** is
+[Aurora](https://github.com/tilde-research/aurora-release) (Tilde Research): a
+diagonal row rescale that changes how force is distributed across rows and
+orthogonalizes nothing. The **orthogonalization** is the Newton-Schulz polar
+map of the Muon lineage, and it is the step that discards `M`'s singular values
+so that `alpha` alone sets the step size. Both are reimplemented from the
+methods; neither is a runtime dependency. UsuiTrack takes only the rectangular
+direction map from Aurora, per the decision note at the end of this section.
 
-Aurora acts only on `M`. For a rectangular tensor, orient it as
+Balancing acts only on `M`. For a rectangular tensor, orient it as
 `A:[p,q]`, `p >= q`, transposing if needed. Initialize row scaling
 
 $$D_{0,ii}=1/\|A_{i,:}\|_2.$$
@@ -348,15 +353,27 @@ k    a         b         c
 The result `O_t` is an approximate leverage-balanced polar direction, not an
 exact SVD polar factor.
 
-**Decision (projected Aurora):** Aurora chooses direction inside the retained
-update space. UsuiTrack, not Aurora, owns momentum, basis motion, scale, and LR.
+**Decision (projected balancing):** Aurora's balancing chooses direction inside
+the retained update space. UsuiTrack, not Aurora, owns momentum, basis motion,
+scale, and LR.
 
 ### 8. Scale, lift, and update
 
-Muon scale uses the original parameter shape, not the projected shape:
+The aspect scale uses the original parameter shape, not the projected shape:
 
 $$\widehat U_t=O_t\sqrt{\max(1,m/n)},
 U_t=\Lambda_{Q_{t+}}(\widehat U_t).$$
+
+**What this factor guarantees.** In Muon it enforces `||U||_F = sqrt(m)`
+whichever way the weight is stored, because the orthogonalized object there has
+the parameter's own two dimensions. Here the orthogonalized object is
+`M:[d,r]`, whose polar factor has norm `sqrt(r)`, so the product is
+
+$$\|U_t\|_F=\sqrt{m}\,\sqrt{r/\min(m,n)}.$$
+
+The invariant holds at `r = min(m,n)` and is attenuated by `sqrt(r/min(m,n))`
+below it -- a factor that varies with rank (intended: see PLAN.md, "Rank is
+also a step-size knob") and with `min(m,n)` (open: see PLAN.md carry-over #2).
 
 The selected contract has zero weight decay. Apply the learning rate:
 
@@ -385,7 +402,7 @@ For each matrix, phase one runs exactly once after its full gradient is complete
 
 Phase one does not move the basis or update the parameter. Phase two runs in
 `step()`: it batches tangent-Gram eigendecompositions, moves each frame to
-`Q_{t+}`, applies Aurora to `M_t`, lifts through `Q_{t+}`, and updates `W`.
+`Q_{t+}`, applies the balanced polar map to `M_t`, lifts through `Q_{t+}`, and updates `W`.
 
 `prepare(param)` exposes phase one explicitly. A no-accumulation training loop
 can invoke it from a `register_post_accumulate_grad_hook` callback to release
@@ -553,8 +570,9 @@ These choices define the current design; they are redesignable.
 7. **Raw clipping before all consumers:** bounds what one batch can write into
    the projected moment. It has no effect on the frame, which is scale-invariant
    by construction.
-8. **Aurora plus full-shape Muon scale:** direction belongs to projected geometry;
-   scale remains tied to parameter geometry.
+8. **Balanced polar direction plus a parameter-shape aspect scale:** direction
+   belongs to projected geometry; scale remains tied to parameter geometry, with
+   the invariant that justified it holding only at full rank (see step 8).
 9. **Separate AdamW fallback:** non-matrix tensors remain trainable under a
    separate optimizer, with their full state exposed rather than hidden in the
    matrix claim.
@@ -567,6 +585,6 @@ These choices define the current design; they are redesignable.
 | transpose problem and swap left/right | transposed projected and ambient update |
 | Oja covariance action lies inside the current subspace | zero frame motion |
 | Oja tangent is rank-deficient | zero singular planes remain fixed |
-| full rank | projection/lift loses no component; Aurora can still alter direction |
-| gradient rescaling below raw clipping and away from epsilon floors | Rayleigh-normalized Oja tangent unchanged; pre-Aurora magnitude follows the stated conditioning |
+| full rank | projection/lift loses no component; balancing can still alter direction; the aspect scale recovers `||U||_F = sqrt(m)` |
+| gradient rescaling below raw clipping and away from epsilon floors | Rayleigh-normalized Oja tangent unchanged; pre-balancing magnitude follows the stated conditioning |
 | geodesic frame rotation | stored moment coordinates and singular values unchanged |

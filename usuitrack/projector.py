@@ -116,10 +116,6 @@ class SubspaceProjector:
             raise ValueError(f"left-basis projected tensor does not match basis {tuple(basis.shape)}")
         return basis @ projected
 
-    @torch.no_grad()
-    def project_and_back(self, matrix: Tensor) -> Tensor:
-        return self.project_back(self.project(matrix))
-
     @staticmethod
     def oja_geodesic_from_eigh(frame: Tensor, tangent: Tensor, eigenvalues: Tensor, eigenvectors: Tensor, step_size: float) -> Tensor:
         sigma = eigenvalues.clamp_min(0.0).sqrt()

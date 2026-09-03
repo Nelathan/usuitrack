@@ -1367,16 +1367,29 @@ in the queue, not a settled state.
 
    The orthogonalized projected moment is a rank-`r` object whose singular
    values are all ~1, so its Frobenius norm is `sqrt(r)`.
-   The scale then multiplies by `sqrt(max(1, rows/cols))`, where those come
-   from a shape built out of the parameter **and the basis** --
-   `(p.shape[0], basis.shape[0])` on the right side, `(basis.shape[1],
-   p.shape[1])` on the left. So `w1` (4608,1024) reads `(4608, 1024)` and gets
-   `2.121`, while `w2` (1024,4608) reads `(r, 4608)` and gets `1.000`. Note the
-   left-side case carries `r` in the numerator already, an unremarked rank
-   dependence. At full rank -- `r = min(m, n)`, which is what Muon assumes -- those
-   compose to exactly `sqrt(rows)`, the invariant the line exists to enforce.
-   Under a rank-`r` projection they compose to
-   `sqrt(rows) * sqrt(r / min(m, n))` instead.
+   The scale then multiplies by `sqrt(max(1, rows/cols))`, read from the
+   parameter's own two dimensions -- `tuple(p.shape)`, nothing else. So `w1`
+   (4608,1024) gets `2.121` and `w2` (1024,4608) gets `1.000`. At full rank --
+   `r = min(m, n)`, which is what Muon assumes -- those compose to exactly
+   `sqrt(rows)`, the invariant the line exists to enforce. Under a rank-`r`
+   projection they compose to `sqrt(rows) * sqrt(r / min(m, n))` instead.
+
+   *A correction to an earlier version of this paragraph.* It claimed the scale
+   read "a shape built out of the parameter **and the basis** --
+   `(p.shape[0], basis.shape[0])` on the right side" and noted "the left-side
+   case carries `r` in the numerator already, an unremarked rank dependence."
+   That describes `_expected_projected_grad_shape`, which **nothing called** and
+   which has since been deleted. The numbers above were computed from `p.shape`
+   and are unaffected; the sentence and the claimed rank dependence are
+   withdrawn. Reality wins; the doc was the bug.
+
+   *The sharper statement of the mismatch.* The factor is a function of the
+   parameter's two ambient dimensions alone. The object it multiplies is
+   `[d, r]`. So `r` never enters it, and neither does which of the two ambient
+   axes survived the projection -- on `w1` tracked right it divides by the axis
+   that was projected away, on `w2` tracked left by the axis that was kept. A
+   term keyed on a geometry the update no longer inhabits cannot be expressing
+   an invariant about it.
 
    **So the line stopped enforcing its own invariant the moment the optimizer
    became low-rank**, and what it leaves behind is shape-dependent: at `r=128`
@@ -1421,13 +1434,20 @@ in the queue, not a settled state.
    paths that are supposed to agree, not merely dead code.
 
    **The arm therefore did not test the scale term**, and the scale question is
-   still open. Testing it requires patching the compiled tensor function, not
-   the constant. `graft` is the most clearly wrong for this optimizer -- it
-   rescales the orthogonalized update back to the original update's norm,
-   re-imposing the pre-orthogonalization gradient magnitude and discarding the
-   reason for orthogonalizing. The intent is to use the branch as the instrument,
-   then collapse it to whatever wins and inline it, deleting the dispatch in one
-   cut rather than picking off `graft` alone.
+   still open. `graft` was the most clearly wrong of the four for this
+   optimizer -- it rescales the orthogonalized update back to the original
+   update's norm, re-imposing the pre-orthogonalization gradient magnitude and
+   discarding the reason for orthogonalizing.
+
+   **Resolved in code, not by measurement.** The dispatch is gone. There is one
+   implementation, `_orthogonalize_update(update, scale)`, and `torch.compile`
+   wraps that same function, so the two paths cannot disagree; the scale is
+   `_muon_aspect_scale(original_shape)`, one function carrying the caveats
+   above in its docstring. The collapse is behaviour-preserving and was verified
+   as such: bitwise-identical parameters against the previous commit over 12
+   steps on four shapes (right side, left side, square, rank-capped). The scale
+   question stays open and is now a one-line patch with a test pinning what the
+   term does and does not guarantee.
 
    *A correction recorded because it was stated and is wrong.* It was argued
    in session that tracking the larger side is structurally wasteful -- that a
@@ -1859,17 +1879,37 @@ each death was a correct report of a real defect. The bare `eigh` stands.
 
 Written down so none of it is lost. Ordered by what would be cheapest to settle.
 
-1. **Collapse `ORTHOGONALIZATION_SCALE_MODE`.** Three of four modes are
-   unreachable and the constant is bypassed entirely on the compiled path, which
-   hardcodes `muon`. Fix the divergence first -- two paths that disagree is the
-   actual defect -- then inline whichever scale survives and delete the
-   dispatch. `graft` should not outlive the cut: it rescales the orthogonalized
-   update back to the original update's norm, discarding the orthogonalization.
+1. **CLOSED -- `ORTHOGONALIZATION_SCALE_MODE` is collapsed.** One
+   implementation, one scale, no branch; `torch.compile` wraps the same function
+   the eager path calls, and a test asserts the two agree. `graft` and the two
+   other dead modes are deleted, along with `_expected_projected_grad_shape`
+   (never called), `SubspaceProjector.project_and_back` (never called), and a
+   redundant Newton-Schulz alias. Names now say which lineage does what:
+   `_balanced_polar_direction` (Aurora balances, Newton-Schulz orthogonalizes)
+   and `_muon_aspect_scale`. Behaviour-preserving, verified bitwise against the
+   previous commit.
 
-2. **Test the scale term for real.** The `scale_mode` arm was invalid; the
-   compiled tensor function is what needs patching. The open question is whether
-   the aspect factor starves `w2`, which reads the lowest liveness of the three
-   MLP roles in every run measured while receiving half `w1`'s step.
+   The scale being a float unlocked a free win in the same cut: the update
+   buckets that share one Newton-Schulz call now key on `(projected shape,
+   scale)` instead of `(projected shape, original parameter shape)`. Two
+   matrices with equal `rows` and rank but different `cols` produce the same
+   `(rows, r)` projected shape and, when both are tracked on their wider side,
+   the same clamped `scale = 1.0` -- so they used to split into separate calls
+   for no reason and now merge. Verified against per-matrix stepping at the
+   float tolerance the rest of this file's batched-vs-solo comparisons use
+   (`test_matrices_sharing_a_scale_but_not_a_shape_still_bucket_correctly`):
+   not bitwise, since a batched and a solo Newton-Schulz call round
+   differently at the ulp level, the same as any other batching already in
+   this file.
+
+2. **Test the scale term for real.** Now cheap: patch `_muon_aspect_scale`, one
+   function, both paths. The open question is whether the aspect factor starves
+   `w2`, which reads the lowest liveness of the three MLP roles in every run
+   measured while receiving half `w1`'s step. Note what the arms should be --
+   dropping the factor leaves `||U||_F = sqrt(r)` for every matrix (rank
+   coupling only, no shape coupling), while restoring the full-rank invariant
+   with `sqrt(min(m,n)/r)` would also delete the rank coupling, which is the
+   part we want to keep.
 
 3. **CLOSED -- the `side=right` arm has the best geometry in the session and
    the worst loss.** LFM bs16, r128, 1k, seed 1, against the residual-facing
@@ -1974,6 +2014,24 @@ Written down so none of it is lost. Ordered by what would be cheapest to settle.
    cheap and needs no refit -- rotate `Q -> QV` into the tangent eigenbasis,
    apply `V` to the moment, truncate both.
 
+10. **Reopen `min(m,n)` as the rank cap, now that item 3 has evidence and item
+    7's table exists.** Aurora's own README (`~/code/aurora-release`) confirms
+    the balancing step targets exactly our shape: a rectangular matrix, not a
+    square one, oriented tall before the polar map -- the projected moment is
+    that shape by construction, so item 7 (balanced polar direction) is Aurora
+    used the way it was built to be used, not an adaptation.
+
+    Basis-side selection (item 3's `residual-facing` hint) and the rank cap
+    (item 8's `min(m,n)/2`) are the two places the current design costs VRAM
+    and flops rather than tracking better: `residual-facing` was picked on
+    early evidence, item 3 confirms it on loss but shows the *other* side
+    tracks better on every geometry read, and the `/2` in the cap exists only
+    to leave room for the Oja residual, not because `min(m,n)` itself is wrong
+    -- SubTrack (`~/code/SubTrack`) uses `min(m,n)` directly. Whether a
+    calibrated rank table (item 7) or better tracking removes the need for that
+    headroom, and so lets the cap move to `min(m,n)`, is open and untested. Not
+    started; no evidence either way yet.
+
 ### How we work here
 
 Recorded so a fresh session inherits the method, not just the findings.
@@ -1981,7 +2039,8 @@ Recorded so a fresh session inherits the method, not just the findings.
 **No parallel compiled and uncompiled implementations on main.** They drift,
 and the drift is silent because both paths typecheck, both run, and only one of
 them is ever exercised. `ORTHOGONALIZATION_SCALE_MODE` is the case that proved
-it: the compiled `_orthogonalize_aurora_muon_tensor` hardcodes the muon scale
+it (since collapsed, and now guarded by a compiled-versus-eager equivalence
+test): the compiled `_orthogonalize_aurora_muon_tensor` hardcodes the muon scale
 while the uncompiled `_orthogonalize_aurora` honours a four-way branch, so the
 optimizer computes a different update depending on a compile flag, and an
 experiment that changed the constant measured nothing while appearing to

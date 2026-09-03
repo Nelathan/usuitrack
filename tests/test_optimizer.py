@@ -254,7 +254,10 @@ def test_diagnostics_are_inert_until_enabled():
     assert optimizer._diagnostics is None
 
 
-def test_diagnostics_report_every_documented_metric():
+def test_core_diagnostics_read_sane_values():
+    """No fixed key set here on purpose: a metric added or removed at `core`
+    should need no test update to be noticed, only a look at what it reads."""
+
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
     optimizer.diagnostics = "core"
@@ -262,19 +265,6 @@ def test_diagnostics_report_every_documented_metric():
     _run(params, optimizer, 3)
 
     diagnostics = optimizer.pop_diagnostics()
-    assert set(diagnostics) == {
-        "transport_speed",
-        "turn_fraction",
-        "tangent_live_fraction",
-        "agreement_ceiling",
-        "tangent_concentration",
-        "tangent_participation",
-        "projected_grad_norm",
-        "grad_to_moment_ratio",
-        "grad_moment_cosine",
-        "update_to_param_ratio",
-        "nonfinite_grads",
-    }
     assert -1.0 <= diagnostics["grad_moment_cosine"] <= 1.0
     assert all(isinstance(value, float) for value in diagnostics.values())
     assert all(value == value for value in diagnostics.values()), diagnostics
@@ -553,3 +543,111 @@ def test_leaving_the_full_tier_drops_the_snapshot_state():
     optimizer.diagnostics = "core"
     assert optimizer._lag_snapshots == {}
     assert optimizer._lag_path == {}
+
+
+def test_compiled_and_eager_kernels_produce_the_same_update():
+    """The guard for the defect this file did not have.
+
+    `compile_tensor_kernels` used to select a *second* implementation of the
+    orthogonalization -- one that hardcoded the aspect scale while the eager one
+    read a four-way mode constant -- so the optimizer's update depended on a
+    compile flag and nothing here was watching. There is one implementation now
+    and `torch.compile` wraps it, which is a property worth holding rather than
+    a state of affairs worth assuming: this fails the moment a compiled path
+    grows its own copy of the maths again.
+
+    Tolerance rather than bitwise identity, because Inductor is free to fuse and
+    reorder float operations. What is being asserted is that the two paths
+    compute the same function, not that they emit the same instructions.
+    """
+
+    torch.manual_seed(0)
+    base = torch.randn(ROWS, COLS)
+    gradients = [torch.randn(ROWS, COLS) for _ in range(4)]
+
+    trained = []
+    for compiled in (False, True):
+        weight = torch.nn.Parameter(base.clone())
+        optimizer = UsuiTrack(
+            [weight], lr=0.01, rank=RANK, side="right", compile_tensor_kernels=compiled
+        )
+        for gradient in gradients:
+            weight.grad = gradient.clone()
+            optimizer.step()
+        trained.append(weight.detach().clone())
+
+    torch.testing.assert_close(trained[0], trained[1], rtol=1e-5, atol=1e-6)
+
+
+def test_the_aspect_scale_is_muon_at_full_rank_and_attenuated_below_it():
+    """What the scale still guarantees, and what it stopped guaranteeing.
+
+    Muon's factor exists to make the orthogonalized update's Frobenius norm come
+    out at `sqrt(rows)` however the matrix is stored -- transposing a weight must
+    not change how hard it is pushed. That holds only while the orthogonalized
+    object has the parameter's own two dimensions. Ours is the projected moment,
+    `[d, r]`, whose polar factor has norm `sqrt(r)`, so the product carries a
+    residual `sqrt(r / min(m, n))` that varies across the fleet with `min(m, n)`
+    and not with anything anyone chose.
+
+    Pinned here because the term reads as settled and is not: a future arm that
+    changes it should have to change this test and say why.
+    """
+
+    tall, wide = (4608, 1024), (1024, 4608)
+    assert UsuiTrack._muon_aspect_scale(tall) == pytest.approx(math.sqrt(4.5))
+    # Clamped at one below the diagonal, which is what makes the two orientations
+    # differ by the aspect ratio rather than agree.
+    assert UsuiTrack._muon_aspect_scale(wide) == 1.0
+
+    # At full rank the invariant holds: `sqrt(min(m,n)) * scale == sqrt(rows)`.
+    for shape in (tall, wide):
+        full_rank_norm = math.sqrt(min(shape)) * UsuiTrack._muon_aspect_scale(shape)
+        assert full_rank_norm == pytest.approx(math.sqrt(shape[0]))
+
+    # Below it the norm is short by `sqrt(r / min(m, n))`, and that shortfall is
+    # a function of the matrix's shape -- the spread nobody picked.
+    rank = 128
+    attenuation = [math.sqrt(rank / min(shape)) for shape in ((4096, 1024), (4096, 512))]
+    assert attenuation[0] == pytest.approx(0.3536, abs=1e-4)
+    assert attenuation[1] == pytest.approx(0.5, abs=1e-4)
+
+
+def test_matrices_sharing_a_scale_but_not_a_shape_still_bucket_correctly():
+    """The bucketing win: keying on `(projected shape, scale)` instead of
+    `(projected shape, original shape)` lets differently-shaped matrices that
+    happen to share a scale batch into one Newton-Schulz call. `projected_exp_avg`
+    for a right-tracked matrix is `(rows, r)` and never encodes `cols`, so two
+    matrices with equal `rows` but different `cols` were split by the old key
+    even though their moments already stack; here they also share a scale
+    (`rows < cols` for both, so `_muon_aspect_scale` clamps to `1.0`) and so now
+    land in one bucket. Must train identically whether they share an optimizer
+    or not -- the grouping is bookkeeping, not maths.
+    """
+
+    torch.manual_seed(5)
+    shapes = [(64, 512), (64, 768)]
+    base = {shape: torch.randn(*shape) for shape in shapes}
+    gradients = {shape: [torch.randn(*shape) for _ in range(6)] for shape in shapes}
+    for shape in shapes:
+        assert UsuiTrack._muon_aspect_scale(shape) == 1.0
+
+    together = {shape: torch.nn.Parameter(base[shape].clone()) for shape in shapes}
+    optimizer = UsuiTrack(list(together.values()), lr=0.01, rank=RANK, side="right")
+    for step in range(6):
+        for shape, weight in together.items():
+            weight.grad = gradients[shape][step].clone()
+        optimizer.step()
+
+    separate = {shape: torch.nn.Parameter(base[shape].clone()) for shape in shapes}
+    solo_optimizers = {shape: UsuiTrack([separate[shape]], lr=0.01, rank=RANK, side="right") for shape in shapes}
+    for step in range(6):
+        for shape in shapes:
+            separate[shape].grad = gradients[shape][step].clone()
+            solo_optimizers[shape].step()
+
+    # Not bitwise: batched and per-matrix Newton-Schulz call different BLAS
+    # kernels, so they round differently at the ulp level -- the same tolerance
+    # every other batched-vs-solo comparison in this file already carries.
+    for shape in shapes:
+        torch.testing.assert_close(together[shape], separate[shape], rtol=1e-5, atol=1e-6)

@@ -15,7 +15,6 @@ from .projector import ProjectionSide, SubspaceProjector
 from .stochastic import copy_stochastic_, wants_stochastic_rounding
 AURORA_PP_ITERATIONS = 1
 AURORA_PP_BETA = 0.5
-ORTHOGONALIZATION_SCALE_MODE = "muon"
 NEWTON_SCHULZ_COEFFICIENTS = (
     (4.0848, -6.8946, 2.9270),
     (3.9505, -6.3029, 2.6377),
@@ -123,7 +122,12 @@ class UsuiTrack(Optimizer):
             basis_update_step=0,
         )
         super().__init__(params, defaults)
-        self._compiled_orthogonalize_update = torch.compile(UsuiTrack._orthogonalize_aurora_muon_tensor) if compile_tensor_kernels else None
+        # `torch.compile` wraps the same function the eager path calls, never a
+        # second copy of the maths -- see PLAN.md, "No parallel compiled and
+        # uncompiled implementations on main".
+        self._compiled_orthogonalize_update = (
+            torch.compile(UsuiTrack._orthogonalize_update) if compile_tensor_kernels else None
+        )
         self._compiled_prepare_tracker_right = (
             torch.compile(UsuiTrack._prepare_tracker_right_tensors, dynamic=True)
             if compile_tensor_kernels
@@ -761,27 +765,35 @@ class UsuiTrack(Optimizer):
         return grad.mul(clip_scale), raw_grad_norm
 
     def _apply_matrix_update_buckets(self, entries: list[MatrixUpdate], group: dict) -> None:
+        """Group same-shaped moments for one Newton-Schulz call each.
+
+        Keyed on the projected shape (torch.stack's actual requirement) and the
+        scale, not the original parameter shape that scale is computed from.
+        Several original shapes can share a scale -- `_muon_aspect_scale` clamps
+        to 1.0 for every matrix tracked on its wider side, so a fleet of
+        differently-shaped `w2`-like matrices collapses into one bucket. The
+        scale each entry receives is exact, the same float it would have gotten
+        alone; the orthogonalized direction is not bitwise identical to running
+        the matrix solo, at the same ulp-level float tolerance every other
+        batched-vs-solo comparison in this optimizer already carries.
+        """
+
         if not entries:
             return
 
         buckets: dict[tuple, list[MatrixUpdate]] = {}
         for entry in entries:
             projected_exp_avg = entry.projected_exp_avg
-            key = (tuple(projected_exp_avg.shape), entry.original_shape)
+            scale = UsuiTrack._muon_aspect_scale(entry.original_shape)
+            key = (tuple(projected_exp_avg.shape), scale)
             buckets.setdefault(key, []).append(entry)
 
-        for bucket_entries in buckets.values():
+        for (_projected_shape, scale), bucket_entries in buckets.items():
             if len(bucket_entries) == 1:
-                update_hats = [
-                    self._orthogonalize_update_runtime(
-                        bucket_entries[0].projected_exp_avg,
-                        group,
-                        bucket_entries[0].original_shape,
-                    )
-                ]
+                update_hats = [self._orthogonalize_update_runtime(bucket_entries[0].projected_exp_avg, scale)]
             else:
                 stacked = torch.stack([entry.projected_exp_avg for entry in bucket_entries])
-                stacked_update_hats = self._orthogonalize_update_runtime(stacked, group, bucket_entries[0].original_shape)
+                stacked_update_hats = self._orthogonalize_update_runtime(stacked, scale)
                 update_hats = list(stacked_update_hats.unbind(0))
             for entry, update_hat in zip(bucket_entries, update_hats, strict=True):
                 self._apply_matrix_update(entry, update_hat, group)
@@ -1242,71 +1254,63 @@ class UsuiTrack(Optimizer):
                 state.pop("projected_exp_avg", None)
 
     @staticmethod
-    def _expected_projected_grad_shape(p: Tensor, projector: SubspaceProjector) -> tuple[int, int]:
-        if projector.basis is None:
-            raise RuntimeError("basis is not initialized")
-        side = projector.resolved_side if projector.resolved_side is not None else projector.side
-        if side is ProjectionSide.AUTO:
-            side = projector.effective_side(p)
-        if side is ProjectionSide.RIGHT:
-            return (p.shape[0], projector.basis.shape[0])
-        return (projector.basis.shape[1], p.shape[1])
+    def _muon_aspect_scale(original_shape: tuple[int, ...]) -> float:
+        """Muon's aspect factor, read from the parameter the update will land on.
+
+        In Muon, which orthogonalizes the full `[m, n]` update, this makes
+        `||U||_F == sqrt(m)` whichever way the matrix is stored. Here it
+        multiplies the projected moment's polar factor instead, `[d, r]` rather
+        than `[m, n]`; see PLAN.md carry-over #2 for what that changes about the
+        guarantee.
+        """
+
+        rows = original_shape[0]
+        cols = math.prod(original_shape[1:])
+        return math.sqrt(max(1.0, rows / cols))
 
     @staticmethod
-    def _orthogonalize_update(update: Tensor, _group: dict, original_shape: tuple[int, ...] | None = None) -> Tensor:
-        return UsuiTrack._orthogonalize_aurora(update, original_shape)
+    def _orthogonalize_update(update: Tensor, scale: float) -> Tensor:
+        """Direction from the balanced polar map, magnitude from the aspect scale.
 
-    def _orthogonalize_update_runtime(self, update: Tensor, group: dict, original_shape: tuple[int, ...] | None = None) -> Tensor:
-        if self._compiled_orthogonalize_update is None:
-            return self._orthogonalize_update(update, group, original_shape)
-        if original_shape is None or len(original_shape) < 2:
-            raise ValueError("compiled UsuiTrack orthogonalization requires the original parameter shape")
-        rows = int(original_shape[0])
-        cols = int(math.prod(original_shape[1:]))
-        return self._compiled_orthogonalize_update(
-            update,
-            rows,
-            cols,
-        )
+        The only implementation: `torch.compile` wraps this function, so the
+        compiled and eager paths cannot disagree about what an update is. The
+        scale arrives as a number because it is a pure function of the parameter
+        shape, which keeps integer arithmetic out of the graph and leaves this
+        with one tensor operation and one multiply.
+        """
 
-    @staticmethod
-    def _orthogonalize_aurora_muon_tensor(
-        update: Tensor,
-        original_rows: int,
-        original_cols: int,
-    ) -> Tensor:
-        aurora_update = UsuiTrack._aurora_leverage_uniform_polar(update)
-        return aurora_update * math.sqrt(max(1.0, original_rows / original_cols))
+        return UsuiTrack._balanced_polar_direction(update) * scale
+
+    def _orthogonalize_update_runtime(self, update: Tensor, scale: float) -> Tensor:
+        kernel = self._compiled_orthogonalize_update or UsuiTrack._orthogonalize_update
+        return kernel(update, scale)
 
     @staticmethod
-    def _orthogonalize_aurora(update: Tensor, original_shape: tuple[int, ...] | None) -> Tensor:
-        aurora_update = UsuiTrack._aurora_leverage_uniform_polar(update)
-        return UsuiTrack._scale_orthogonalized_update(
-            update,
-            aurora_update,
-            ORTHOGONALIZATION_SCALE_MODE,
-            original_shape,
-        )
-
-    @staticmethod
-    def _aurora_leverage_uniform_polar(
+    def _balanced_polar_direction(
         update: Tensor,
         eps: float = 1e-7,
     ) -> Tensor:
-        """Aurora-style leverage-uniform polar direction for rectangular projected moments.
+        """Balance the rows, then orthogonalize. Two operations, two lineages.
 
-        Aurora: https://github.com/tilde-research/aurora-release (Tilde Research).
-        Reimplemented from the method; not a runtime dependency.
+        The balancing is Aurora's
+        (https://github.com/tilde-research/aurora-release, Tilde Research):
+        diagonally precondition a rectangular matrix so its large-side row
+        leverage approaches the Stiefel target, orienting wide input to tall form
+        first and transposing back after, per Aurora's convention. It changes
+        how force is distributed across rows and orthogonalizes nothing.
 
-        UsuiTrack owns momentum, LR, weight decay, and full-matrix Muon scaling. This
-        helper extracts only Aurora's rectangular direction map: diagonally
-        precondition a non-square matrix before polar/NS so the large-side row
-        leverage approaches the Stiefel target. For wide matrices, transpose to
-        tall form, balance, then transpose back, matching Aurora's convention.
+        The orthogonalization is the Newton-Schulz polar map of the Muon lineage
+        (`_newton_schulz_polar`). It is what discards the moment's singular
+        values, and it is the step the surrounding code means when it says the
+        update's magnitude comes from `lr` rather than from the gradient.
+
+        Both are reimplemented from the methods; neither is a runtime dependency.
+        Square input needs no balancing and goes straight to the polar map.
+        UsuiTrack owns momentum, LR, weight decay, and the aspect scale.
         """
 
         if update.ndim < 2:
-            raise ValueError(f"Aurora orthogonalization expects at least 2D input, got shape {tuple(update.shape)}")
+            raise ValueError(f"the polar direction map expects at least 2D input, got shape {tuple(update.shape)}")
         if update.shape[-2] == update.shape[-1]:
             return UsuiTrack._newton_schulz_polar(update)
 
@@ -1327,11 +1331,7 @@ class UsuiTrack(Optimizer):
         return result.to(device=update.device, dtype=update.dtype)
 
     @staticmethod
-    def _newton_schulz_polar(update: Tensor) -> Tensor:
-        return UsuiTrack._batched_newton_schulz(update)
-
-    @staticmethod
-    def _batched_newton_schulz(update: Tensor, eps: float = 1e-7) -> Tensor:
+    def _newton_schulz_polar(update: Tensor, eps: float = 1e-7) -> Tensor:
         if update.ndim < 2:
             raise ValueError(f"Newton-Schulz orthogonalization expects at least 2D input, got shape {tuple(update.shape)}")
         work = update.float()
@@ -1349,31 +1349,6 @@ class UsuiTrack(Optimizer):
 
         result = x.mT if transposed else x
         return result.to(device=update.device, dtype=update.dtype)
-
-    @staticmethod
-    def _scale_orthogonalized_update(
-        original_update: Tensor,
-        orthogonalized_update: Tensor,
-        scale_mode: str,
-        original_shape: tuple[int, ...] | None,
-    ) -> Tensor:
-        if scale_mode == "none":
-            return orthogonalized_update
-        if scale_mode == "scale":
-            return orthogonalized_update * math.sqrt(max(1.0, original_update.shape[-2] / original_update.shape[-1]))
-        if scale_mode == "graft":
-            if original_update.ndim > 2:
-                original_norm = original_update.norm(dim=(-2, -1), keepdim=True)
-                ortho_norm = orthogonalized_update.norm(dim=(-2, -1), keepdim=True).clamp(min=1e-6)
-                return orthogonalized_update * (original_norm / ortho_norm)
-            return orthogonalized_update * (original_update.norm() / orthogonalized_update.norm().clamp(min=1e-6))
-        if scale_mode == "muon":
-            if original_shape is None or len(original_shape) < 2:
-                raise ValueError("muon scale mode requires the original parameter shape")
-            rows = original_shape[0]
-            cols = math.prod(original_shape[1:])
-            return orthogonalized_update * math.sqrt(max(1.0, rows / cols))
-        raise AssertionError(f"unexpected orthogonalization scale mode: {scale_mode}")
 
     @staticmethod
     def _projector_from_state(p: Tensor, group: dict, state: dict) -> SubspaceProjector:

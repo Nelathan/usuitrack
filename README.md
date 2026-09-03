@@ -162,16 +162,19 @@ angle is comes from how much this step's aim agrees with the previous step's. A
 frame that is still skewed keeps re-measuring its own lag, so its aim repeats and
 it turns; a fitted frame sees uncorrelated batch noise and slows. Both ends of
 that meter are geometry rather than tuning, so the tracker carries no fitted
-constant beyond the step size itself. Direction comes from a leverage-balanced
-Newton-Schulz polar map ([Aurora](https://github.com/tilde-research/aurora-release),
-from Tilde Research), using the optimal coefficient schedule from
-Amsel, Persson, Musco, and Gower's ["The Polar
-Express"](https://arxiv.org/abs/2505.16932); scale comes from the original
-parameter shape, Muon-style. For bf16 weights the update is accumulated in
-fp32 and written back with stochastic rounding, because an orthogonalized step
-is often a fraction of a bf16 ulp and round-to-nearest would discard it
-outright; `StochasticAdamW` is provided for the fallback group for the same
-reason.
+constant beyond the step size itself. Direction comes from two steps kept apart:
+a leverage-balancing row rescale
+([Aurora](https://github.com/tilde-research/aurora-release), from Tilde
+Research), then a Newton-Schulz polar map that does the orthogonalizing, using
+the optimal coefficient schedule from Amsel, Persson, Musco, and Gower's ["The
+Polar Express"](https://arxiv.org/abs/2505.16932). Magnitude comes from Muon's
+aspect factor on the original parameter shape -- which enforces a
+storage-invariant update norm at full rank and, under a rank-`r` projection,
+leaves a `sqrt(r/min(m,n))` residual instead; see `docs/SPEC.md` step 8.
+For bf16 weights the update is accumulated in fp32 and written back with
+stochastic rounding, because an orthogonalized step is often a fraction of a
+bf16 ulp and round-to-nearest would discard it outright; `StochasticAdamW` is
+provided for the fallback group for the same reason.
 
 The design question behind all of this -- what a small-batch, noisy-gradient
 run actually needs from an optimizer -- was framed for me by Martin Marek's
