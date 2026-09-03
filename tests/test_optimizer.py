@@ -265,6 +265,7 @@ def test_diagnostics_report_every_documented_metric():
     assert set(diagnostics) == {
         "transport_speed",
         "turn_fraction",
+        "tangent_live_fraction",
         "agreement_ceiling",
         "tangent_concentration",
         "tangent_participation",
@@ -283,6 +284,8 @@ def test_diagnostics_report_every_documented_metric():
     assert 1.0 / RANK <= diagnostics["tangent_participation"] <= 1.0
     # Structural, not measured: the controller can only ever scale the turn down.
     assert 0.0 <= diagnostics["turn_fraction"] <= 1.0
+    # A healthy aim resolves every plane above the Gram's noise floor.
+    assert diagnostics["tangent_live_fraction"] == 1.0
     assert diagnostics["agreement_ceiling"] > 0.0
     assert diagnostics["update_to_param_ratio"] > 0
     assert diagnostics["nonfinite_grads"] == 0.0

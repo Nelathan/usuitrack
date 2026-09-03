@@ -1106,7 +1106,344 @@ in the queue, not a settled state.
    than baseline on both. The tail is not the problem; the leading plane's
    magnitude dominating the turn is. Both are ways of distrusting the spectrum and
    only one of them works.
-2. **Cross-covariance aim, `G^T M`.** Salvaged in full from `TRACKER_REDESIGN.md`
+2. **CLOSED -- the live set saturates, and rank is a target/source dial.**
+   Asked whether rank 64 is oversized for Anima, on the reading that
+   `tangent_live_fraction` of `0.45` means half the planes are wasted. Tested on
+   LFM at **bs1**, which is Anima's operating point in aim terms -- the ladder
+   above reads concentration `0.829` at bs1 against Anima's `0.838`, effective
+   rank `1.6` against `1.55`. 300 steps, seed 1, `2e-4`, beta `0.9`, everything
+   else held.
+
+   | read | r128 | r64 | r32 |
+   |---|---:|---:|---:|
+   | `tangent_live_fraction` | 0.4703 | 0.7998 | 0.9744 |
+   | **live planes** | **60.2** | **51.2** | **31.2** |
+   | `tangent_participation` | 0.01228 | 0.02414 | 0.04701 |
+   | **effective planes** | 1.572 | 1.545 | 1.504 |
+   | `tangent_concentration` | 0.8287 | 0.8354 | 0.8419 |
+   | `turn_fraction` | 0.2524 | 0.2883 | 0.3514 |
+   | `transport_speed` | 0.001555 | 0.002128 | 0.002757 |
+   | `transport_curve` | 0.6981 | 0.6293 | 0.5974 |
+   | optimizer peak reserved | 1325 MB | 1082 MB | 996 MB |
+   | target | 1.737169 | **1.731236** | 1.733350 |
+   | source | 2.913690 | 2.907390 | **2.889890** |
+
+   *Two predictions were on the table and both were wrong.* The assistant's was
+   that the live set is a fixed top-N slice, so `live_count` would hold flat and
+   the fraction rise as `N/r` -- roughly `0.94` at r64. The user's was that live
+   planes grow with rank, so the fraction would rise only a little. Measured:
+   `live_count` goes `31.2 -> 51.2 -> 60.2`, which is **near-proportional from 32
+   to 64 (+64% for 2x rank) and saturating from 64 to 128 (+18%)**. Neither a
+   fixed set nor proportional growth. There is a knee, and at bs1 it sits near
+   rank 64.
+
+   **Effective planes are invariant to tracked rank** -- `1.50`, `1.55`, `1.57`
+   across a 4x range. The aim carries about one and a half planes whatever the
+   frame's size. Rank does not change what the gradient offers; it changes how
+   many planes are positioned to see it, and past the knee it buys planes that
+   cannot.
+
+   **Rank is a target/source dial here, and the two heads disagree.** Target has
+   an interior optimum at r64; r128 costs `5.9e-3` and r32 costs `2.1e-3`, both
+   above the `3e-4` floor. Source improves monotonically as rank falls, `2.9137
+   -> 2.8899`, a `2.4e-2` spread against a `2e-2` floor... on the boundary, but
+   monotone across three arms rather than a single jump. So on this lane extra
+   rank costs the prior and buys nothing after the knee.
+
+   *The frame reads agree.* Lower rank is faster, longer-lagged and less
+   cancelling -- `transport_curve` falls `0.698 -> 0.597` as rank drops. High
+   rank is the churning end. That is the same conclusion from the motion side:
+   the planes past the knee contribute travel that cancels.
+
+   *Memory is not the reason to do it.* `1325 -> 996 MB` across a 4x rank cut.
+   Activations dominate the budget on the 12GB card, so rank cannot buy batch.
+
+   **What this implies for Anima, as a prediction and not a result.** Anima at
+   rank 64 reads `live_fraction 0.45`, so `live_count 28.8` -- essentially LFM
+   bs1's r32 arm (`31.2`). Its live set already fits in 32 planes. Rank 32 on
+   Anima should therefore raise `live_fraction` to roughly `0.9`, hold effective
+   planes near `1.5`, and -- if the LFM lane transfers -- improve prior
+   preservation, which is the axis the samples are judged on. **The transfer is
+   an assumption:** LFM source loss is not DiT sample quality, and nothing yet
+   measures that link.
+
+3. **CLOSED -- the floor is not load-bearing, and it is not a substitute for
+   rank.** Asked whether the derived liveness floor should be raised, on the
+   argument that an eigenvalue above the backward error does not imply a
+   trustworthy *eigenvector*: for a near-degenerate cluster, eigenvector error
+   scales as `eps * lambda_max / gap`, not with the eigenvalue, and the
+   controller turns every live plane by one common angle -- so a plane whose
+   direction is unreliable is turned as confidently as one that is not. Swept
+   `LIVE_FLOOR_SIGMAS` at 1, 1.414, 2, 4 -- a 16x range in `eps` -- at ranks 128
+   and 64, LFM bs1, everything else matched to the rank sweep above.
+
+   | arm | `live_fraction` | live planes | `transport_curve` | `transport_speed` | target | source |
+   |---|---:|---:|---:|---:|---:|---:|
+   | r128 x1 | 0.470 | 60.2 | 0.698 | 0.00156 | 1.73717 | 2.91369 |
+   | r128 x1.414 | 0.394 | 50.4 | 0.710 | 0.00146 | 1.73641 | 2.91155 |
+   | r128 x2 | 0.323 | 41.4 | 0.723 | 0.00135 | 1.73629 | 2.91234 |
+   | r128 x4 | 0.204 | 26.1 | 0.765 | 0.00106 | 1.73553 | 2.90889 |
+   | r64 x1 | 0.800 | 51.2 | 0.629 | 0.00213 | 1.73124 | 2.90739 |
+   | r64 x1.414 | 0.721 | 46.1 | 0.633 | 0.00206 | 1.73123 | 2.90567 |
+   | r64 x2 | 0.631 | 40.4 | 0.647 | 0.00195 | 1.73118 | 2.90565 |
+   | r64 x4 | 0.445 | 28.5 | 0.677 | 0.00166 | 1.73089 | 2.90436 |
+   | r32 x1 | 0.974 | 31.2 | 0.597 | 0.00276 | 1.73335 | 2.88989 |
+
+   **The floor is not load-bearing on loss.** At rank 64 target reads `1.73124`,
+   `1.73123`, `1.73118`, `1.73089` across the whole 16x `eps` range -- a total
+   span of `3.5e-4` against a `3e-4` floor. Source improves monotonically at both
+   ranks but by `3.0e-3` against a `2e-3` floor. Both are hints, neither is a
+   result. `tangent_participation` and `tangent_concentration` are invariant to
+   five decimals across every arm, which is the control: the knob changes the
+   response to the aim and not the aim.
+
+   **So the constant stays at the derived `1.0`** -- not because moving it is
+   risky, but because nothing justifies leaving an anchor that costs nothing to
+   keep. The information below the floor really is too flimsy to matter, which
+   was the user's read; it is also too flimsy to be worth the effort of
+   excluding.
+
+   **The floor cannot substitute for rank, and the failure is instructive.**
+   r128 at x4 carries `26.1` live planes -- *fewer* than r32's `31.2` -- and
+   still reads target `1.73553`, worse than r64 by `4.3e-3` and worse than r32.
+   Matching the live count from above never reproduces the lower-rank result.
+
+   **The two knobs move churn in opposite directions.** Dropping rank 128 to 32
+   takes `transport_curve` `0.698 -> 0.597` with speed rising. Raising the floor
+   at r128 takes it `0.698 -> 0.765` with speed *falling*. Muting a plane does
+   not make the frame travel more purposefully; it makes it travel less and
+   cancel more.
+
+   *The mechanism, restated.* **Rank is the subspace the update is
+   orthogonalized in; the floor is only the subspace the turn acts on.** Muting
+   a plane stops it rotating but leaves it in the space the weight update lives
+   in, so its ballast is still carried -- just held still, which is why churn
+   rises. An earlier reading in this session had the ballast in the turn. It is
+   in the update.
+
+   *Consequence for the "keep `live_fraction` above 0.9" rule.* Raising the floor
+   pushes the fraction **down** (`0.470 -> 0.204` at r128). The only instrument
+   that raises it is lower rank, which is also the low-churn and source-optimal
+   end. The rule is sound and it selects rank.
+
+   *The arm this opens, not yet run.* Mask the **update** to the live planes
+   rather than only the turn. If rank's advantage is entirely "do not
+   orthogonalize in directions you cannot resolve," a fixed rank with a
+   live-masked update should recover r32's behaviour without a rank decision.
+   This is a design change rather than a knob and has not been authorized.
+
+   *Still unexplained.* Target prefers rank 64 over both 128 and 32 at **every**
+   floor setting, so its preference is not about flimsy planes. Something about
+   having ~50 planes in the update subspace helps target specifically, and
+   nothing measured so far says what.
+
+4. **Rank is tunable from a 200-step diagnostic, and one global rank is not
+   optimal.** Filling the interior of the rank sweep (LFM bs1, floor 1, 300
+   steps) puts the target optimum at rank 48, not 64 -- the earlier "target
+   prefers 64 and nothing explains it" was an artifact of not sampling between
+   32 and 128.
+
+   | rank | `live_fraction` | live planes | effective planes | `transport_curve` | target | source |
+   |---:|---:|---:|---:|---:|---:|---:|
+   | 128 | 0.4703 | 60.2 | 1.572 | 0.6981 | 1.73717 | 2.91369 |
+   | 64 | 0.7998 | 51.2 | 1.545 | 0.6293 | 1.73124 | 2.90739 |
+   | **48** | **0.9009** | 43.2 | 1.530 | 0.6114 | **1.73094** | 2.90375 |
+   | 40 | 0.9425 | 37.7 | 1.517 | 0.6028 | 1.73191 | 2.89448 |
+   | 32 | 0.9744 | 31.2 | 1.504 | 0.5974 | 1.73335 | 2.88989 |
+
+   **`live_fraction` 0.90 is the target optimum and 0.95 is the balanced
+   setting.** Two independent routes land on the same point: the user's rule
+   that a frame which cannot be turned as one is ballast, and 300 steps of loss.
+   Source keeps improving monotonically all the way down to rank 32, so rank
+   stays a target/source dial -- but its target end is now located, and it is
+   neither fully live (1.0) nor the `0.80` the old default sat at.
+
+   *And better source is spendable.* A rank that buys source can be traded back
+   for target by raising LR, which is the axis P11 shows this harness walks
+   cleanly. The pair (rank, LR) should be tuned together rather than rank alone.
+
+   **The tuning procedure is cheap enough to be routine.** A 200-300 step run at
+   the target batch reads `tangent_live_fraction` directly; pick the rank that
+   puts it near 0.90-0.95. At bs1 on LFM each arm costs about a minute. This is
+   a diagnostic, not a sweep over loss, which is what makes it affordable on
+   models where loss cannot rank anything.
+
+   **One global rank is measurably wrong.** Per-matrix liveness over 92 matrices
+   x 300 updates gives an ICC of `0.776` at rank 48 and `0.734` at rank 40 --
+   roughly three quarters of the variance is genuine between-matrix difference
+   rather than step noise. Per-matrix means run `0.446` to `0.999` at rank 48
+   (median `0.971`, p25 `0.878`): most of the fleet is saturated while a
+   minority is starved. Shape explains only 48% of that spread, so the reading
+   carries real per-module information beyond `min(m, n)` -- and equally, shape
+   alone would capture half the benefit for free.
+
+   *What sets the usable rank is basis coverage of the matrix volume, and that
+   scales with batch.* At rank 128 the live count is `101` at bs16 and `60` at
+   bs1. So the current cap of `min(m, n) / 2` is geometry only and cannot be
+   right across batch sizes; a derived cap has to be a function of what the
+   gradient actually supports, which is what `live_fraction` already measures.
+
+   *Pruning needs no refit and does not reset the moment.* The frame is **not**
+   sorted -- the geodesic rotates into the tangent's eigenbasis and back out
+   via `eigenvectors.mT`, so column `j` is not plane `j`. To prune, rotate
+   `Q -> Q V` into that eigenbasis (orthogonal, so the subspace does not move
+   and orthonormality holds), which sorts planes by sigma, apply the same `V` to
+   the moment, then truncate both. That rotation is exactly what
+   `transport_spin` measures and transport is the identity in those coordinates,
+   so nothing is lost. The decomposition is already computed every basis update,
+   making prune free at any step; only *growing* needs new orthogonal directions.
+   `grad_to_moment_ratio` is invariant to the rotation and **not** invariant to
+   the truncation, so it steps at each prune event.
+
+   *Dynamic rank is parked, not abandoned.* The hoped-for shape was expand and
+   reduce in one motion at a refit interval, adding no new state or windows.
+   It does not close: new rows initialized to zero or noise cannot be read for
+   liveness, because the reading needs a frame difference. Parked pending more
+   statistical reads.
+
+5. **CLOSED -- a per-role rank table beats one global rank on both heads at
+   equal budget.** LFM bs16, LR `2e-4`, 1k steps, seed 1, beta `0.9`, both arms
+   on current code so the live floor is common to them. The archived
+   `usuitrack-release-lr2e-4-1k` (`1.681140 / 3.094790`) is **not** the control:
+   it predates the live floor and was unseeded.
+
+   | read | global r128 | per-role table | delta |
+   |---|---:|---:|---:|
+   | target | 1.669330 | **1.667302** | -2.0e-3 (floor `3e-4`) |
+   | source | 3.084276 | **3.079098** | -5.2e-3 (floor `2e-3`) |
+   | `tangent_live_fraction` | 0.8073 | 0.9419 | +0.135 |
+   | `tangent_participation` | 0.01910 | 0.02322 | +21% |
+   | `tangent_concentration` | 0.6826 | 0.6749 | -0.008 |
+   | `update_to_param_ratio` | 1.437e-4 | 1.651e-4 | +15% |
+   | `transport_speed` | 0.00118 | 0.00137 | +16% |
+   | tracked planes | 11,776 | 12,032 | +2.2% |
+
+   **Both heads improve, which is the part that matters.** A pure effective-LR
+   increase walks P11's axis -- target down, source up. This is a Pareto gain,
+   so it is off that axis, and `tangent_participation` up 21% says what changed:
+   the tracker resolves a better-conditioned subspace, which no learning rate
+   buys.
+
+   *The table, calibrated at rank 256 on 150 steps, and what it reallocates:*
+   `w1` 208, `w3` 192, `conv.in_proj` 176, `w2` 120, `q_proj` 104, `v_proj` 72,
+   `k_proj` 56, `out_proj` 40, `conv.out_proj` 32. Against a global 128 that is
+   **attention 1,632 planes against 3,072 -- cut 47% -- and feed-forward 8,320
+   against 6,144 -- up 35%**, for a total 2.2% larger. A global rank gives
+   attention roughly twice the rank its gradients can fill while starving the
+   MLP by a third.
+
+   *The calibration was itself rank-limited.* Only 3 of 9 roles cleared
+   `frac < 0.25` at rank 256; `w1` read `0.777`, still climbing. The MLP
+   matrices cap at 512 on the tracked side, so the table **under-provisions**
+   them and the true reallocation is larger than measured.
+
+   *Procedure, as it stands.* One over-provisioned calibration at the training
+   batch, 150 steps, then `rank = live_n / 0.95` floored to a multiple of 8 and
+   capped at the calibration rank -- so the calibration rank is the ceiling and
+   the diagnostic can only recommend downward. Validity is per role: a role is
+   settled when its calibration frac is **below ~0.25**. An earlier 0.65 line
+   was too loose -- on the bs4 long run the four roles under 0.22 transferred
+   exactly while the five above 0.32 over-estimated by 6-14%.
+
+   *Drift is nil, so the interval is not needed.* On a 3600-step bs4 run with a
+   per-role table, the suggested ranks are identical across windows 2-12 (3,300
+   steps), the single exception being `k_proj` stepping 48 to 56 at window 3.
+   Per-role `live_fraction` moves +0.014 to +0.056 over the whole run, nearly
+   all of it in the first 300 steps. A checkpoint-cadence reporter would be
+   reprinting a constant table; the read is worth having once, early, to confirm
+   convergence.
+
+   *Role is the right grouping.* Variance in per-matrix mean `live_fraction` is
+   explained 73.6% by role, 58.4% by shape, 19.1% by depth. Role beats shape
+   rather than proxying for it: `k_proj` and `v_proj` are both (512,1024) and
+   read `0.711` against `0.429`. Depth's share is mostly the conv/attention
+   alternation, not depth. Per-role ranks also keep the `eigh` buckets, since
+   buckets key on `(device, dtype, shape[1])` and same-role matrices share a
+   shape -- though that saving does not survive `release_matrix_grads`, which
+   consumes gradients as they arrive rather than grouped.
+
+6. **Rank is a step-size knob, not only a subspace knob.** Found while reading
+   why `update_to_param_ratio` moved when nothing but rank changed.
+
+   The orthogonalized projected moment is a rank-`r` object whose singular
+   values are all ~1, so its Frobenius norm is `sqrt(r)`.
+   The scale then multiplies by `sqrt(max(1, rows/cols))`, where those come
+   from a shape built out of the parameter **and the basis** --
+   `(p.shape[0], basis.shape[0])` on the right side, `(basis.shape[1],
+   p.shape[1])` on the left. So `w1` (4608,1024) reads `(4608, 1024)` and gets
+   `2.121`, while `w2` (1024,4608) reads `(r, 4608)` and gets `1.000`. Note the
+   left-side case carries `r` in the numerator already, an unremarked rank
+   dependence. At full rank -- `r = min(m, n)`, which is what Muon assumes -- those
+   compose to exactly `sqrt(rows)`, the invariant the line exists to enforce.
+   Under a rank-`r` projection they compose to
+   `sqrt(rows) * sqrt(r / min(m, n))` instead.
+
+   **So the line stopped enforcing its own invariant the moment the optimizer
+   became low-rank**, and what it leaves behind is shape-dependent: at `r=128`
+   the residual attenuation is `0.354` for a matrix with `min(m,n)=1024` and
+   `0.500` for one with `512` -- a `sqrt(2)` spread in effective step across the
+   fleet that nobody chose.
+
+   *Two readings, and they are not in conflict.* **Within a model, across roles,
+   the coupling is wanted:** step scaling as `sqrt(r)` means the step scales
+   with the number of directions the gradient demonstrably supports, set by
+   measurement rather than by a hyperparameter. That is more principled than a
+   flat rate, and it is part of why the per-role table produced a Pareto gain.
+   **Across a global rank sweep the coupling contaminates:** changing one number
+   moves both the subspace and the step, so every rank comparison in this
+   document -- the bs1 sweep at 32/40/48/64/128 included -- conflates the two.
+   "Rank 32 protects source" may be partly "rank 32 takes half the step". A
+   global LR sweep cannot undo it, because the distortion is per-matrix and
+   shape-dependent.
+
+   *The aspect term is aspect, not size.* `w1` at (4608,1024) gets `2.121`;
+   `w2` at (1024,4608) gets `1.000` -- identical element counts, transposed
+   storage, 2x different step. `w2` also reads the lowest liveness of the three
+   MLP roles in every run measured (`0.429` against `0.526`/`0.481` at bs4/r256;
+   `0.457` against `0.777`/`0.721` at bs16/r256). Consistent with the smaller
+   step starving it, not proof -- orientation also changes which side is
+   tracked, and the two are tangled.
+
+   **`ORTHOGONALIZATION_SCALE_MODE` is dead in production, and measurably so.**
+   An arm at `scale_mode="none"` (LFM bs16, r128, 1k, seed 1) returned
+   `update_to_param_ratio` of `1.437e-04` against the control's `1.437e-04` --
+   identical to four figures -- with per-role `live_fraction` moving `+0.0002`
+   to `+0.0011` uniformly and the `w1`-`w2` gap unchanged at `+0.193`. Removing
+   a term that should have altered `w1`'s step by 2.12x altered nothing.
+
+   The cause: `_orthogonalize_update_runtime` dispatches to
+   `self._compiled_orthogonalize_update`, which is
+   `_orthogonalize_aurora_muon_tensor`, and **that function hardcodes the muon
+   scale and never reads the constant**. `_scale_orthogonalized_update` and its
+   four-way branch are reachable only on the uncompiled path. So the optimizer
+   computes a *different update* depending on whether tensor kernels are
+   compiled, for any setting other than `muon` -- a divergence between two code
+   paths that are supposed to agree, not merely dead code.
+
+   **The arm therefore did not test the scale term**, and the scale question is
+   still open. Testing it requires patching the compiled tensor function, not
+   the constant. `graft` is the most clearly wrong for this optimizer -- it
+   rescales the orthogonalized update back to the original update's norm,
+   re-imposing the pre-orthogonalization gradient magnitude and discarding the
+   reason for orthogonalizing. The intent is to use the branch as the instrument,
+   then collapse it to whatever wins and inline it, deleting the dispatch in one
+   cut rather than picking off `graft` alone.
+
+   *A correction recorded because it was stated and is wrong.* It was argued
+   in session that tracking the larger side is structurally wasteful -- that a
+   `[1024, r]` frame on a (512,1024) matrix spans dimensions the gradient can
+   never populate. **That is false.** The frame is fitted, so Oja and the initial
+   eigh place it inside the gradient's own row space, a `<= 512`-dimensional
+   subspace of `R^1024`; nothing is stranded while `r < 512`, and `r` is capped
+   at 256 there regardless. What the side genuinely changes is frame **memory**
+   (`[d, r]`, so the larger side costs twice) and **semantics** (input-space
+   versus output-space subspace). The side policy may still deserve
+   re-evaluation for a different reason: `residual-facing` was chosen when rank
+   was global, where aligning the frame to the residual stream was the only
+   lever for making one rank fit every matrix, and per-role rank now does that
+   job directly.
+
+7. **Cross-covariance aim, `G^T M`.** Salvaged in full from `TRACKER_REDESIGN.md`
    before that document was deleted, because it was the one derivation there
    worth keeping.
 
@@ -1149,7 +1486,7 @@ in the queue, not a settled state.
    there is no moment to read. It needs a moment reintroduced for the aim alone,
    or a separate cheap persistence estimate -- and note the agreement meter is now
    exactly such an estimate, arrived at from the other direction.
-3. **Position vs velocity control, reopened -- and the evidence has flipped.** The
+8. **Position vs velocity control, reopened -- and the evidence has flipped.** The
    arc's centerpiece argued Oja is open-loop velocity control that random-walks
    on noise, and that EIGH-aimed position control is strictly better. The refit
    control measures the opposite on the current mechanism: a fresh
@@ -1157,12 +1494,12 @@ in the queue, not a settled state.
    wrong with the aim, "replace it with position control" is no longer the
    obvious fix, and the arc's argument should be treated as superseded rather
    than pending.
-4. **Rotation-coupled `beta`.** Damp the moment by how far the frame just turned,
+9. **Rotation-coupled `beta`.** Damp the moment by how far the frame just turned,
    so memory shortens exactly when rotation makes it stale. Costs nothing new.
    Blocked behind the tracker work, since the optimum moves with tracking speed.
-5. **Agreement `cos(Z, M)` as a step-size input.** Instrumented and understood but
+10. **Agreement `cos(Z, M)` as a step-size input.** Instrumented and understood but
    not used. Same `beta=0` tension as lead 2.
-6. **Does tracking's value grow with horizon? -- partly answered, and the
+11. **Does tracking's value grow with horizon? -- partly answered, and the
    answer was no.** The prediction was that a 300-step comparison favours fast
    trackers, so a slower-net-travelling frame should pull ahead by 1k. Measured,
    the gap moved the other way by `2.6e-4`, and both deltas are under this
@@ -1170,25 +1507,25 @@ in the queue, not a settled state.
    gap is bounded; whether a bounded geometric gap ever produces a loss gap is
    still open, and now needs a horizon past 1k to ask. The frozen-vs-tracked pair
    is the shape of the test.
-7. **Re-sweep rank and LR.** The biggest levers on loss, and the current
+12. **Re-sweep rank and LR.** The biggest levers on loss, and the current
    `rank=128` / `2e-4` pair is inherited from before the aim's shape and its
    magnitude rule both changed. A substantial algorithm change invalidates the
    sweep behind it, and this one has not been redone in a long time. Debt, not
    today's work.
-8. **Is `eta` derivable, or only calibratable?** The last bare constant in the
+13. **Is `eta` derivable, or only calibratable?** The last bare constant in the
    controller. Its cliff is measurable (`0.02`, where a fixed seed diverges one
    run in two), so "find the cliff, take half" is available and honest. A derived
    form would tie it to the signal the frame can resolve above batch noise, which
    the meter already measures as `excess` above `floor`. Nothing beyond a sketch.
-9. **CLOSED -- `k` is a gain on the turn, not a measurement width.** Swept 4, 8,
+14. **CLOSED -- `k` is a gain on the turn, not a measurement width.** Swept 4, 8,
    16, 32 under the derived ceiling. It moves the turn scale 4.3x and target loss
    by less than the same-config spread. It is a second knob doing `eta`'s job,
    which is a redundancy of the same kind as the fitted `2.87` was. See below.
-10. **CLOSED -- the fleet gain is stable enough to divide by.** Logged across 1k
+15. **CLOSED -- the fleet gain is stable enough to divide by.** Logged across 1k
    it settles into a +-7% band after acquisition and needs no smoothing, while
    rising ~47% over the run as participation grows. Stable as a divisor, and
    non-stationary in exactly the way a frozen peak cannot follow.
-11. **CLOSED -- `beta` default is now `0.9`.** It was `0.95`, which the sweep
+16. **CLOSED -- `beta` default is now `0.9`.** It was `0.95`, which the sweep
    recorded as dominated on both axes; `0.9` is the best target and the better
    short-run choice. `0.5` remains the best trade and `0.0` the best retention if
    the values call ever changes. The `beta = 0` *method* rule is retired with it:
@@ -1196,9 +1533,9 @@ in the queue, not a settled state.
    the tracker's own motion, and speed, curve and spin now read the frame at any
    `beta`, while `beta = 0` blinds both moment metrics and stops `transport_lag`
    meaning smear.
-12. **P5's remaining constants, P6's frame guard, P12's five syncs per step.**
+17. **P5's remaining constants, P6's frame guard, P12's five syncs per step.**
    Unchanged and independent of the above.
-13. **CLOSED -- tangent accumulation removed.** Falsified at batch 16, where it
+18. **CLOSED -- tangent accumulation removed.** Falsified at batch 16, where it
    cost target loss monotonically in the window, and at batch 4, where the cost
    disappeared but no gain replaced it. The controller absorbs single-batch noise
    without it. Numbers below.
@@ -1391,8 +1728,11 @@ somewhere else.
 Target loss is not comparable across this ladder -- 300 steps at bs1 sees a
 sixteenth of the data -- and is not reported.
 
-**What broke at bs1.** Two readings are available and the evidence is not
-conclusive between them.
+**What broke at bs1.** Two readings were available when this was written, and
+the evidence did not separate them. It does now -- see *The null tail was being
+driven* below, which settles it as rank collapse and supplies the mechanism.
+The two readings are kept because the reasoning that narrowed them is the
+reasoning that found the cause.
 
 *Rank collapse.* At bs1 concentration reads 0.83 and participation 0.0123, an
 effective rank of 1.6 out of 128, so the tangent Gram is one large eigenvalue and
@@ -1431,9 +1771,225 @@ failure is reachable, and the note in `optimizer.py` saying a failing `eigh` now
 fails should be read as a deliberate choice with a known trigger rather than as a
 condition never observed.
 
+### The null tail was being driven, and that is what `eigh` was choking on
+
+Closes the bs1 question above, and the Anima crashes with it. The trigger was
+not the aim's rank on its own. It was a threshold in `_anneal_tangent` that let
+the rank-poor aim manufacture the ill-conditioning `eigh` reported.
+
+The annealer normalizes the tangent's plane directions by `1 / sigma`, gated on
+a liveness test that read `sigma > 1e-6 * sigma_max` -- `1e-12` in eigenvalue
+terms. A symmetric `[r, r]` decomposition carries backward error of order
+`r * eps * lambda_max`, which is `sqrt(r * eps) * sigma_max` in sigma units:
+`2.8e-3` at rank 64 in fp32, `3.9e-3` at rank 128. The old threshold sat six
+orders of magnitude below what fp32 can resolve, so **no plane was ever dead**.
+Every plane below the floor had its rounding artifact divided by its own
+near-zero sigma, arrived as a unit-norm direction, and was then turned by the
+polar step at the same angle as the plane carrying the signal. Those directions
+land in the next tangent, whose Gram is the matrix handed to `eigh`. A
+rank-collapsed aim therefore produced a Gram of one large eigenvalue and a tail
+of near-equal near-zero ones that were *not* the aim's tail but the annealer's
+own noise, amplified and fed back -- which is precisely the input `eigh` reports
+as ill-conditioned or having too many repeated eigenvalues.
+
+That closes the two readings. Divergence is out: it required a speed spike in
+the unlogged window, and the mechanism needs no divergence. Rank collapse is in,
+with the refinement that rank collapse alone was not sufficient -- it became a
+crash only because the null tail was being driven.
+
+**The fix is two lines and one deleted constant.** The liveness threshold is now
+`sqrt(r * eps)` relative to `sigma_max`, derived from the dtype and the rank
+rather than fitted. And a dead plane gets a *zero angle*, not merely a zero
+tangent column: the geodesic reads `cos(eta * sigma)` on the frame's own
+component along each eigenvector, so a dead plane handed the live angle
+contracts that component while the tangent term it should rotate against is
+zero. That is a contraction, not a rotation, and it violates the identity this
+method claims when it says a zero singular plane does not move.
+
+**A new core diagnostic, `tangent_live_fraction`,** reports the share of planes
+clearing the floor. It is the read that makes the whole failure visible, and it
+cost nothing -- the sigmas were already in hand.
+
+*The LFM null check* (`live-floor-nullcheck-300`, seed 1, rank 128, bs16,
+`2e-4`, 300 steps) against `released-controller-300`:
+
+| read | baseline | live floor | delta |
+|---|---:|---:|---:|
+| target | 1.7076863 | 1.7076766 | **-9.7e-6** (floor `3e-4`) |
+| source | 3.0453720 | 3.0452392 | -1.3e-4 (floor `2e-3`) |
+| `turn_fraction` | 0.21677 | 0.21993 | +0.003 |
+| `transport_lag` | 0.005978 | 0.005095 | -15% |
+| `transport_spin` | 0.000859 | 0.000735 | -14% |
+| `transport_speed` | 0.001754 | 0.001574 | -10% |
+| `transport_curve` | 0.683 | 0.718 | +0.035 |
+| `tangent_live_fraction` | -- | **0.788** | new |
+
+Loss-neutral inside the noise floor on both heads, and the frame moves less to
+get to the same place. **The prediction stated before the run was wrong, and the
+way it was wrong is the finding.** A strict no-op was expected, on the argument
+that LFM's spectrum has a real tail. It read `0.788`: 27 of LFM's 128 planes sit
+below the fp32 floor, so LFM had been driving a fifth of its frame on rounding
+error the whole time, at no measurable cost to loss. The tail runs deeper than
+the fitted `k^-1.5` implies.
+
+*Anima is the case where it was not free.* Two runs at rank 64 / bs4 died in
+`eigh` inside twenty steps -- `8y7ez5zm` at step ~17, `f8qybz7v` at ~19, a
+different batch element each time, so not one cursed tensor. Under the derived
+floor the same config completed all 2304 steps. The control is exact: at step
+10, `tangent_participation` reads `0.02361` against the crashed run's `0.02349`
+and `tangent_concentration` `0.845` against `0.848`. **The aim is unchanged;
+only which planes are acted on changed.** `transport_speed` at step 10 halved,
+`0.00565` to `0.00255`, while `turn_fraction` held -- the frame stopped moving
+in directions that carried nothing. `tangent_live_fraction` sat at `0.45`
+throughout: Anima permanently resolves under half its planes.
+
+**The user's read was half right, and the half matters.** The hypothesis was
+that the last basis turn was too strong. The turn scale was not high -- Anima's
+`turn_fraction` at matched phase was *lower* than LFM's, `0.654` against
+`0.737`. The frame's *motion* was too strong, because a turn of ordinary size
+was applied to planes carrying nothing.
+
+**This also revises the jitter question.** The section above reads the bs1 crash
+as the first evidence against removing the `eigh` jitter. That reading is now
+weaker: the failure was manufactured downstream of the decomposition, and a
+jitter would have masked it rather than fixed it. Three runs died of this and
+each death was a correct report of a real defect. The bare `eigh` stands.
+
+### Carry-over: open tasks from the rank session
+
+Written down so none of it is lost. Ordered by what would be cheapest to settle.
+
+1. **Collapse `ORTHOGONALIZATION_SCALE_MODE`.** Three of four modes are
+   unreachable and the constant is bypassed entirely on the compiled path, which
+   hardcodes `muon`. Fix the divergence first -- two paths that disagree is the
+   actual defect -- then inline whichever scale survives and delete the
+   dispatch. `graft` should not outlive the cut: it rescales the orthogonalized
+   update back to the original update's norm, discarding the orthogonalization.
+
+2. **Test the scale term for real.** The `scale_mode` arm was invalid; the
+   compiled tensor function is what needs patching. The open question is whether
+   the aspect factor starves `w2`, which reads the lowest liveness of the three
+   MLP roles in every run measured while receiving half `w1`'s step.
+
+3. **CLOSED -- the `side=right` arm has the best geometry in the session and
+   the worst loss.** LFM bs16, r128, 1k, seed 1, against the residual-facing
+   control and the per-role table:
+
+   | read | residual-facing | per-role table | **side=right** |
+   |---|---:|---:|---:|
+   | target | 1.669330 | **1.667302** | 1.677500 |
+   | source | 3.084276 | **3.079098** | 3.089930 |
+   | `projected_grad_norm` (capture) | 0.392509 | 0.383710 | **0.451346** |
+   | `tangent_live_fraction` | 0.807303 | **0.941929** | 0.901274 |
+   | `tangent_participation` | 0.019102 | 0.023217 | **0.023381** |
+   | `tangent_concentration` | 0.682636 | 0.674940 | **0.616423** |
+   | `transport_speed` | 0.001181 | 0.001370 | 0.001935 |
+
+   Tracking the non-residual side captures 15% more gradient, spreads the
+   spectrum best of any arm, and loses on **both** heads -- target by `8.2e-3`,
+   which is 27x the noise floor. **This is the cleanest demonstration yet that
+   capture and spectrum reads explain results without ranking designs**, and it
+   is worth more than the rule stated abstractly: the arm with the best
+   subspace geometry measured all session is the worst arm on loss.
+
+   *Why, and it vindicates the original design.* The residual side is the axis
+   connected to the whole model, so it is harder to track -- it moves, because
+   everything upstream and downstream moves it. The other side is more
+   self-contained and therefore more stable, which is exactly why it tracks
+   better. **Trackability and usefulness are anti-correlated here.** The
+   optimizer should track the side that is harder to track, because that is
+   where the model's coupling lives. `residual-facing` was a design intuition --
+   both `w1` and `w2` get a `d x r` basis on the side facing the residual
+   stream -- and it now has evidence.
+
+   *The caveat this puts on the rank programme.* `tangent_live_fraction` is a
+   geometry read, and this arm proves a geometry read can be improved while loss
+   degrades. Maximizing liveness is therefore not intrinsically good. The
+   per-role table stands because it improved **both losses** at equal budget,
+   not because it raised liveness -- and any future rank rule has to clear the
+   same bar rather than pointing at the metric it optimizes.
+
+4. **Anima with a calibrated rank table.** The second operating point for
+   everything in this session: whether `0.95` transfers off LFM, whether the
+   role table transfers to a DiT, and whether the source gain shows up as the
+   sample quality the user actually judges on. The bs4 calibration procedure is
+   the one Anima needs. Run at night.
+
+5. **Re-read the rank sweeps under the step-size coupling -- the coupling is
+   measured and exact.** `update_to_param_ratio` across the bs1 sweep tracks
+   `sqrt(r/128)` to four figures:
+
+   | rank | `update_to_param_ratio` | ratio to r128 | `sqrt(r/128)` |
+   |---:|---:|---:|---:|
+   | 128 | 1.43463e-4 | 1.0000 | 1.000 |
+   | 64 | 1.01535e-4 | 0.7078 | 0.707 |
+   | 48 | 8.78494e-5 | 0.6124 | 0.612 |
+   | 40 | 8.01740e-5 | 0.5589 | 0.559 |
+   | 32 | 7.16512e-5 | 0.4994 | 0.500 |
+
+   At **fixed** rank the ratio is flat -- `1.4346e-4` for both the bs16 control
+   and `scale=none`, `1.4365e-4` for `side=right` -- and it moves only where
+   rank moves (`1.651e-4` for the per-role table). So the coupling is not a
+   suspicion, it is the arithmetic, and "rank 32 protects source" is partly
+   "rank 32 takes half the step". An arm holding effective step fixed while
+   varying rank is what separates them.
+
+6. **Calibrate deeper than 256.** Only 3 of 9 roles cleared `frac < 0.25` at
+   rank 256 on bs16; the MLP roles cap at 512 on the tracked side. The current
+   table under-provisions them, so the measured reallocation is a lower bound.
+
+7. **Per-role rank needs a home, and Anima needs it.** `rank` is already a
+   per-param-group key, so the optimizer already supports the table -- what does
+   not exist is the part that produces and consumes one:
+
+   * group construction by role, today a monkeypatch over
+     `build_usuitrack_param_groups` in the lab harness, and absent entirely from
+     ai-toolkit, which is what Anima runs on
+   * a per-matrix liveness report, today a device-syncing trace hook that was
+     removed before commit; the production form accumulates per-matrix sums on
+     device and syncs once per report interval
+   * the calibration procedure, validity rule and table format, which live only
+     in this document
+
+   This is the blocking work for trying the table on Anima.
+
+8. **`min(m, n) / 2` as the rank cap is geometry only, and the `/2` is the
+   fitted part.** Two hard ceilings exist and neither is `/2`: the frame is
+   `[d, r]` with orthonormal columns, so `r <= d`; and the gradient has rank at
+   most `min(m, n)`, so directions past that can never be populated. For `w1`
+   (4608,1024) tracked on the 1024 axis both give `1024`, and the cap of `512`
+   is the halving alone. Calibration can therefore go to `512` there but not
+   beyond -- the cap clamps it. Beyond that, usable rank scales with batch --
+   101 live planes at bs16 against 60 at bs1, same rank 128 -- so a ceiling
+   derived from shape alone cannot be right across batch sizes, and
+   `live_fraction` already measures what the gradient actually supports.
+
+9. **CLOSED -- dynamic rank is not reopened.** The static table is stable and
+   predictable and that makes it strictly better: suggested ranks are identical
+   across windows 2-12 of a 3600-step run, so a controller would be tracking a
+   constant while adding state, a window, and a failure mode. The mechanism also
+   never closed on its own terms -- expand-and-reduce in one motion needs rows
+   initialized to zero or noise, which cannot be read for liveness because the
+   reading needs a frame difference. Recorded for the record: pruning alone is
+   cheap and needs no refit -- rotate `Q -> QV` into the tangent eigenbasis,
+   apply `V` to the moment, truncate both.
+
 ### How we work here
 
 Recorded so a fresh session inherits the method, not just the findings.
+
+**No parallel compiled and uncompiled implementations on main.** They drift,
+and the drift is silent because both paths typecheck, both run, and only one of
+them is ever exercised. `ORTHOGONALIZATION_SCALE_MODE` is the case that proved
+it: the compiled `_orthogonalize_aurora_muon_tensor` hardcodes the muon scale
+while the uncompiled `_orthogonalize_aurora` honours a four-way branch, so the
+optimizer computes a different update depending on a compile flag, and an
+experiment that changed the constant measured nothing while appearing to
+succeed. A second implementation of the same maths is a second thing to keep
+true, and nothing in the test suite was watching. Where a compiled kernel is
+needed for speed, it must be the *only* implementation, with the uncompiled
+path either deleted or reduced to a call into the same function. Any surviving
+pair on main is a defect to remove, not a convenience to maintain.
 
 **The user steers; the assistant reads terrain.** Bring evidence, name the
 uncertainty, propose the cut -- then let the direction be chosen. Do not
@@ -1592,7 +2148,7 @@ Most of these were ablated on a single model.
 | `grad_clip_norm = 1.0` | raw clip | now mandatory; the threshold itself is untested across models |
 | `beta = 0.9`, `eps = 1e-8` | moment | `beta` measured by sweep, see P2; `eps` inherited |
 | `AURORA_PP_ITERATIONS = 1`, `AURORA_PP_BETA = 0.5` | direction map | inherited from the method |
-| `1e-12` floors, `1e-7` sigma threshold | numerical | probably fine, unaudited |
+| `1e-12` floors, `1e-7` sigma threshold | numerical | audited once, and one of them was a bug -- see below |
 
 **Immediate sub-question with a cheap answer.** Two guards on the hot path are
 applied *unconditionally* and nothing measures whether they were ever needed:
@@ -1633,6 +2189,18 @@ would justify removing it (`nonfinite_grads`) is the only one still reported.
 `_side_gram_eigh`'s try-then-jitter on the *initial fit* also stays: a different
 matrix, decomposed once per parameter rather than once per step, so it is not a
 hot-path toll and the tangent-Gram evidence does not transfer to it.
+
+**The numerical row was not fine.** It was the only row carrying "unaudited"
+and it was hiding the defect that killed three runs: the annealer's liveness
+test at `1e-6 * sigma_max`, six orders of magnitude below fp32's resolution, so
+no plane was ever dead and the null tail was driven on rounding error. It is now
+`sqrt(r * eps)` relative to `sigma_max` -- derived from dtype and rank, scale
+free, nothing fitted. Full account under the batch ladder in P2.
+
+The lesson generalizes past the one constant. A threshold that never fires is
+not thereby harmless, and "probably fine" in a census is a place to look first
+rather than a row to skip. The three surviving numerical constants in this row
+have still never been read against the precision they run in.
 
 **Goal.** Fewer constants, and the survivors derived or at least scale-free.
 
@@ -1938,6 +2506,47 @@ runs wandered between sample rounds; this one holds a heading. Telemetry:
 `tangent_concentration` ~0.865 with no trend -- far above LFM's ~0.39, which is a
 fact about this model's gradients rather than about the tracker, and a warning
 that any step rule built on concentration has to survive both operating points.
+
+**Anima under the derived live floor**, same config as `7puon3ub` (rank 64, bs4
+x 768px, `1e-5`, 2304 steps): `anima_usuitrack_8_live_floor`, wandb `9elbwps6`,
+completed, final model saved. This is the run the live-floor fix was made for --
+the two attempts immediately before it died in `eigh` inside twenty steps.
+
+Full-run telemetry, 200-step bins:
+
+| bin | `turn_fraction` | `live_fraction` | participation | concentration | `curve` |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 0.5065 | 0.4432 | 0.02341 | 0.8496 | 0.6063 |
+| 600 | 0.3996 | 0.4701 | 0.02377 | 0.8449 | 0.6541 |
+| 1200 | 0.3712 | 0.4864 | 0.02392 | 0.8424 | 0.6666 |
+| 1800 | 0.3539 | 0.4817 | 0.02391 | 0.8430 | 0.6792 |
+| 2200 | 0.3409 | 0.4906 | 0.02428 | 0.8378 | 0.6855 |
+
+**The aim does not converge over 2304 steps.** Participation moves `0.0234` to
+`0.0243` and concentration `0.850` to `0.838` -- an effective rank of `1.50`
+rising to `1.55` out of 64, flat across three epochs. Whatever sets this model's
+aim rank is a property of the gradients at this batch size and this data, not
+something training improves. Compare the bs1 column of the LFM ladder above:
+concentration `0.829`, effective rank `1.6`. **Anima at bs4 sits where LFM sat
+at bs1.**
+
+The frame, by contrast, converges normally and lands where LFM lands:
+`transport_speed` falls `0.0028` to `0.0018` while `transport_curve` rises
+`0.61` to `0.69` -- travelling, then settling onto a fixed point, which is the
+signature SPEC describes. LFM's 300-step baseline reads `0.00175` and `0.683`.
+The two models differ in the aim, not in the frame's motion.
+
+`turn_fraction` decays `0.507` to `0.341` and is still falling slowly at the
+end. LFM reaches `0.217` by step 300. Anima's tracker holds a turn scale
+roughly half again as large, indefinitely, because consecutive aims keep
+disagreeing -- the sustained-motion equilibrium of a subspace that is genuinely
+being resampled every step rather than converging.
+
+Verdict is the samples, reviewed by the user: **the first non-destructive run.**
+Fingers and anatomy survive noisy batches, and it reads as one trajectory rather
+than a walk between sample rounds. Loss is not comparable and is not reported --
+flow-matching loss at bs4 moved `0.143` (first 400 steps) to `0.154` (last 400),
+which is noise on this lane.
 
 **Two cautions about anything older than these.**
 

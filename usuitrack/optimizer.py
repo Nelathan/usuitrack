@@ -937,8 +937,23 @@ class UsuiTrack(Optimizer):
         """
 
         sigma = eigenvalues.clamp_min(0.0).sqrt()
-        live = sigma > 1e-6 * sigma.amax(dim=-1, keepdim=True).clamp_min(1e-30)
+        # A plane is live only if it clears the Gram's own numerical noise floor.
+        # A symmetric `[r, r]` decomposition carries backward error of order
+        # `r * eps * lambda_max`, which is `sqrt(r * eps) * sigma_max` in these
+        # units -- `2.8e-3` at rank 64 in fp32. The threshold here used to be
+        # `1e-6 * sigma_max`, or `1e-12` in eigenvalue terms: six orders of
+        # magnitude below what fp32 can resolve, so no plane was ever dead.
+        # Measured, that mattered everywhere and not equally: LFM at rank 128
+        # resolves 79% of its planes, Anima at rank 64 resolves 45%. Under the
+        # old threshold the rest were driven anyway -- `1 / sigma` promotes a
+        # rounding artifact to a unit-norm direction, and the polar step then
+        # turns it by the same angle as the plane carrying the signal. On LFM
+        # that cost nothing measurable; on Anima the noise directions fed back
+        # into the next tangent Gram and `eigh` failed within twenty steps.
+        noise_floor = math.sqrt(sigma.shape[-1] * torch.finfo(sigma.dtype).eps)
+        live = sigma > noise_floor * sigma.amax(dim=-1, keepdim=True).clamp_min(1e-30)
         inverse = torch.where(live, 1.0 / sigma.clamp_min(1e-30), torch.zeros_like(sigma))
+
         # Normalized columns of `Delta V`: the tangent's plane directions. `eigh`
         # returns ascending, so flipping puts the leading plane first and the
         # meter's `head` is a plain prefix.
@@ -973,12 +988,23 @@ class UsuiTrack(Optimizer):
         diagnostics = self._diagnostics_sink()
         if diagnostics is not None:
             diagnostics.add("turn_fraction", scale.sum(), count=scale.shape[0])
+            diagnostics.add("tangent_live_fraction", live.sum() / rank, count=live.shape[0])
 
         # The geodesic reads its per-plane angles as `sqrt(eigenvalues)`, and the
         # polar factor's own singular values are all one, so handing it `scale^2`
         # is what makes every live plane turn by exactly `eta * scale`.
         annealed = (directions.flip(-1) @ eigenvectors.mT) * scale.to(tangents.dtype).reshape(-1, 1, 1)
-        values = scale.square().unsqueeze(-1).expand_as(eigenvalues).to(eigenvalues.dtype)
+        # Dead planes get a zero angle, not merely a zero tangent column. The
+        # geodesic reads `cos(eta * sigma)` on the frame's own component along
+        # each eigenvector, so a dead plane handed the live angle contracts that
+        # component while the tangent term it should have been rotated against is
+        # zero. That is not a rotation, and it is the identity this method claims
+        # when it says a zero singular plane does not move.
+        values = torch.where(
+            live,
+            scale.square().unsqueeze(-1),
+            torch.zeros_like(scale).unsqueeze(-1),
+        ).to(eigenvalues.dtype)
         return annealed, values
 
     @torch.no_grad()

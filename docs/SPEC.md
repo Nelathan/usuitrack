@@ -492,6 +492,7 @@ against a long quiet interval reads as zero.
 | `turn_fraction` | the controller's own output: mean turn scale in `[0,1]`, so a logged point says how much of `eta` the frame is actually taking. Without it an `eta` ladder is blind, since `eta` and the scale multiply |
 | `agreement_ceiling` | the fleet divisor `G`, one scalar per step. Rises as `tangent_participation` rises; a flat or collapsing gain means the controller has stopped tracking the aim's spread |
 | `tangent_participation` | `(sum_i lambda_i)^2 / (r sum_i lambda_i^2)`, in `[1/r, 1]`: the effective number of planes carrying the aim, as a fraction of `r`. The bulk of the same spectrum concentration reads the head of |
+| `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_participation`: participation is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
 | `projected_grad_norm` | norm of the clipped gradient inside the held frame |
 | `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
