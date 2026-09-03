@@ -98,6 +98,88 @@ the measurement target match the claim. If any drift, stop and name the mismatch
   printing directives back as proof of compliance. He reads slowly and
   deliberately.
 
+## Running things
+
+Two lanes, two models, two harnesses. Neither lives in this repo; both measure
+this repo. **Always launch a training or calibration job in the background,
+never in the foreground.**
+
+### LFM2.5-350M — the lab harness
+
+From `/home/djg/code/optimizers`. It inserts the `usuitrack-release` symlink at
+`sys.path[0]` and raises if the import missed, so it measures this repo and not
+the stale fork beside it. Standard arm:
+
+```bash
+uv run python experiments/llm_synth_smoke.py \
+  --max-steps 300 --batch-size 16 --eval-every 150 --wandb-log-every 25 \
+  --seed 1 --rank 128 --usuitrack-lr 2e-4 --beta 0.9 \
+  --basis-lag-diagnostic --basis-lag-interval 10 --no-final-sample \
+  --wandb-run <name>
+```
+
+Rank calibration (per-label live-plane stats, no eval):
+
+```bash
+uv run python experiments/llm_synth_smoke.py \
+  --max-steps 500 --batch-size 16 --eval-every 0 --wandb-log-every 20 \
+  --seed 1 --usuitrack-lr 2e-4 --beta 0.9 \
+  --calibrate-rank 512 --no-final-sample --wandb-run <name>
+```
+
+`--per-role-rank` uses `LFM_RANK_TABLE` in the harness. Roughly 0.8 s/step at
+bs16 and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
+are the `usuitrack_final_val_loss` (target) and
+`usuitrack_final_retention_val_loss` (source) lines at the end of the log, plus
+the `usuitrack_last_logged_*` telemetry block.
+
+**Experiment knobs the release does not expose** — `GEODESIC_STEPSIZE` and the
+other module constants — are patched by a runner, never by adding an optimizer
+argument. Import the harness module first so its `sys.path` insertion has
+happened, then set the attribute before the optimizer is built:
+
+```python
+import sys; sys.path.insert(0, "/home/djg/code/optimizers")
+import experiments.llm_synth_smoke as smoke
+smoke.usuitrack_optimizer.GEODESIC_STEPSIZE = 0.05
+sys.argv = ["llm_synth_smoke.py", *sys.argv[1:]]
+smoke.main()
+```
+
+The lab's own tests no longer collect (its fork shadows the release under
+pytest) and are not run; verify a harness function by calling it directly.
+
+### Anima — ai-toolkit
+
+From `/home/djg/code/ai-toolkit`, a `uv`-managed `.venv`:
+
+```bash
+uv run python run.py config/train_full_fine_tune_anima_usuitrack.yaml
+```
+
+2B Cosmos DiT, full finetune, `optimizer: usuitrack` with `optimizer_params`
+carrying `rank` and `fallback_lr`. It runs on the 12GB card at 11/12GB, so batch
+cannot rise above 4 and `release_matrix_grads` is what makes it fit — gradient
+accumulation is incompatible with it. Set the run's `name` in the config; that
+name is the output directory.
+
+**Read this lane from sqlite, not wandb.** `<output>/loss_log.db` (tables
+`steps`, `metric_keys`, `metrics`, column `value_real`) carries every
+`usuitrack/*` metric live; the `.wandb` file is unreadable mid-run and
+`wandb-summary.json` does not exist until the end. Flow-matching loss does not
+rank checkpoints here — the verdict is the samples, reviewed by the user.
+
+### Operational traps
+
+- **A `nohup` wrapper's completion is not the run's completion.** The tool
+  notification fires when the launcher exits, seconds in. Check the log.
+- **Running a script by path puts its own directory on `sys.path`,** not the lab
+  root. A runner in the scratchpad must insert `/home/djg/code/optimizers`.
+- **LR is not anchored across batch changes.** Scale by `sqrt(tokens per step)`:
+  at 1/16 the tokens, use 1/4 the LR. Relative comparisons within a sweep
+  survive because all arms share it; the absolute losses do not transfer.
+- **Noise floors: `3e-4` on target, `2e-3` on source.** Below that, no claim.
+
 ## Code style
 
 - Every line earns its place against the task. No flags, branches, adapters,

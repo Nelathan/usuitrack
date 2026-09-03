@@ -66,33 +66,9 @@ raised LR. After that: the LR re-sweep (P11) and the sync/performance pass (P12)
 
 ## Traps
 
-**The lab fork is stale and deliberately so.** `~/code/optimizers/usuitrack/`
-is a superseded copy (there is a `SUPERSEDED` note at the top of its
-`optimizer.py`); the harness inserts `usuitrack-release` (a symlink to this repo)
-at `sys.path[0]` and raises if the import missed. Never edit the fork. The lab's
-own tests (`test_llm_harness.py`) no longer collect because that fork shadows the
-release under pytest -- expected, not run anymore; verify harness functions by
-direct call instead.
-
-**Running a script by path puts its own directory on `sys.path`, not the lab
-root.** A runner in the scratchpad must insert `/home/djg/code/optimizers`
-itself or `import experiments.llm_synth_smoke` fails.
-
-**A `nohup` wrapper's completion is not the run's completion.** The tool
-notification fires when the launcher exits, seconds in. Check the log, not the
-notification.
-
-**wandb's live `.wandb` file is unreadable mid-run** and `wandb-summary.json`
-does not exist until the end. For ai-toolkit runs read the sqlite at
-`<output>/loss_log.db` (tables `steps`, `metric_keys`, `metrics`, column
-`value_real`); it carries every `usuitrack/*` metric live.
-
-**LR is not anchored across batch changes.** Scale by `sqrt(tokens per step)`:
-at 1/16 the tokens, use 1/4 the LR. Relative comparisons within a sweep survive
-because all arms share it; the absolute losses mean nothing.
-
-**Noise floors are 3e-4 on target and 2e-3 on source.** Below that, do not
-claim a result.
+Harness invocations and the operational traps (stale lab fork, `sys.path`,
+`nohup`, reading ai-toolkit's sqlite, LR anchoring, noise floors) are in
+`AGENTS.md`, "Running things". What follows is research judgement, not mechanics.
 
 **Loss does not rank tracker designs, and neither does geometry.** The
 `side=right` arm maximized a geometry read while loss degraded; the calibrated
@@ -112,28 +88,7 @@ homogeneous roles; for right-skewed ones (`w1`, `w3`, `w2` on LFM) the mean runs
 well above the median because a few layers carry real high rank. Median as the
 base, lean to mean there.
 
-## Reproduction
-
-Lab harness, from `/home/djg/code/optimizers`. Standard arm:
-
-```
-uv run python experiments/llm_synth_smoke.py \
-  --max-steps 300 --batch-size 16 --eval-every 150 --wandb-log-every 25 \
-  --seed 1 --rank 128 --usuitrack-lr 2e-4 --beta 0.9 \
-  --basis-lag-diagnostic --basis-lag-interval 10 --no-final-sample \
-  --wandb-run <name>
-```
-
-Rank calibration (per-label live-count stats, no eval):
-
-```
-uv run python experiments/llm_synth_smoke.py \
-  --max-steps 500 --batch-size 16 --eval-every 0 --wandb-log-every 20 \
-  --seed 1 --usuitrack-lr 2e-4 --beta 0.9 \
-  --calibrate-rank 512 --no-final-sample --wandb-run <name>
-```
-
-`--per-role-rank` uses `LFM_RANK_TABLE`. At bs16 ~0.8 s/step. Anima config is
-`~/code/ai-toolkit/config/train_full_fine_tune_anima_usuitrack.yaml`; it runs on
-a 12GB card at 11/12GB, so batch cannot rise above 4 and `release_matrix_grads`
-is what makes it fit -- gradient accumulation is incompatible with it.
+**`update_to_param_ratio` is the comparison axis, not nominal LR.** Anything
+that changes rank changes the aggregate step, so two arms at the same LR can sit
+at different effective step sizes and their losses will read off P11's
+target-down/source-up axis rather than off the thing being tested.

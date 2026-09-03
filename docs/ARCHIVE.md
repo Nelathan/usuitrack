@@ -115,6 +115,10 @@ against `0.0194` of legitimate smear; in quadrature, 1.936% to 1.948%. Against
 the basis write is worse by `sqrt(2)` at every window -- recorded at the write
 site so it is not re-proposed.
 
+**Scoped to the basis, and deliberately so.** The frame has no sub-ulp update to
+lose. The projected moment is an EMA whose increment shrinks as `beta` rises, so
+it does, and this result says nothing about it: see `PLAN.md` P2 lead 3.
+
 ---
 
 ## Rank, closed in four pieces
@@ -210,12 +214,18 @@ peak of `0.1495`, 6% apart -- so the gain is not a constant to fit. It also
 what a frozen acquisition-time peak cannot follow. The `[0,1]` clamp is
 structural.
 
-**What is left is one bare number, `eta = 0.01`, and it did not yield.** Its
-cliff is measurable (`0.02`, where a fixed seed diverges one run in two), so
-"find the cliff, take half" is available and honest. A derived form would tie it
-to the signal the frame can resolve above batch noise -- which the meter already
-measures as `excess` above `floor`, so the derivation would be circular in the
-one place it needs not to be. Calibratable, not derivable.
+**What is left is one bare number, `eta = 0.01`, and it did not yield.** A
+derived form would tie it to the signal the frame can resolve above batch
+noise -- which the meter already measures as `excess` above `floor`, so the
+derivation would be circular in the one place it needs not to be. Calibratable,
+not derivable.
+
+*The cliff that used to justify it is gone.* `eta = 0.02` once diverged one run
+in two on a fixed seed, and "find the cliff, take half" was the honest reading of
+that. The cause was the liveness bug -- the frame was turning dead planes on
+rounding error. With the derived floor in place, `0.05` at bs1 runs 300 steps
+clean. `eta` is now an ordinary tuning parameter with no stability wall under it;
+see `PLAN.md` P2 lead 3.
 
 **`k = 16` is a second gain on the same quantity and stays anyway.**
 `agreement_ceiling x k` is flat within 7% across an eightfold sweep, and `k`
@@ -334,6 +344,53 @@ place -- it is what stops a bad batch reaching any consumer) and
 `_side_gram_eigh`'s try-then-jitter on the *initial fit* (a different matrix,
 decomposed once per parameter rather than once per step).
 
+
+---
+
+## CLOSED -- the frame's exposure to a directional burst
+
+The concern was real when it was written: the clip is a uniform rescale and the
+Oja tangent is exactly invariant to it, so `grad_clip_norm` protects the
+projected moment and nothing else. A gradient of perfectly ordinary size pointing
+at a subspace one bad batch invented moved the frame as far as a good one,
+because the turn's magnitude came from the tangent's spectrum and one loud
+direction dominated it.
+
+**The mechanism that fixed it is the shipped one.** The turn is a full-spectrum
+rotation on the polar factor with the dead planes masked out: every live plane
+turns by the same angle, so a burst enters as one plane among the live set rather
+than as the thing setting the turn scale, and it averages out across steps. The
+magnitude that used to let a single batch steer the frame is no longer in the
+turn at all. Dead planes, which used to be turned on rounding error, do not turn.
+
+*What is deliberately not defended against.* A directional error that
+**persists** across batches is tracked, because that is the tracker working. The
+guard is against a burst, not against the model's own gradients.
+
+---
+
+## CLOSED -- the `min(m,n)/2` rank cap
+
+Two hard ceilings exist and neither is the halving. The frame is `[d, r]` with
+orthonormal columns, so `r <= d` is linear algebra, not policy -- `r` can never
+exceed the tracked side's dimension, whichever side that is. And the gradient has
+rank at most `min(m, n)`, so directions past that can never be populated.
+
+The `/2` is a third thing: **the residual must keep energy, or there is no
+tangent to build.** Measured, the frame tolerates up to full rank minus one on
+LFM. On Anima, `min(m, n)` failed -- the residual came out empty and `eigh` had
+nothing to decompose. Half is the design point a subspace optimizer should sit
+at anyway, with margin rather than at the edge of a failure it has already hit
+once.
+
+*It is much more forgiving now than when that failure happened,* because the
+dead-plane masking fix removed the case where the tail was being decomposed on
+rounding error. That does not argue for raising the cap; it argues that the cap
+is no longer the only thing holding the run up.
+
+*The remaining consequence is a measurement one,* not a design one: `r_cal` for a
+calibration run is capped too, so a role whose calibrated rank approaches the cap
+is reporting a lower bound. `PLAN.md` P13 item 3.
 
 ---
 ---

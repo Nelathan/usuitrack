@@ -855,8 +855,8 @@ class UsuiTrack(Optimizer):
                 self._record_followed_step(selected_entries, frames, new_frames)
                 for entry, new_frame in zip(selected_entries, new_frames, strict=True):
                     basis = new_frame.mT if side is ProjectionSide.RIGHT else new_frame
-                    # Round-to-nearest, deliberately, and this is the one write
-                    # in the optimizer where that is the right call. Stochastic
+                    # Round-to-nearest, deliberately, and unlike the moment's
+                    # accumulate this one is measured. Stochastic
                     # rounding exists to stop a sub-ulp *update* vanishing, and
                     # the frame has no sub-ulp update to lose -- the geodesic
                     # moves it by a real angle every time. What bf16 storage

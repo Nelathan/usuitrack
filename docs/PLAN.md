@@ -70,10 +70,108 @@ constraint either -- it anneals for ~20 steps and then plateaus.
    Q(Q^T G^T M)`, horizontal by construction at one matmul of today's shape.
    Same cost class, zero new bytes. *(archive)*
 
-2. **Rotation-coupled `beta`.** Damp the moment by how far the frame just turned,
-   so memory shortens exactly when rotation makes it stale. Costs nothing new.
-   Blocked behind lead 1 -- the optimum moves with tracking speed, and a
-   persistence-weighted aim moves it again.
+2. **`beta` is capped by smearing, and the frame's in-span rotation is never
+   applied to the moment.**
+
+   *Why `0.9` and not higher.* The moment lives in frame coordinates, so as the
+   frame moves, older contributions describe directions the frame has partly
+   left. `beta` is bounded by frame motion, not by anything about the moment
+   itself. `0.9` ships because it is strong on target and stable enough; it can
+   rise only once the basis settles or the moment moves with it.
+
+   *The original construction was worse and is gone.* It projected the moment up
+   through the old basis and back down through the new one, discarding whatever
+   the new frame does not span -- under real frame motion that destroys
+   persistence outright. Identity transport in moving-frame coordinates replaced
+   it and loses nothing: a single Grassmann geodesic along a horizontal tangent
+   gives `Q^T Q+ = V cos(theta) V^T`, exactly symmetric, so the coordinates carry
+   over unchanged.
+
+   ***`transport_spin` is exactly the part identity transport gets wrong, and
+   nothing corrects it.*** Spin is the skew of `Q_old^T Q_now`: rotation of the
+   frame's columns inside the span they already had, which moves the subspace not
+   at all and scrambles the moment one-for-one. The optimizer measures it and
+   acts on it nowhere. Two sources, behaving differently:
+
+   - **genuine holonomy** -- fp32 reads `7e-8` at window 1 rising to `9e-6` per
+     update, coherent. The composition of symmetric steps need not be symmetric,
+     so this is a property of the path, not an error in any single step.
+   - **bf16 rounding on the basis write** -- `5.6e-4` at window 1 where exact
+     arithmetic gives zero, a pure random walk with no floor. Sixty times the
+     holonomy per update.
+
+   Orthogonalizing the tangent already removed the largest source. Raw `sigma`
+   let one plane own the turn and read **7x the spin of any other arm** -- the
+   frame twisting its own coordinates against the moment. (A 20x recollection is
+   in circulation; the factor in the record is 7x.)
+
+   *Two mechanisms, and they are alternatives rather than a sequence.* **Rotate
+   the moment** by the in-span rotation transport ignores -- exact, and it
+   removes the smear source instead of managing it. The catch is where the
+   `[r,r]` change of coordinates comes from: reading it from a previous-frame
+   snapshot costs `[d,r]` of persistent bytes per matrix on the hot path, which
+   the VRAM-first rule bans outside an opt-in instrument, so a shippable version
+   has to fall out of the geodesic's own construction. **Or couple `beta` to
+   frame motion** -- shorten memory exactly when rotation makes it stale, costing
+   nothing new. Which signal drives it is open: speed, curve, or spin, and spin
+   is the one with the mechanism behind it.
+
+   *The bar.* Lag, spin and curve are the right instruments for asking what the
+   frame is doing and **none of them ranks a design** -- the arm with the lowest
+   spin and lag measured all session had a mediocre target. Either mechanism
+   clears a loss bar or it does not ship.
+
+3. **Stochastic rounding on the projected moment.** A floor under `beta`, not the
+   ceiling -- lead 2 is the ceiling. Kept separate because it is a different
+   failure at a different place.
+
+   The moment is bf16 (`torch.zeros_like(projected_grad)`, and `projected_grad`
+   is `grad @ basis.mT` on a bf16 gradient), accumulated in place as
+   `M.mul_(beta).add_(g, alpha=1-beta)` at three sites. **The result that killed
+   SR on the basis does not transfer.** The frame has no sub-ulp update to lose;
+   an EMA is the opposite object. Its increment is `(1 - beta) * g` against an
+   accumulator of order `|g|`, and bf16's eight mantissa bits put the relative
+   ulp at ~`2^-8`: at `beta = 0.9` the increment is ~25 ulp and safe, at `0.99`
+   ~2.6 ulp on average, so every element contributing less than the mean rounds
+   away. Longer memory is where round-to-nearest starts eating the signal.
+
+   **And P7's bf16 verdict was conditioned on `beta = 0.9`.** Spin contributes
+   `0.0018` of smear against `0.0194` from legitimate motion, raising the total
+   from 1.936% to 1.948% -- immaterial, at that memory length. Lengthen the
+   memory and the spin random-walks over more updates, so the verdict does not
+   automatically survive the change it is being asked to permit. The dtype
+   question and the `beta` question are one question.
+
+   *The arm.* `copy_stochastic_` on the moment accumulate, then re-sweep `beta`
+   at `0.9 / 0.95 / 0.99`. SR moving nothing at `0.9` closes it. SR *changing the
+   shape of the beta curve* says the sweep that recorded `0.95` as dominated was
+   partly measuring its increment rounding away.
+
+4. **`eta` is unswept, and nothing bounds it any more.** The `0.02` cliff was
+   dead planes, not step size: retested at `0.05` -- 2.5x past the old
+   divergence point, at bs1, the batch where it used to break -- 300 steps ran
+   clean on a fixed seed (`eta5e-2-bs1-r128-300-s1`).
+
+   | read | `eta` 0.01 | `eta` 0.05 |
+   |---|---:|---:|
+   | target | 1.737169 | 1.739179 |
+   | source | 2.913690 | 2.915922 |
+   | `transport_speed` | 0.001555 | 0.005780 |
+   | `transport_curve` | 0.6981 | 0.5926 |
+   | `turn_fraction` | 0.2524 | 0.1828 |
+   | participation / concentration | 0.01228 / 0.8287 | 0.01236 / 0.8285 |
+
+   **The agreement clamp is a real governor.** 5x `eta` bought 3.7x speed,
+   because `turn_fraction` *fell* -- a larger proposed turn puts more matrices on
+   the ceiling, and the controller absorbed a quarter of the increase itself.
+   The aim panel is flat to four decimals, which is the control: `eta` moves the
+   response, not the aim.
+
+   **`0.05` is worse, so `0.01` still stands.** Target `+2.0e-3` against a `3e-4`
+   floor is a real regression; source `+2.2e-3` is marginal. But `eta` has
+   stopped being a constant with a stability wall under it and become an ordinary
+   tuning parameter that has never been swept downward or in the `0.01`-`0.03`
+   interior. Cheap: bs1, 300 steps, a minute an arm.
 
 ---
 
@@ -96,22 +194,19 @@ constraint either -- it anneals for ~20 steps and then plateaus.
    same run: `1e-5` was set against a global rank, and a leaner table takes a
    smaller aggregate step.
 
-3. **The `min(m,n)/2` cap is headroom for the Oja residual, and it also caps
-   calibration.** The two hard ceilings are `r <= d` (orthonormal columns) and
-   `r <= min(m,n)` (the gradient's own rank); the halving is neither, it exists
-   to leave unfitted directions for the tangent to rotate into. SubTrack uses
-   `min(m,n)` directly.
+3. **Calibration cannot probe past the cap, so the deep roles read as lower
+   bounds.** The cap itself is settled (`ARCHIVE.md`): `min(m,n)/2` exists so the
+   residual always carries energy for a tangent to be built from, `min(m,n)`
+   failed on Anima with an empty residual, and half is the honest design point
+   for a subspace optimizer.
 
-   The two open ends are the same end. On LFM's MLP the tracked side is 1024, so
-   the cap is 512 -- which is exactly the `r_cal` a calibration run there can
-   reach, and `w1`/`w3` still read high `frac` at 512, meaning their measured
-   ranks are a lower bound. So "can the cap move to `min(m,n)`" and "calibrate
-   deeper than 512" are one question: the cap is what stops the calibration going
-   deeper, and a deeper calibration is what would say whether the headroom is
-   still needed. Beyond that, usable rank scales with batch -- 101 live planes at
-   bs16 against 60 at bs1 at the same rank -- so a ceiling from shape alone cannot
-   be right across batch sizes, and `live_fraction` already measures what the
-   gradient supports.
+   What is left is a measurement limit, not a design question. On LFM's MLP the
+   tracked side is 1024, so `r_cal` cannot exceed 512 -- and `w1`/`w3` still read
+   high `frac` there, meaning their calibrated ranks are lower bounds and the
+   measured reallocation toward the MLP is understated. Nothing acts on this
+   until a model shows a role starving at its capped rank; recorded so a high
+   `frac` on a deep role is read as "clipped by the cap" rather than as a
+   settled number.
 
 **The standing caveat on all of it.** A geometry read can improve while loss
 degrades: the `side=right` arm captured 15% more gradient, spread the spectrum
@@ -147,10 +242,12 @@ and reads `1.651e-4` against a global r128's `1.437e-4`. Compare at matched
 comparison in the archive conflates subspace and step, and why none of them can
 be read as a clean rank result.
 
-*Stochastic rounding.* SR delivers updates that round-to-nearest used to
-discard, so the same nominal LR moves weights further -- more real progress per
-step is also more forgetting per step. If that is what the source degradation is,
-the fix is the LR and not a mechanism. Settled by running the sweep with
+*Stochastic rounding on the weight write* (`stochastic.py`, the bf16 parameter
+update -- nothing to do with the basis update, which was tested separately and is
+worse with it). Stochastic rounding delivers updates that round-to-nearest used
+to discard, so the same nominal LR moves weights further -- more real progress
+per step is also more forgetting per step. If that is what the source degradation
+is, the fix is the LR and not a mechanism. Settled by running the sweep with
 `stochastic_rounding` on and off, same rank table, batch and step count: same
 shape with a horizontal offset confirms it, different shapes mean something else.
 **Read at step 300** -- past 300 this lane measures forgetting, not learning.
@@ -169,11 +266,11 @@ for anything touching update magnitude.
 
 | constant | where | status |
 |---|---|---|
-| `MIN_GEODESIC_STEPSIZE = 0.01` (`eta`) | step-size floor | calibratable, not derivable; cliff measured at `0.02` |
+| `GEODESIC_STEPSIZE = 0.01` (`eta`) | geodesic step | calibratable, not derivable, and no longer cliff-bounded -- unswept, P2 lead 3 |
 | `AGREEMENT_PLANES` `k = 16` | agreement meter | a second gain on `eta`'s quantity; accepted, not resolved |
 | rank cap `min(m,n)/2` | `effective_rank` | P13 item 3; the fraction is still a choice |
 | `grad_clip_norm = 1.0` | raw clip | mandatory; the threshold itself untested across models |
-| `beta = 0.9`, `eps = 1e-8` | moment | `beta` measured by sweep; `eps` inherited |
+| `beta = 0.9`, `eps = 1e-8` | moment | the `beta` sweep carries a bf16 confound, P2 lead 3; `eps` inherited |
 | `AURORA_PP_ITERATIONS = 1`, `AURORA_PP_BETA = 0.5` | direction map | inherited from the method |
 | `1e-12` floors | numerical | never read against the precision they run in |
 
@@ -187,30 +284,6 @@ runs. It is now `sqrt(r * eps)` relative to `sigma_max`, derived from dtype and
 rank. A threshold that never fires is not thereby harmless, and "probably fine"
 in a census is a place to look first rather than a row to skip. The three
 surviving numerical constants have still never been audited that way.
-
----
-
-## P6. The frame has no guard against a directional burst
-
-`grad_clip_norm` cannot protect the basis tracker at all: the clip is a uniform
-rescale and the Oja tangent is exactly invariant to it. Its entire protective
-effect lands on the projected moment, which is linear in `G`. Keep it there -- an
-accumulator is hurt by a large contribution and a norm cap bounds exactly that.
-
-The frame is **immune to magnitude bursts by construction and fully exposed to
-directional ones.** A gradient of ordinary size pointing at a subspace one bad
-batch invented moves the frame as far as a good one. Nothing resists that. So the
-frame's guard, if it needs one, is a persistence test rather than a magnitude
-test -- which makes this **the same question as P2's aim**, to be resolved with
-it rather than separately.
-
-*The trap.* "Already tried" contains the rotation-angle clamp, which ate the
-large-`sigma` acquisition regime and made a good basis and a garbage basis read
-identically. Any per-step bound on frame motion is adjacent to it. The escape is
-that a persistence test bounds motion by *evidence* rather than by a constant --
-a different object, but that has to be argued, not assumed.
-
-*Also:* the clip fires on roughly 0.05% of tensors.
 
 ---
 
@@ -260,7 +333,9 @@ then look at the step path as a whole.
 - **Stochastic rounding on the basis write.** Worse by `sqrt(2)` at every window.
   SR exists to stop a sub-ulp *update* vanishing; the geodesic moves the frame by
   a real angle every time, so bf16 costs the frame variance rather than bias and
-  SR trades a half-ulp bound for a full-ulp uniform draw.
+  SR trades a half-ulp bound for a full-ulp uniform draw. **Scoped to the basis.**
+  The moment is an EMA with a shrinking increment and does have a sub-ulp update
+  to lose, so this result says nothing about it -- P2 lead 3.
 - **Turning only the top planes** (few-plane rotation). Worse than baseline on
   target, with lag and spin unmoved. The tail is not the problem; the leading
   plane's magnitude dominating the turn is -- orthogonalizing the tangent so every
