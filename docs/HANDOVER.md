@@ -1,68 +1,48 @@
 # Handover
 
-Written at the end of the rank-calibration session, 2026-09-03, on top of the
-cleaning session's handover. Read `PLAN.md` for the reasoning; this file is
-orientation, traps, and what to do next. It is self-contained: the durable traps
-and the reproduction recipe are folded in below, not linked.
+Written 2026-09-04. Orientation, traps, what to do next; `PLAN.md` carries the
+reasoning and is short now. Harness invocations live in `AGENTS.md`.
 
 ## Where things stand
 
-Branch `constant-basis-step`, last commit `bcceb63` "Add RankCalibrator, an
-opt-in instrument for per-role rank tables". Release repo (`~/code/usuitrack`)
-working tree clean, 38 tests green. The lab repo (`~/code/optimizers`) is
-**deliberately dirty** and stays that way -- it is just a runner. It carries the
-side heuristic, `--calibrate-rank`, and `LFM_RANK_TABLE` with the recalibrated
-values; `--projection-side-policy` was deleted there.
+Branch `constant-basis-step`, HEAD `222c9b0`. Working tree clean, 40 tests green.
+The lab repo (`~/code/optimizers`) is deliberately dirty and stays that way.
 
-**Carry-over #2 (the scale term) is CLOSED.** Three scale rules -- shipped
-`sqrt(max(1, rows/cols))`, `unit` (1.0), `fullrank` (`sqrt(min(m,n)/r)`) -- at
-LFM bs16, matched effective step. The shipped Muon aspect factor wins both heads.
-It is **not** double duty with the per-role rank table: the table sets which
-subspace and how many directions, the aspect factor sets how hard fan-out roles
-push. Orthogonal levers. The `[m,n]`-shape formula transfers to the subspace
-intact. Committed at `7718dd5`; `ARCHIVE.md`, "the Muon aspect factor is not
-double duty", has the numbers.
+**The docs were rebuilt.** `PLAN.md` is ~370 lines of live questions only. The
+former 2,600-line PLAN is frozen as the bottom half of `docs/ARCHIVE.md`, with
+closed questions distilled above it. `AGENTS.md` now carries the working
+contract, code style, and how to run both lanes. Nothing else should grow into
+a diary again.
 
-**`RankCalibrator` is built and committed** (`bcceb63`, `usuitrack/diagnostics.py`).
-Opt-in via `optimizer.rank_calibrator`, off costs one attribute read on the step
-path. `_anneal_tangent` feeds it the `tangent_live_fraction` numerator per matrix
-per basis update, tagged with the group's `calibration_label`. `roll()` closes a
-window (per label: mean and median over its matrices, one host transfer);
-`report()` gives `mean / median / std / frac` over the windows after the first.
-**Measurements only** -- turning the stats into a table (mean or median per role,
-rounding, clamp to `min(m,n)//2`) is a hand step, out of the tool. An earlier
-`live_n / 0.95` rule padded on top of the slack the count already carries and
-overprovisioned.
+**Closed since the last handover.** The `eta` cliff was dead planes, not step
+size -- `0.05` runs clean at bs1, 2.5x past the old `0.02` divergence point, so
+`eta` is an ordinary unswept knob rather than a constant with a wall under it
+(`0.05` is worse on target, so `0.01` stands). The `min(m,n)/2` cap is settled:
+`r <= d` is linear algebra, the halving keeps energy in the residual so a tangent
+exists, and `min(m,n)` failed on Anima with an empty residual. P6 closed -- the
+full-spectrum rotation with dead planes masked took magnitude out of the turn,
+which is what a directional burst used to exploit.
 
-**Side resolution is now a heuristic, not a policy** (lab
-`build_usuitrack_param_groups`). Order: an override entry
-(`{name_substring: "in"|"out"}`); else the side whose dimension is `d_model`;
-else square/ambiguous -> `out` in the name means the output side, else input.
-Back-checked against LFM2.5-350M and Anima (Cosmos DiT): matches the hand-tuned
-maps everywhere except Anima cross-attention `to_k`/`to_v` `(2048,1024)`, which
-get an override to the input side. LFM needs none.
+**Built this session: the moment now follows the frame's in-span rotation.**
+Identity transport is exact for the geodesic and not for the frame that gets
+*stored* -- bf16 rounding rotates the columns inside their own span, which
+scrambles the moment one-for-one. The overlap is read from the stored frames,
+its orthogonal polar factor applied to the moment, and the moment committed once
+per step with stochastic rounding instead of twice with round-to-nearest.
+Newton-Schulz gets an fp32 moment as a side effect. First measurement is a hint
+at ~2x the noise floors on both heads, confounding three changes, and it is not
+expected to pay at `beta = 0.9` anyway. See `PLAN.md` P2 lead 2.
 
-**`LFM_RANK_TABLE` recalibrated and validated.** From a 500-step `r_cal` 512
-calibration (`std` 2-9 planes across 24 settled windows), hand-picked as median
-with a lean to mean for the right-skewed roles (`w1`, `w3`, `w2`): `w1` 210,
-`w3` 195, `conv.in` 185, `w2` 110, `q` 88, `v` 76, `k` 60, `out` 42,
-`conv.out` 20 -- 11,886 planes. 1k run: target `1.66792` vs the prior
-loss-validated table's `1.66730` (floor `3e-4`), source marginally better,
-`tangent_live_fraction` `0.946`, 1.2% leaner. The calibrator reproduces a
-hand-tuned, loss-validated table from scratch.
+## What to do next
 
-## Open work
-
-`PLAN.md` was rebuilt this session and is now 300 lines of live questions only;
-the former 2,600-line file is the bottom half of `docs/ARCHIVE.md`, frozen as an
-investigation log, with the closures distilled above it. Read PLAN first -- it is
-short now.
-
-Next up is `PLAN.md` P13 items 1 and 2: port `build_usuitrack_param_groups` (side
-heuristic, `side_overrides`, `calibration_label` stamping) and the
-`RankCalibrator` drain into ai-toolkit's `toolkit/optimizers/usuitrack.py`, whose
-`_param_side` is today's hand map, then run an Anima **bs4** calibration at a
-raised LR. After that: the LR re-sweep (P11) and the sync/performance pass (P12).
+1. **The `beta` sweep** -- `0.9 / 0.95 / 0.99`, with and without the rotation.
+   This is the actual test of what was just built: the claim is that it raises
+   the ceiling on memory, not that it helps at today's setting.
+2. **Re-check the rotation under the per-role table.** The measurement ran at
+   global `r128`; `r` varies per role under the table and so does the rotation.
+3. **Anima**: port `build_usuitrack_param_groups` and the `RankCalibrator` drain
+   into ai-toolkit, then a bs4 calibration at a raised LR. `PLAN.md` P13.
+4. Then the LR re-sweep (P11) and the sync/performance pass (P12).
 
 ## Traps
 
