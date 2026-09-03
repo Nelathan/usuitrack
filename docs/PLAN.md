@@ -2012,20 +2012,69 @@ Written down so none of it is lost. Ordered by what would be cheapest to settle.
    rank 256 on bs16; the MLP roles cap at 512 on the tracked side. The current
    table under-provisions them, so the measured reallocation is a lower bound.
 
-7. **Per-role rank needs a home, and Anima needs it.** `rank` is already a
-   per-param-group key, so the optimizer already supports the table -- what does
-   not exist is the part that produces and consumes one:
+7. **Per-role rank has an instrument now; Anima still needs the wiring.**
+   `rank` is already a per-param-group key. What was missing -- side resolution,
+   a calibration instrument, a validated table -- is built.
 
-   * group construction by role, today a monkeypatch over
-     `build_usuitrack_param_groups` in the lab harness, and absent entirely from
-     ai-toolkit, which is what Anima runs on
-   * a per-matrix liveness report, today a device-syncing trace hook that was
-     removed before commit; the production form accumulates per-matrix sums on
-     device and syncs once per report interval
-   * the calibration procedure, validity rule and table format, which live only
-     in this document
+   **Side resolution is a heuristic, not a policy.** The `residual-facing` /
+   `auto` / `right` policy switch is gone. `build_usuitrack_param_groups`
+   resolves every weight's tracked side from its shape and name:
 
-   This is the blocking work for trying the table on Anima.
+   1. an override entry (`{name_substring: "in" | "out"}`) -- for weights whose
+      residual side the rules miss, e.g. a cross-attention K/V that reads a
+      context stream rather than the backbone
+   2. the side whose dimension equals `d_model` (the width the most 2D weights
+      share)
+   3. square or ambiguous: `out` in the name means the output side, else the
+      input side
+
+   Back-checked against LFM2.5-350M and Anima (Cosmos DiT): it reproduces the
+   hand-tuned maps on every role except Anima's cross-attention `to_k` / `to_v`
+   (shape `(2048, 1024)`), which the rules put on the 2048 side and the old map
+   put on the 1024 text side. Those get an override (`{"attn2.to_k": "in",
+   "attn2.to_v": "in"}`); whether the heuristic's placement is actually better
+   there is a question for the Anima run, not a blind change. LFM needs none.
+
+   **The calibration instrument.** `RankCalibrator` in
+   `usuitrack/diagnostics.py`, off unless `optimizer.rank_calibrator` is set,
+   independent of the diagnostics tier. `_anneal_tangent` feeds it one
+   live-plane count per matrix per basis update -- planes clearing the Gram
+   noise floor -- tagged with the group's `calibration_label` and summed on
+   device. `roll()` closes a window: one host transfer, reducing it per label to
+   the **mean and median** over that label's matrices. `report()` summarises the
+   windows after the first (the first is the acquisition transient) as
+   `mean / median / std / frac`. Measurements only.
+
+   **Turning the stats into a table is a hand step, deliberately outside the
+   tool.** `live_n` per matrix is how many directions the gradient drives; while
+   the basis has headroom it is ~invariant to the basis rank, so a run at an
+   oversized `r_cal` measures what a right-sized run would see, and the rank is
+   that count *directly* -- a basis sized to it runs at `live_frac` ~0.9-0.95,
+   the operating point (dividing by 0.95, as the first table did, pads on top of
+   the slack the count already carries and overshoots into overprovisioned). The
+   mean/median choice is per role: they agree for homogeneous roles, and the
+   mean runs well above the median for the right-skewed ones (`w1`, `w3`, `w2` on
+   LFM) where a few layers carry real high rank -- take the median as the base
+   and lean toward the mean there. `frac = mean_live_n / r_cal` is a headroom
+   read, not a gate: pick `r_cal` for what the hardware allows and roll with it;
+   a high `frac` means the count is a lower bound and the role is mildly
+   underprovisioned, which is the safe direction -- overprovisioning is what
+   destabilizes.
+
+   **Validated on LFM.** Recalibrated at `r_cal` 512, 500 steps, bs16, seed 1;
+   `std` across the 24 settled windows was 2-9 planes. The hand table off those
+   stats -- `w1` 210, `w3` 195, `conv.in` 185, `w2` 110, `q` 88, `v` 76, `k` 60,
+   `out` 42, `conv.out` 20, 11,886 planes -- came out within noise of the prior
+   loss-validated table (12,032 planes, carry-over #5) for the homogeneous
+   roles, lower for `w2` / `q` / `conv.out` where the old `/0.95` had inflated
+   it. The 1k run: target `1.66792` against the old table's `1.66730` (floor
+   `3e-4`), source marginally better, `tangent_live_fraction` `0.946`, at 1.2%
+   less budget. So the calibrator reproduces a hand-tuned, loss-validated table
+   from scratch and trims it slightly.
+
+   Still open: `build_usuitrack_param_groups` and `RankCalibrator` wiring in
+   ai-toolkit for Anima, then an Anima bs4 calibration -- its training batch,
+   since higher batch wants higher rank in ways calibration has to measure.
 
 8. **`min(m, n) / 2` as the rank cap is geometry only, and the `/2` is the
    fitted part.** Two hard ceilings exist and neither is `/2`: the frame is

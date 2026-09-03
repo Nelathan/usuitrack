@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from .diagnostics import DiagnosticsAccumulator
+from .diagnostics import DiagnosticsAccumulator, RankCalibrator
 from .projector import ProjectionSide, SubspaceProjector
 from .stochastic import copy_stochastic_, wants_stochastic_rounding
 AURORA_PP_ITERATIONS = 1
@@ -163,6 +163,11 @@ class UsuiTrack(Optimizer):
         self._lag_path: dict[Tensor, Tensor] = {}
         self._lag_sampled: set[Tensor] | None = None
         self._diagnostics: DiagnosticsAccumulator | None = None
+        # Off by default and independent of the diagnostics tier: set it to a
+        # `RankCalibrator` before a run at an oversized rank to collect the
+        # live-plane counts a rank table is then sized from by hand. Groups need
+        # a `calibration_label` key for their counts to be bucketed.
+        self.rank_calibrator: RankCalibrator | None = None
         self._step_update_norm_sq: Tensor | None = None
         self._matrix_grad_hook_handles = []
         self._matrix_param_groups: dict[Tensor, dict] = {}
@@ -996,6 +1001,12 @@ class UsuiTrack(Optimizer):
         energy = spectrum.sum(dim=-1).clamp_min(1e-12)
         attainable = energy.square() / spectrum.square().sum(dim=-1).clamp_min(1e-12) / keep
         self._agreement_pending.append(attainable)
+
+        if self.rank_calibrator is not None:
+            group = self._matrix_param_groups.get(entries[0].param)
+            label = group.get("calibration_label") if group is not None else None
+            if label is not None:
+                self.rank_calibrator.observe(label, rank, [entry.param for entry in entries], live.sum(dim=-1))
 
         diagnostics = self._diagnostics_sink()
         if diagnostics is not None:

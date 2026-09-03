@@ -261,10 +261,15 @@ numerator does; capping the angle fails at the other end, costing acquisition.
 Both were tried and reverted, and neither is what the agreement controller does:
 it reads a different axis entirely.
 
-Equal-rank tangent-Gram eigendecompositions are batched. With
-`S=Q_raw^T Q_raw`, one near-identity step using the converged steady-state
-coefficient triple from Amsel, Persson, Musco, and Gower, ["The Polar
-Express"](https://arxiv.org/abs/2505.16932) (2025), retracts before storage:
+Tangent-Gram eigendecompositions are batched across matrices that share a
+rank and shape. A per-role rank table (see "Rank calibration") splits that
+batch by role; `release_matrix_grads` consumes each gradient as it arrives
+rather than grouped, so it forfeits the batch entirely. `eigh` on a small
+`[r,r]` matrix is launch-overhead-bound, so this matters more here than for
+the polar map's matmuls. With `S=Q_raw^T Q_raw`, one near-identity step using
+the converged steady-state coefficient triple from Amsel, Persson, Musco, and
+Gower, ["The Polar Express"](https://arxiv.org/abs/2505.16932) (2025),
+retracts before storage:
 
 $$Q_+=Q_{raw}(aI+bS+cS^2).$$
 
@@ -545,6 +550,32 @@ The tangent Gram is decomposed bare. There is no jitter and no retry: a failing
 decomposition is worse than a stopped run. The initial fit in `_side_gram_eigh`
 keeps its try-then-jitter fallback -- different matrix, once per parameter rather
 than once per step.
+
+
+## Rank calibration
+
+`RankCalibrator` is an opt-in instrument for choosing a per-role rank table. It
+follows the diagnostics discipline: off unless `optimizer.rank_calibrator` is
+set, independent of the diagnostics tier, on-device accumulation with a single
+host read per window.
+
+Run the model at a rank deliberately above what any matrix needs.
+`_anneal_tangent` feeds the calibrator one live-plane count per matrix per basis
+update -- the same `tangent_live_fraction` numerator, planes clearing the Gram
+noise floor -- tagged with the param group's `calibration_label`. `roll()` closes
+a window: per label, the mean and median of that count over the label's matrices,
+one host transfer. `report()` returns, per label over the windows after the first
+(the first is the acquisition transient), `mean / median / std / frac`.
+
+`live_n` is how many directions the gradient drives. While the basis has headroom
+it barely moves with the basis rank, so this measures what a right-sized run
+would resolve. The table is that count directly -- a basis sized to it runs at
+`tangent_live_fraction` ~0.9-0.95 -- but choosing it (mean or median per role,
+rounding, clamping to `min(m,n)//2`) is a hand step, kept out of the tool.
+`frac = mean / rank` is a headroom read: high `frac` means the count is a lower
+bound and the role will be mildly under-provisioned, which is the safe side.
+
+A per-role table costs the equal-rank `eigh` batching described under step 4.
 
 
 ## Decisions and reasons

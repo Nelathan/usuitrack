@@ -41,6 +41,71 @@ def optimizer_state_bytes(optimizer: torch.optim.Optimizer) -> int:
     return optimizer_state_bytes_by_category(optimizer)["total"]
 
 
+class RankCalibrator:
+    """Live-plane statistics per label from a run at a deliberately large rank.
+
+    Set ``optimizer.rank_calibrator`` before a run whose configured rank is well
+    above what any matrix needs; ``_anneal_tangent`` then feeds one live count --
+    planes clearing the Gram noise floor -- per matrix per basis update, tagged
+    with that param group's ``label``. ``roll`` closes a window: one host
+    transfer, reducing it per label to the mean and median over that label's
+    matrices. ``report`` summarises the windows after the first (the first is the
+    acquisition transient). It reports measurements only; picking a rank from
+    them -- mean or median, rounding, bucket clamp -- is a hand step, kept
+    outside this tool. ``frac`` (mean live count over the rank the run used) is a
+    headroom read.
+    """
+
+    def __init__(self) -> None:
+        self._sum: defaultdict[str, dict[int, Tensor]] = defaultdict(dict)
+        self._count: defaultdict[str, dict[int, int]] = defaultdict(dict)
+        self._rank: dict[str, int] = {}
+        self._win_mean: defaultdict[str, list[float]] = defaultdict(list)
+        self._win_median: defaultdict[str, list[float]] = defaultdict(list)
+
+    @torch.no_grad()
+    def observe(self, label: str, rank: int, params: list, live_counts: Tensor) -> None:
+        """One live count per param, all sharing ``label``; ``rank`` is the basis rank."""
+
+        self._rank[label] = min(self._rank.get(label, rank), rank)
+        counts = live_counts.detach().float().reshape(-1)
+        for index, param in enumerate(params):
+            key = id(param)
+            current = self._sum[label].get(key)
+            sample = counts[index]
+            self._sum[label][key] = sample if current is None else current + sample.to(current.device)
+            self._count[label][key] = self._count[label].get(key, 0) + 1
+
+    @torch.no_grad()
+    def roll(self) -> None:
+        if not self._sum:
+            return
+        for label, per_param in self._sum.items():
+            keys = sorted(per_param)
+            per_matrix = torch.stack(
+                [per_param[key] / max(1, self._count[label][key]) for key in keys]
+            ).cpu()
+            self._win_mean[label].append(float(per_matrix.mean()))
+            self._win_median[label].append(float(per_matrix.median()))
+        self._sum = defaultdict(dict)
+        self._count = defaultdict(dict)
+
+    def report(self) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for label in self._win_median:
+            means = self._win_mean[label][1:] or self._win_mean[label]
+            medians = self._win_median[label][1:] or self._win_median[label]
+            mean = float(torch.tensor(means).mean())
+            out[label] = {
+                "windows": len(means),
+                "mean": mean,
+                "median": float(torch.tensor(medians).median()),
+                "std": float(torch.tensor(means).std(unbiased=False)) if len(means) > 1 else 0.0,
+                "frac": mean / self._rank[label],
+            }
+        return out
+
+
 class DiagnosticsAccumulator:
     """Collects telemetry on-device during the step, reduces it once at read.
 
