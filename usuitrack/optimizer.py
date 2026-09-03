@@ -123,8 +123,8 @@ class UsuiTrack(Optimizer):
         )
         super().__init__(params, defaults)
         # `torch.compile` wraps the same function the eager path calls, never a
-        # second copy of the maths -- see PLAN.md, "No parallel compiled and
-        # uncompiled implementations on main".
+        # second copy of the maths -- see AGENTS.md, "No parallel compiled and
+        # uncompiled implementations of the same maths".
         self._compiled_orthogonalize_update = (
             torch.compile(UsuiTrack._orthogonalize_update) if compile_tensor_kernels else None
         )
@@ -1271,8 +1271,10 @@ class UsuiTrack(Optimizer):
         In Muon, which orthogonalizes the full `[m, n]` update, this makes
         `||U||_F == sqrt(m)` whichever way the matrix is stored. Here it
         multiplies the projected moment's polar factor instead, `[d, r]` rather
-        than `[m, n]`; see PLAN.md carry-over #2 for what that changes about the
-        guarantee.
+        than `[m, n]`, so the guarantee becomes `||U||_F == sqrt(m) *
+        sqrt(r/min(m,n))`. Measured against a unit scale and a rank-compensating
+        one at matched effective step, this rule still wins both eval heads --
+        see ARCHIVE.md, "the Muon aspect factor is not double duty".
         """
 
         rows = original_shape[0]

@@ -20,7 +20,8 @@ LFM bs16, matched effective step. The shipped Muon aspect factor wins both heads
 It is **not** double duty with the per-role rank table: the table sets which
 subspace and how many directions, the aspect factor sets how hard fan-out roles
 push. Orthogonal levers. The `[m,n]`-shape formula transfers to the subspace
-intact. Committed at `7718dd5`; PLAN carry-over #2 has the numbers.
+intact. Committed at `7718dd5`; `ARCHIVE.md`, "the Muon aspect factor is not
+double duty", has the numbers.
 
 **`RankCalibrator` is built and committed** (`bcceb63`, `usuitrack/diagnostics.py`).
 Opt-in via `optimizer.rank_calibrator`, off costs one attribute read on the step
@@ -52,22 +53,16 @@ hand-tuned, loss-validated table from scratch.
 
 ## Open work
 
-`PLAN.md`, "Carry-over: open tasks from the rank session". Where things sit:
+`PLAN.md` was rebuilt this session and is now 300 lines of live questions only;
+the former 2,600-line file is the bottom half of `docs/ARCHIVE.md`, frozen as an
+investigation log, with the closures distilled above it. Read PLAN first -- it is
+short now.
 
-1. CLOSED (scale dispatch collapse, cleaning session).
-2. **CLOSED this session** -- see above.
-3. CLOSED (`side=right` evidence).
-4. **Anima with a calibrated rank table.** Still the second operating point;
-   unblocked once #7's wiring lands.
-7. **Instrument built; wiring left.** `RankCalibrator` and the side heuristic
-   exist. Remaining: port `build_usuitrack_param_groups` (heuristic + optional
-   `side_overrides` + `calibration_label` stamping) and the `RankCalibrator`
-   drain into ai-toolkit's `toolkit/optimizers/usuitrack.py`, whose `_param_side`
-   is today's hand map. Then run an Anima **bs4** calibration -- its training
-   batch, since higher batch wants higher rank in ways calibration must measure.
-8. **`min(m,n)/2` rank cap.** Unchanged: the `/2` is the fitted part, whether a
-   calibrated table removes the need for that headroom is untested.
-10. Unchanged from last handover (rank cap to `min(m,n)`, Aurora/SubTrack notes).
+Next up is `PLAN.md` P13 items 1 and 2: port `build_usuitrack_param_groups` (side
+heuristic, `side_overrides`, `calibration_label` stamping) and the
+`RankCalibrator` drain into ai-toolkit's `toolkit/optimizers/usuitrack.py`, whose
+`_param_side` is today's hand map, then run an Anima **bs4** calibration at a
+raised LR. After that: the LR re-sweep (P11) and the sync/performance pass (P12).
 
 ## Traps
 
@@ -142,16 +137,3 @@ uv run python experiments/llm_synth_smoke.py \
 `~/code/ai-toolkit/config/train_full_fine_tune_anima_usuitrack.yaml`; it runs on
 a 12GB card at 11/12GB, so batch cannot rise above 4 and `release_matrix_grads`
 is what makes it fit -- gradient accumulation is incompatible with it.
-
-## Method
-
-The user steers; bring evidence, name the uncertainty, propose the cut, then let
-the direction be chosen. State predictions before running. The user's
-contributions are load-bearing by default, not noteworthy exceptions.
-
-Two lessons from this session, both about pace. When a design question is open,
-**discuss it -- do not present a finished plan with the question bolted on the
-end, and do not go do research or write code while it is open.** That reads as
-steamrolling. And when the user gives feedback that simplifies a design, **stop
-and let them read the change before building on it**; several corrections landed
-faster than they could be reviewed because the next run was already launched.

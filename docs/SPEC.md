@@ -377,8 +377,13 @@ the parameter's own two dimensions. Here the orthogonalized object is
 $$\|U_t\|_F=\sqrt{m}\,\sqrt{r/\min(m,n)}.$$
 
 The invariant holds at `r = min(m,n)` and is attenuated by `sqrt(r/min(m,n))`
-below it -- a factor that varies with rank (intended: see PLAN.md, "Rank is
-also a step-size knob") and with `min(m,n)` (open: see PLAN.md carry-over #2).
+below it -- a factor that varies with rank and with `min(m,n)`. Both are
+deliberate: the step scales with the number of directions the gradient
+demonstrably supports. Measured against a unit scale and a rank-compensating one
+at matched effective step, this rule wins both eval heads; see `ARCHIVE.md`,
+"the Muon aspect factor is not double duty". The rank coupling does mean a
+global rank sweep moves the step as well as the subspace -- `PLAN.md` P13
+item 3.
 
 The selected contract has zero weight decay. Apply the learning rate:
 
