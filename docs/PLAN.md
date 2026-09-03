@@ -1902,14 +1902,48 @@ Written down so none of it is lost. Ordered by what would be cheapest to settle.
    differently at the ulp level, the same as any other batching already in
    this file.
 
-2. **Test the scale term for real.** Now cheap: patch `_muon_aspect_scale`, one
-   function, both paths. The open question is whether the aspect factor starves
-   `w2`, which reads the lowest liveness of the three MLP roles in every run
-   measured while receiving half `w1`'s step. Note what the arms should be --
-   dropping the factor leaves `||U||_F = sqrt(r)` for every matrix (rank
-   coupling only, no shape coupling), while restoring the full-rank invariant
-   with `sqrt(min(m,n)/r)` would also delete the rank coupling, which is the
-   part we want to keep.
+2. **CLOSED -- the Muon aspect factor is not double duty with the per-role
+   rank table; keep it.** Three scale rules, LFM bs16, 300 steps, seed 1,
+   beta 0.9, per-role table, one env-var scaffold in `_apply_matrix_update_buckets`
+   (reverted after):
+
+   * `muon` -- shipped `sqrt(max(1, rows/cols))`, `||U||_F = sqrt(r)*sqrt(m/n)`
+   * `unit` -- `1.0`, `||U||_F = sqrt(r)`, rank coupling only
+   * `fullrank` -- `sqrt(min(m,n)/r)`, `||U||_F = sqrt(min(m,n))`, no coupling
+
+   First pass ran all three at LR `2e-4` and only measured the effective-step
+   curve: `update_to_param_ratio` came out `0.93 / 1.65 / 2.51e-4`, and the
+   losses tracked that axis (P11) rather than the scale shape. `unit` was
+   step-starved, `fullrank` too hot. Re-ran `unit` at `3.5e-4` and `fullrank`
+   at `1.3e-4` to put all three at `update_to_param_ratio` ~`1.64e-4`:
+
+   | scale @ matched step | target | source | retention delta |
+   |---|---:|---:|---:|
+   | **muon** | **1.7062** | **3.0424** | +0.125 |
+   | unit | 1.7095 | 3.0509 | +0.134 |
+   | fullrank | 1.7118 | 3.0504 | +0.133 |
+
+   `muon` wins **both heads** at matched aggregate step -- target by `3.3e-3`
+   and `5.6e-3` (floor `3e-4`), source by `8.5e-3` (floor `2e-3`). The fan-out
+   boost is doing real per-role work: neither `sqrt(r)` alone nor a flat
+   `sqrt(min(m,n))` reproduces it. The rank table sets which subspace and how
+   many directions (and it is the table, not the scale, that moves
+   `live_fraction` / `participation` -- the geometry panel is flat across all
+   five runs, so the scale rule is a pure step-size *distribution* lever). The
+   aspect factor sets how hard the fan-out roles push. Orthogonal levers; the
+   "double counting" worry is disproved.
+
+   The `[m,n]`-shape formula transfers to the subspace intact -- the final
+   update is still an `R^n -> R^m` map and the fan-out logic still applies.
+   *Caveat:* in LFM2's MLP, role and shape are collinear (`w1`/`w3` are
+   fan-out *and* up/gate; `w2` is fan-in *and* down), so this cannot separate
+   "boost fan-out shapes" from "boost up/gate roles". A model whose down-proj
+   is not a clean transpose could pull them apart. Computing the boost from
+   `d/r` (the subspace actually orthogonalized) rather than `m/n` was not
+   tested; `muon`'s win means there is no pull to.
+
+   `--per-role-rank` and `RANK_TABLE` now live in the lab harness
+   (`build_usuitrack_param_groups`), which is the config item 7 needs anyway.
 
 3. **CLOSED -- the `side=right` arm has the best geometry in the session and
    the worst loss.** LFM bs16, r128, 1k, seed 1, against the residual-facing
