@@ -105,31 +105,69 @@ constraint either -- it anneals for ~20 steps and then plateaus.
    frame twisting its own coordinates against the moment. (A 20x recollection is
    in circulation; the factor in the record is 7x.)
 
-   *Two mechanisms, and they are alternatives rather than a sequence.* **Rotate
-   the moment** by the in-span rotation transport ignores -- exact, and it
-   removes the smear source instead of managing it. The catch is where the
-   `[r,r]` change of coordinates comes from: reading it from a previous-frame
-   snapshot costs `[d,r]` of persistent bytes per matrix on the hot path, which
-   the VRAM-first rule bans outside an opt-in instrument, so a shippable version
-   has to fall out of the geodesic's own construction. **Or couple `beta` to
-   frame motion** -- shorten memory exactly when rotation makes it stale, costing
-   nothing new. Which signal drives it is open: speed, curve, or spin, and spin
-   is the one with the mechanism behind it.
+   ***The moment rotation is built*** (`SPEC.md`, step 6). The overlap is read
+   from the frames as stored, its orthogonal polar factor applied to the moment,
+   and the whole step now rounds the moment once instead of twice -- the moment
+   stays fp32 from its accumulate through the polar map to a single stochastic
+   commit after the rotation. An exact step returns the identity, pinned by
+   `test_frame_rotation_is_the_identity_when_transport_is_exact`.
+
+   *A frame-side version was considered and is dead.* Choosing the aligned
+   representative of the new frame is a no-op in exact arithmetic, which reads
+   as a safety property and is actually the disproof: the fp32 geodesic overlap
+   is already symmetric to `7e-8`, so there is nothing there to correct, and the
+   `5.6e-4` arrives at the bf16 *write*, downstream of any alignment. Writing
+   again to fix it rounds again.
+
+   **First measurement, LFM bs16, r128 global, 300 steps, seed 1, beta 0.9,
+   against a matched control on the previous commit:**
+
+   | read | control | rotation | delta |
+   |---|---:|---:|---|
+   | target | 1.707964 | 1.707229 | `-7.4e-4` (floor `3e-4`) |
+   | source | 3.043938 | 3.040511 | `-3.4e-3` (floor `2e-3`) |
+   | `grad_moment_cosine` | -0.018203 | -0.017809 | +2% relative |
+   | `transport_spin` | 0.000976 | 0.000973 | flat |
+   | `transport_lag` / `curve` | 0.008046 / 0.6759 | 0.008040 / 0.6758 | flat |
+   | `tangent_live_fraction` | 0.7874 | 0.7858 | flat |
+   | peak reserved | 2.78 GiB | 2.94 GiB | **+5.8%** |
+
+   **The frame panel is flat and that is the control**, not a disappointment:
+   the correction changes the moment's coordinates and touches no frame, so
+   `transport_spin` was never the readout. `grad_moment_cosine` is, and it moved
+   the right way by 2% relative.
+
+   **Both heads improve at roughly twice their noise floors, which is a hint and
+   not a result.** One seed, and the same-config spread at 300 steps is `2.9e-4`
+   on target. It also **confounds three changes in one arm** -- the rotation,
+   stochastic rounding on the moment, and an fp32 moment reaching Newton-Schulz
+   where it used to get bf16. Nothing here attributes the delta to any of them.
+
+   *Expected, and worth stating.* At `beta = 0.9` the memory is ten steps and the
+   accumulated spin is ~`1.8e-3` rad, which P7 already computed as immaterial.
+   The mechanism is not supposed to pay here. **The test is the `beta` sweep** --
+   `0.9 / 0.95 / 0.99` with and without the correction -- because the claim is
+   that it raises the ceiling, not that it helps at today's setting.
+
+   *Still open on the same axis:* **couple `beta` to frame motion**, shortening
+   memory when rotation makes the moment stale, costing nothing new. Which
+   signal drives it -- speed, curve, or spin -- is untested.
+
+   *The run was global `r128`, not the per-role table.* Both arms match so the
+   comparison holds, but `r` varies per role under the table and so does the
+   rotation, so a table re-check is owed before this is called settled.
 
    *The bar.* Lag, spin and curve are the right instruments for asking what the
    frame is doing and **none of them ranks a design** -- the arm with the lowest
    spin and lag measured all session had a mediocre target. Either mechanism
    clears a loss bar or it does not ship.
 
-3. **Stochastic rounding on the projected moment.** A floor under `beta`, not the
-   ceiling -- lead 2 is the ceiling. Kept separate because it is a different
-   failure at a different place.
+3. **Stochastic rounding on the projected moment** -- shipped with lead 2, and
+   not yet separated from it. A floor under `beta`, where lead 2 is the ceiling.
 
-   The moment is bf16 (`torch.zeros_like(projected_grad)`, and `projected_grad`
-   is `grad @ basis.mT` on a bf16 gradient), accumulated in place as
-   `M.mul_(beta).add_(g, alpha=1-beta)` at three sites. **The result that killed
-   SR on the basis does not transfer.** The frame has no sub-ulp update to lose;
-   an EMA is the opposite object. Its increment is `(1 - beta) * g` against an
+   The moment is bf16 in storage. **The result that killed SR on the basis does
+   not transfer.** The frame has no sub-ulp update to lose; an EMA is the
+   opposite object. Its increment is `(1 - beta) * g` against an
    accumulator of order `|g|`, and bf16's eight mantissa bits put the relative
    ulp at ~`2^-8`: at `beta = 0.9` the increment is ~25 ulp and safe, at `0.99`
    ~2.6 ulp on average, so every element contributing less than the mean rounds

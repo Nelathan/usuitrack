@@ -106,13 +106,18 @@ raw gradient G
   -> Rayleigh-normalized one-state Oja tangent
   -> projected EMA M
   -> release full gradient; retain rank-sized pending work
-  -> exact Oja frame move with identity moment coordinates
   -> Aurora leverage balance (normalization)
   -> Newton-Schulz polar map (orthogonalization)
   -> Muon aspect scale, read from the parameter shape
-  -> lift through the moved frame Q+
+  -> lift through the held frame Q
   -> parameter update
+  -> exact Oja frame move
+  -> rotate M by the stored-frame overlap; commit it once
 ```
+
+The moment is the last thing written, and everything above it reads the held
+frame `Q`. The lift is through `Q`, not `Q_+`: the frame moves after the
+parameter update, so no step lifts through a frame it did not measure in.
 
 ### 1. Sanitize and raw clip
 
@@ -306,6 +311,30 @@ This is parallel transport along the selected lifted Oja path. Multiplication by
 old/new frame overlap would answer a different question: represent the surviving
 projection of a fixed old ambient vector. It contracts each rotated plane by a
 principal-angle cosine before the balanced polar map.
+
+`M_+ = M` holds for the geodesic, which gives `Q^T Q_+ = V\cos\theta V^\top`,
+exactly symmetric. It does not hold for the frame that is *stored*: rounding the
+geodesic's result into bf16 rotates the frame's columns inside the span they
+already had, and that rotation moves the subspace not at all while scrambling the
+moment one-for-one. So the overlap is read back from the frames **as stored**,
+its orthogonal polar factor `R_s` taken, and the moment corrected by it:
+
+$$M_+=MR_s\quad\text{(right)},\qquad M_+=R_s^\top M\quad\text{(left)}.$$
+
+Only the rotation is applied, never the full overlap -- the symmetric part is the
+principal-angle contraction above, which parallel transport is right to discard.
+An exact step returns `R_s = I`, so the correction fires only on the deviation
+between the frame computed and the frame kept.
+
+The correction is why the moment is committed last. This step's projected
+gradient is measured in `Q_t`, blends into a moment in `Q_t`, and the parameter
+update lifts through `Q_t`; the moment moves to `Q_{t+1}` only once nothing is
+left to read in the old coordinates. Rotating before the blend would add a `Q_t`
+gradient onto a `Q_{t+1}` moment. Because the rotation must come last, the moment
+stays fp32 from its accumulation through the polar map to that commit, and the
+step rounds it exactly once -- stochastically, since a rotation is a
+rearrangement whose systematic rounding would accumulate against the coordinates
+it exists to preserve.
 
 ### 7. Balanced polar direction
 
@@ -623,4 +652,4 @@ These choices define the current design; they are redesignable.
 | Oja tangent is rank-deficient | zero singular planes remain fixed |
 | full rank | projection/lift loses no component; balancing can still alter direction; the aspect scale recovers `||U||_F = sqrt(m)` |
 | gradient rescaling below raw clipping and away from epsilon floors | Rayleigh-normalized Oja tangent unchanged; pre-balancing magnitude follows the stated conditioning |
-| geodesic frame rotation | stored moment coordinates and singular values unchanged |
+| geodesic frame rotation | stored moment coordinates and singular values unchanged, up to the stored-frame rotation correction |
