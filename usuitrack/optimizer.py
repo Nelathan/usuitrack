@@ -1454,6 +1454,10 @@ class UsuiTrack(Optimizer):
     def _newton_schulz_polar(update: Tensor, eps: float = 1e-7) -> Tensor:
         if update.ndim < 2:
             raise ValueError(f"Newton-Schulz orthogonalization expects at least 2D input, got shape {tuple(update.shape)}")
+        # fp32, where both references this is ported from run bf16. Measured:
+        # the iteration is 1.5-2x faster in bf16 through this call and worth
+        # nothing end to end, because the polar map is not a meaningful share of
+        # a training step. See PLAN.md P12.
         work = update.float()
         work = work / work.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
         transposed = work.shape[-2] > work.shape[-1]

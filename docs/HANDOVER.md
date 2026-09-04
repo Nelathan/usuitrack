@@ -35,18 +35,15 @@ is an overshoot meter and its zero crossing picks the LR: `4e-4` read cosine
 
 ## What to do next
 
-1. **The bf16 Newton-Schulz arm.** The largest lever in the optimizer and a
-   faithfulness gap: both references run the iteration in low precision, we run
-   fp32, and bf16 measures 2.5-3.5x faster for ~1% -> ~3% orthogonality residual
-   on a map that is approximate by design. Stochastic-round into bf16 the way
-   HeavyBall does, then a loss arm. `PLAN.md` P12.
-2. **The cosine spread read** -- one extra accumulation, decides whether a
+1. **The cosine spread read** -- one extra accumulation, decides whether a
    per-matrix LR controller has anything to exploit. `PLAN.md` P15.
-3. **Anima**: port `build_usuitrack_param_groups` and the `RankCalibrator` drain
+2. **Anima**: port `build_usuitrack_param_groups` and the `RankCalibrator` drain
    into ai-toolkit, then a bs4 calibration. Expect a *higher* `beta` to win
    there than on LFM -- more noise means more averaging is worth more staleness.
    `PLAN.md` P13.
-4. Then `eta` (P16) and the sync pass (P12).
+3. Then `eta` (P16). The sync and performance pass (P12) dropped in priority:
+   the polar map's dtype was measured at 1.5-2x in the kernel and **zero** end to
+   end, so optimizer-side time is not where this lane spends it.
 
 ## Traps
 
@@ -73,6 +70,10 @@ table hit `live_fraction` 0.946 exactly and moved loss not at all; ortho-first
 moved every mechanism metric the right way and moved loss not at all. The one
 hedge: a better-conditioned basis has shown as subjective quality on Anima where
 loss does not move.
+
+**Price optimizer changes end to end, not in the kernel.** A 1.5-2x faster
+polar map produced a 0.8% *slower* run. Forward and backward dominate; the
+optimizer's largest term is invisible in the wall clock.
 
 **Grad norm does not track loss quality here.** Across the `beta` sweep it fell
 monotonically (6.24 / 5.94 / 5.12) while target loss got monotonically worse.

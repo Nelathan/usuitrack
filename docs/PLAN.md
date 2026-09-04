@@ -213,13 +213,16 @@ Finding them is cheap -- `torch.cuda.set_sync_debug_mode("error")` raises with a
 traceback at each one. Neither a sync pass nor a broader performance pass has
 been run on the release.
 
-**Goal.** Name all five, decide which are load-bearing and which are accidents,
-then look at the step path as a whole.
+**Goal.** Name all five and decide which are load-bearing. Lower priority than
+it looks: see the dtype result below for what optimizer-side time is worth on
+this lane.
 
-**The largest lever is the polar map's dtype, and it is a faithfulness gap.**
-Both references run the Newton-Schulz iteration in low precision -- the Polar
-Express reference casts to bf16 "for speed", HeavyBall stochastically rounds
-into bf16. UsuiTrack runs it in fp32. Measured on a 4070 SUPER, batched:
+**The optimizer step is not where the time goes. CLOSED, by measurement.**
+The polar map's dtype looked like the largest lever and is worth nothing end to
+end. Both references run the Newton-Schulz iteration in low precision -- the
+Polar Express reference casts to bf16 "for speed", HeavyBall stochastically
+rounds into bf16 -- and UsuiTrack runs it in fp32. Measured on a 4070 SUPER,
+batched:
 
 | shape | fp32 | bf16 | speedup | orthogonality residual |
 |---|---:|---:|---:|---|
@@ -227,15 +230,24 @@ into bf16. UsuiTrack runs it in fp32. Measured on a 4070 SUPER, batched:
 | (32, 2048, 512) | 22.043 ms | 6.251 ms | 3.53x | 9.0e-3 -> 2.4e-2 |
 | (8, 4096, 256) | 3.066 ms | 1.034 ms | 2.97x | 1.3e-2 -> 3.0e-2 |
 
-Note what fp32 buys: at five iterations the map is only ~1% orthogonal anyway,
-so this is 1% versus 3% on a quantity the design already treats as approximate,
-for 2.5-3.5x. The right shape is HeavyBall's -- stochastic rounding into bf16,
-not a plain cast. Needs a loss arm, not an assertion.
+Through the real `_balanced_polar_direction` the win is smaller, 1.5-2.0x,
+because Aurora's row work stays fp32 and the rounding cast is real work.
 
-**Second lever: the iteration count.** 5 -> 3 steps saves 37%, 5 -> 1 saves 74%.
-Polar Express coefficients are fitted for a planned iteration count, so a 3-step
-run needs its own fitted triple rather than the first three rows of the 5-step
-schedule.
+**End to end it is zero.** A 1k-step arm at `beta 0.9`, `lr 4e-4` on the table
+took **854 s** in bf16 against **847 s** in fp32 -- slower, inside wall-clock
+noise -- while landing `1.665305 / 3.043632` against `1.665956 / 3.039360`, both
+deltas at twice their floors in opposite directions. So the accuracy cost is
+nothing and the speed benefit is nothing: at 350M and bs16 x 1024, forward and
+backward dominate so thoroughly that halving the optimizer's largest term
+vanishes. **The kernel was the wrong unit to price.** Anima does not rescue it
+either -- its basis is the same size class (2k x 64 against 1k x 128).
+
+This retires the iteration count with it (5 -> 3 saves 37%, 5 -> 1 saves 74% of
+something invisible), and it lowers the priority of the sync hunt: five syncs
+per step are five syncs in a term that does not show up in the wall clock. Note
+for whoever reopens this: Polar Express coefficients are fitted for a planned
+iteration count, so a 3-step run needs its own fitted triple, not the first three
+rows of the 5-step schedule.
 
 **Provenance, checked against both references.** Our schedule is HeavyBall's
 `zeropower_via_newtonschulz5` -- the Muon-lineage speedrun coefficients credited
