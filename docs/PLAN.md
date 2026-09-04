@@ -132,24 +132,128 @@ goal.
 ---
 
 
-## P13. Rank: the table works, Anima has not seen it
+## P13. Rank: Anima has a measured table, and a run to judge it
 
-1. **ai-toolkit wiring.** Port `build_usuitrack_param_groups` (the side
-   heuristic, optional `side_overrides`, `calibration_label` stamping) and the
-   `RankCalibrator` drain into `toolkit/optimizers/usuitrack.py`, whose
-   `_param_side` is today's hand map. The heuristic reproduces that map
-   everywhere except cross-attention `to_k`/`to_v`, which take an override to the
-   input side; whether the heuristic's placement is actually better there is a
-   question for the run, not a blind change. Blocks item 2.
+1. **ai-toolkit wiring -- done.** `toolkit/optimizers/usuitrack.py` now stamps a
+   role label per weight, groups by `(lr, side, rank, role)`, takes a
+   `rank_table` and a `calibrate_rank`, and drains the `RankCalibrator` through
+   the `pop_diagnostics` the trainer already calls on its logging cadence -- one
+   logging interval is one window, and the report reaches both the log and
+   `loss_log.db` under `usuitrack/rankcal/*`. The side map stayed the hand map;
+   the lab's `d_model` heuristic was **not** ported. Cross-attention `to_k`/`to_v`
+   therefore tracked their 1024-wide text-context side through the calibration and
+   run 9 -- held fixed on purpose, since there was no capacity to retest it there.
 
-2. **Anima with a calibrated table and a higher LR.** The second operating point
-   for everything the rank work established: whether the `live_frac` ~0.9-0.95
-   target transfers off LFM, whether role structure transfers to a DiT, and
-   whether the source gain shows up as the sample quality this lane is actually
-   judged on. Calibrate at **bs4** -- its training batch, since higher batch wants
-   higher rank in ways calibration has to measure. The LR is due a raise on the
-   same run: `1e-5` was set against a global rank, and a leaner table takes a
-   smaller aggregate step.
+   It is being tested now, because the calibration made it interesting. Per 1000
+   tracked dimensions `attn2.to_k` asked for 20.9 live planes and `attn2.to_v` for
+   14.2 -- second and fourth densest of all roles, behind only self-attention K at
+   25.6 and above every feed-forward and self-attention V role. A side that
+   expensive per dimension is one the tracker is failing to compress.
+   `anima_rankcal_r256_xattn_inner` repeated the first calibration with exactly one
+   change, those two roles moved to the attention inner side. **The inner side
+   won and is now the shipped map.** It asks for fewer planes -- `attn2.to_k`
+   21.4 -> 20.4, `attn2.to_v` 14.5 -> 13.6 on the mean, 7-9% on the median -- and
+   measures steadier, window `std` halving on both. On planes alone that margin is
+   at the edge of what the comparison resolves, since the whole run shifted ~1-2%
+   between calibrations and the single-matrix roles moved 3-4%. The density read
+   is what makes it decisive: per 1000 tracked dimensions `attn2.to_k` falls
+   20.9 -> 10.0 and `attn2.to_v` 14.2 -> 6.6, out of the top of the model and into
+   the ordinary range below `ff_up`. Same structure, fewer planes, wider side --
+   the tracker compressing it instead of straining. It is also free: basis plus
+   projected moment is `3072r` elements either way.
+
+   Note that for cross-attention K/V neither side is the residual stream: the
+   input is the text context and the output is the attention inner space, 2048
+   only by coincidence of width. The old override was not wrong about the
+   semantics; the inner side is simply the better-conditioned thing to track.
+
+2. **Anima with a calibrated table and a higher LR -- measured, running.**
+   Calibration at `r_cal 256`, 200 steps, bs4/768, lr `2e-5` fit in 11.1 GB of
+   12.3 and settled: windows drift under 10% and `std` is 1-6 planes.
+
+   **The rank is the measured live count, unrounded** -- that is what puts
+   `live_fraction` at ~0.95, since a basis sized to the planes that were live
+   keeps almost all of them live. Where mean and median disagree, take the lower:
+   under-provisioning is safe, a missing plane is a direction the tracker declines
+   to move rather than an error. Run 9 shipped the median rounded *up* to
+   multiples of 8 and paid for it -- it ran at `live_fraction` 0.79 with a fifth
+   of every basis idle. The measured medians, and what run 9 actually used:
+
+   | role | median | table | | role | median | table |
+   |---|---|---|---|---|---|---|
+   | attn1_k | 51.7 | 56 | | attn2_k | 24.7 | 32 |
+   | attn1_q | 37.5 | 40 | | attn2_q | 17.9 | 24 |
+   | attn1_out | 27.9 | 32 | | attn2_v | 16.5 | 24 |
+   | attn1_v | 19.8 | 24 | | attn2_out | 9.4 | 16 |
+   | ff_up | 21.2 | 24 | | patch_embed | 27.1 | 32 |
+   | ff_down | 20.1 | 24 | | proj_out | 27.5 | 32 |
+   | | | | | time_embed | 1.6 | 8 |
+
+   **Role structure transfers to a DiT, and it is not the shape LFM had.**
+   Attention carries the rank and is lopsided within itself: self-attention K
+   wants 52 planes against V's 19, so the keys span a far richer subspace than the
+   values they select. Cross-attention is uniformly leaner than self-attention.
+   Both feed-forward sides sit near 20 despite being the largest weights in the
+   model -- the opposite of LFM, where the MLP roles (`w1` 210, `w3` 195) were the
+   rank hogs and attention was lean. `time_embed` reads 1.6 planes: the timestep
+   path is nearly a single direction, and its 8 is a floor, not a measurement.
+
+   The skew also inverts. On LFM the mean ran *above* the median for `w1`/`w3`/`w2`
+   because a few layers carried real high rank; here the mean runs *below* the
+   median on several roles, so the tail is on the low side and the median is the
+   safe base rather than the conservative one.
+
+   Optimizer state falls to 0.082 GB from 0.185 GB at the uniform rank 64 of run
+   8. Two weights are capped by shape rather than measured (`patch_embed` at 34,
+   `proj_out` at 32) and read saturated by construction.
+
+   **Run 9 is a success on the read that decides this lane**: highly aesthetic,
+   coherent samples, some bad ones. Its failure is displacement, not design --
+   `update_to_param_ratio` ran at `1.12e-6` against run 8's `3.56e-6` and the LFM
+   cosine-zero arm's `7.6e-5`, and the cosine decay took the last quarter to
+   `5.3e-7`, so the model ended close to base with a minor style shift instead of
+   a creative one. Part of that drop is the leaner table and is not a debt: less
+   rank is less signal to act on, not a step to normalize back up. The lr rise
+   this lane owes is to ortho-first -- the moment cancels *after*
+   orthogonalization -- and is worth 2-4x.
+
+   **Run 10** (`anima_usuitrack_10_inner_lr5e5`, wandb `7ffli01x`) is that run,
+   clean over 2304 steps: lr `5e-5` annealed from 75% to `1e-5`, the unrounded
+   table on the inner-side map, and the time module frozen -- its two linears
+   asked for 1.7 planes of 256 and modulate every block through AdaLN, so what
+   little they move is spent everywhere at once. Steps 1000-1700, against the two
+   runs before it:
+
+   | | run 8 | run 9 | run 10 |
+   |---|---:|---:|---:|
+   | rank | 64 uniform | table, rounded up | table, measured |
+   | lr | `1e-5` | `2e-5` | `5e-5` |
+   | `update_to_param_ratio` | 3.56e-6 | 1.12e-6 | **2.47e-6** |
+   | ... in the last 200 steps | 5.41e-7 | 1.71e-7 | **7.06e-7** |
+   | `tangent_live_fraction` | 0.472 | 0.787 | **0.854** |
+   | `turn_fraction` | 0.367 | 0.491 | 0.510 |
+   | `transport_speed` | 0.0020 | 0.0050 | 0.0051 |
+   | loss (last 200 steps) | 0.1582 | 0.1499 | 0.1482 |
+
+   The shallow anneal did its job: run 10 ends still moving at 7.1e-7 per step
+   where run 9 had frozen at 1.7e-7. Loss remains what it always is on this lane,
+   flat within noise across three quite different configurations. **The samples
+   are the verdict and are unreviewed.**
+
+4. **The sizing rule is off by the rank it was measured at.** Rank set to the
+   live count measured at `r_cal 256` should put `live_fraction` at ~0.95, and
+   run 10 landed at **0.854**. So the live count is not rank-invariant at the low
+   end: at ranks of 20-51 roughly 15% fewer planes clear the Gram floor than the
+   same roles showed at 256. To sit at 0.95 the rank has to go slightly *below*
+   the measured count, and by how much is unmeasured. Cheap probe, 12 minutes: run
+   a calibration at `r_cal` equal to the table itself and read what the same roles
+   report there. Until then the rule is "the measured count lands ~0.85".
+
+   Free on the same run: `grad_moment_cosine` is core-tier, so P14's overshoot
+   meter got its first Anima read. At `r_cal 256`/lr `2e-5` it sits at
+   `+0.0009..+0.0014` -- at the zero crossing, marginally under-travelling, which
+   says `2e-5` is close to right on this lane. Rank changes the aggregate step, so
+   it must be re-read at the table's rank before that is a claim.
 
 3. **Calibration cannot probe past the cap, so the deep roles read as lower
    bounds.** The cap itself is settled (`ARCHIVE.md`): `min(m,n)/2` exists so the

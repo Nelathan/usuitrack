@@ -158,10 +158,21 @@ uv run python run.py config/train_full_fine_tune_anima_usuitrack.yaml
 ```
 
 2B Cosmos DiT, full finetune, `optimizer: usuitrack` with `optimizer_params`
-carrying `rank` and `fallback_lr`. It runs on the 12GB card at 11/12GB, so batch
-cannot rise above 4 and `release_matrix_grads` is what makes it fit — gradient
-accumulation is incompatible with it. Set the run's `name` in the config; that
-name is the output directory.
+carrying `rank` (or `rank_table`) and `fallback_lr`. It runs on the 12GB card at
+11/12GB, so batch cannot rise above 4 and `release_matrix_grads` is what makes it
+fit — gradient accumulation is incompatible with it. Set the run's `name` in the
+config; that name is the output directory.
+
+A rank calibration is the same harness with `calibrate_rank` in
+`optimizer_params`: every role runs at one oversized rank and the per-role
+live-plane report drains on the logging cadence, to the log and to
+`loss_log.db` under `usuitrack/rankcal/*`. `r_cal 256` fits at bs4/768.
+
+**Output goes on `/mnt/luna`, not `/mnt/mars`.** Mars is full. Each Anima
+checkpoint is 3.9 GB plus a 757 MB `optimizer.pt`, so a run keeping five of them
+needs ~20 GB. Luna is NTFS under the kernel `ntfs3` driver at ~98 MB/s, and
+sqlite WAL — which `loss_log.db` needs — works there; `/mnt/pluto` is mounted
+read-only and is not an option.
 
 **Read this lane from sqlite, not wandb.** `<output>/loss_log.db` (tables
 `steps`, `metric_keys`, `metrics`, column `value_real`) carries every
@@ -171,6 +182,10 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
 
 ### Operational traps
 
+- **ai-toolkit always saves at the end of a job.** `save_every` past the last
+  step suppresses the periodic saves and nothing else, so even a throwaway
+  calibration writes a full 3.9 GB checkpoint and a 1.4 GB optimizer state when
+  it finishes. Budget the disk for it or delete it afterwards.
 - **A `nohup` wrapper's completion is not the run's completion.** The tool
   notification fires when the launcher exits, seconds in. Check the log.
 - **Running a script by path puts its own directory on `sys.path`,** not the lab
