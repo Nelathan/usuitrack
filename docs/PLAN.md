@@ -10,208 +10,127 @@ the frozen former PLAN as an investigation log below them. Where a line here say
 
 ---
 
-## P2. The aim ignores persistence
+## P14. The learning rate has a rule now, and it has not been used
 
-The standing question, and the last one with real design surface. It started as a
-step-size question; the step size is now derived and the aim is what is left.
+**`grad_moment_cosine` is a calibrated LR controller.** Positive means the step
+under-travels and the next gradient still points where the last one did;
+negative means it overshoots the valley and the gradient has flipped behind it;
+zero is critically damped. Interpolating two reads (`+0.0024` at `2e-4`,
+`-0.0026` at `8.7e-4`) put the crossing at `4.05e-4`; the arm run there read
+`-8.3e-5` and beat the old default on **both** heads at half the aggregate step:
 
-**Goal.** An aim that prefers persistent structure to single-batch bursts.
+| arm | target | source | ratio |
+|---|---:|---:|---:|
+| old default `2e-4` | 1.667731 | 3.080167 | 0.000166 |
+| cosine-zero `4e-4` | **1.665708** | **3.040611** | 0.000076 |
 
-**Hard constraint.** Frame motion must be able to anneal as the frame reaches
-equilibrium. Reweighting the aim's spectrum is legal; discarding its magnitude is
-not, because magnitude is the only restoring force in the aim. That is why bare
-ortho beats the raw aim on loss and still must not ship: a constant angle per
-refresh cannot settle. The shipped raw `sigma` does not fully satisfy the
-constraint either -- it anneals for ~20 steps and then plateaus.
+`-2.0e-3` target and `-4.0e-2` source, 7x and 20x their floors. The first
+Pareto move on this lane that was not bought with distance.
 
-### What is established
+**Open.** The rule has been confirmed at one point on one model. It should be
+checked where it matters: does the cosine-zero LR track the noise floor across
+batch size, and does it hold on Anima at bs4, where a sweep is expensive and a
+rule that needs no sweep is worth the most? Until then it is a strong
+coincidence with a mechanism, not a law.
 
-1. **`sigma` is a contrast ratio, scale-free in the gradient.** `A` and `R` are
-   both quadratic in `G`; dividing by `mean(diag R)` cancels scale exactly across
-   a 1000x range. So `grad_clip_norm` does not set the tracker's scale.
-2. **`sigma` is not rank-free.** A nuclear norm over `r` planes, growing roughly
-   linearly in rank. Rank is the whole of the scale-freeness problem.
-3. **`sigma` anneals for ~20 steps and is then flat for 980.** Any "constant
-   `eta`, let `sigma` carry the annealing" proposal is falsified before it is
-   built.
-4. **Rank 128 is not a bottleneck.** Capture reads `0.64`-`0.74`; two thirds of
-   the gradient's energy is inside the frame.
-5. **The tracker sits at an equilibrium, not at convergence and not starved.**
-   Stable contrast, stable capture, concentration ~0.4 against an isotropic floor
-   of `1/128`. The residual is structured, not noise. Whether that equilibrium is
-   the *right* one is the open question.
-6. **The aim is bad at small batch and stable there.** At bs1 on LFM and bs4 on
-   Anima the aim carries ~1.5 effective planes, flat across three epochs of a
-   2304-step run. That is a property of the gradients at that batch size, not
-   something training improves and not something that decays.
-7. **We cannot currently tell whether the frame has converged.** Every released
-   metric is floored by target noise. `basis_lag_angle` -- principal angles
-   against the frame's own snapshot N refreshes back -- is the only read that
-   goes to zero iff the frame stops. Approved as a sampled, opt-in diagnostic
-   over ~32 matrices, off the hot path.
+**Two things any LR comparison must still control for.**
 
-### Open leads
+*The rank/step coupling.* The step's norm carries `sqrt(r)`, so
+`update_to_param_ratio` tracks `sqrt(r/128)` to four figures and **a table
+change is also an LR change** -- the calibrated table runs 1.2% leaner than its
+predecessor. Compare at matched `update_to_param_ratio`, never at matched
+nominal LR. This is also why every rank comparison in the archive conflates
+subspace and step. Under the ortho-first order there is a second term: the step
+also carries the agreement `||M||/||O||`, `0.23` at `beta = 0.9` and stable
+across a 4.4x LR change, so a `beta` change is an LR change too.
 
-1. **Cross-covariance aim, `G^T M`.** The one candidate that adds persistence
-   without adding state: replace the second `G` in Oja's `G^T (G Q)` with the
-   moment already stored. If the frame has settled and `M`'s EMA converged, the
-   target becomes `E[G]^T E[G]` where today's is `E[G]^T E[G] + Cov(G)` -- signal
-   alone instead of signal plus per-batch noise. A direction can carry large
-   energy every batch while averaging toward zero across them; it contributes to
-   the first term and not the second, which is the persistence weighting the
-   current aim structurally lacks.
+*Stochastic rounding on the weight write* (`stochastic.py`; nothing to do with
+the basis update, which is worse with it). It delivers updates that
+round-to-nearest discarded, so the same nominal LR moves weights further -- more
+real progress per step is also more forgetting per step. If that is what source
+degradation is, the fix is the LR and not a mechanism. Settled by running with
+it on and off at matched rank table, batch and step count: same shape with a
+horizontal offset confirms it.
 
-   *Horizontality must be re-derived, and the naive construction breaks it.*
-   Today's `R = sym(Q^T A)` works only because `A = SQ` for symmetric
-   `S = G^T G`; `Q^T G^T M` has no reason to be symmetric, so symmetrizing would
-   remove half the in-subspace component and leave the tangent contaminated with
-   motion that corresponds to no subspace motion at all. The fix is exact and
-   cheap: skip the Rayleigh step and project directly, `Delta = G^T M -
-   Q(Q^T G^T M)`, horizontal by construction at one matmul of today's shape.
-   Same cost class, zero new bytes. *(archive)*
+**And there is no historical baseline to lean on.** The newest wandb directory in
+the lab predates the lab's own final commit, and not one of 197 stored run
+directories logs `basis_update_interval`. Every archived number also carries a
+fallback that was barely training -- bf16 storage through
+`torch.optim._functional.adamw`, exactly the round-to-nearest loss
+`stochastic.py` documents. Fixed now, but the archive is not a clean control for
+anything touching update magnitude.
 
-2. **`beta` is capped by smearing, and the frame's in-span rotation is never
-   applied to the moment.**
-
-   *Why `0.9` and not higher.* The moment lives in frame coordinates, so as the
-   frame moves, older contributions describe directions the frame has partly
-   left. `beta` is bounded by frame motion, not by anything about the moment
-   itself. `0.9` ships because it is strong on target and stable enough; it can
-   rise only once the basis settles or the moment moves with it.
-
-   *The original construction was worse and is gone.* It projected the moment up
-   through the old basis and back down through the new one, discarding whatever
-   the new frame does not span -- under real frame motion that destroys
-   persistence outright. Identity transport in moving-frame coordinates replaced
-   it and loses nothing: a single Grassmann geodesic along a horizontal tangent
-   gives `Q^T Q+ = V cos(theta) V^T`, exactly symmetric, so the coordinates carry
-   over unchanged.
-
-   ***`transport_spin` is exactly the part identity transport gets wrong, and
-   nothing corrects it.*** Spin is the skew of `Q_old^T Q_now`: rotation of the
-   frame's columns inside the span they already had, which moves the subspace not
-   at all and scrambles the moment one-for-one. The optimizer measures it and
-   acts on it nowhere. Two sources, behaving differently:
-
-   - **genuine holonomy** -- fp32 reads `7e-8` at window 1 rising to `9e-6` per
-     update, coherent. The composition of symmetric steps need not be symmetric,
-     so this is a property of the path, not an error in any single step.
-   - **bf16 rounding on the basis write** -- `5.6e-4` at window 1 where exact
-     arithmetic gives zero, a pure random walk with no floor. Sixty times the
-     holonomy per update.
-
-   Orthogonalizing the tangent already removed the largest source. Raw `sigma`
-   let one plane own the turn and read **7x the spin of any other arm** -- the
-   frame twisting its own coordinates against the moment. (A 20x recollection is
-   in circulation; the factor in the record is 7x.)
-
-   ***The moment rotation is built*** (`SPEC.md`, step 6). The overlap is read
-   from the frames as stored, its orthogonal polar factor applied to the moment,
-   and the whole step now rounds the moment once instead of twice -- the moment
-   stays fp32 from its accumulate through the polar map to a single stochastic
-   commit after the rotation. An exact step returns the identity, pinned by
-   `test_frame_rotation_is_the_identity_when_transport_is_exact`.
-
-   *A frame-side version was considered and is dead.* Choosing the aligned
-   representative of the new frame is a no-op in exact arithmetic, which reads
-   as a safety property and is actually the disproof: the fp32 geodesic overlap
-   is already symmetric to `7e-8`, so there is nothing there to correct, and the
-   `5.6e-4` arrives at the bf16 *write*, downstream of any alignment. Writing
-   again to fix it rounds again.
-
-   **First measurement, LFM bs16, r128 global, 300 steps, seed 1, beta 0.9,
-   against a matched control on the previous commit:**
-
-   | read | control | rotation | delta |
-   |---|---:|---:|---|
-   | target | 1.707964 | 1.707229 | `-7.4e-4` (floor `3e-4`) |
-   | source | 3.043938 | 3.040511 | `-3.4e-3` (floor `2e-3`) |
-   | `grad_moment_cosine` | -0.018203 | -0.017809 | +2% relative |
-   | `transport_spin` | 0.000976 | 0.000973 | flat |
-   | `transport_lag` / `curve` | 0.008046 / 0.6759 | 0.008040 / 0.6758 | flat |
-   | `tangent_live_fraction` | 0.7874 | 0.7858 | flat |
-   | peak reserved | 2.78 GiB | 2.94 GiB | **+5.8%** |
-
-   **The frame panel is flat and that is the control**, not a disappointment:
-   the correction changes the moment's coordinates and touches no frame, so
-   `transport_spin` was never the readout. `grad_moment_cosine` is, and it moved
-   the right way by 2% relative.
-
-   **Both heads improve at roughly twice their noise floors, which is a hint and
-   not a result.** One seed, and the same-config spread at 300 steps is `2.9e-4`
-   on target. It also **confounds three changes in one arm** -- the rotation,
-   stochastic rounding on the moment, and an fp32 moment reaching Newton-Schulz
-   where it used to get bf16. Nothing here attributes the delta to any of them.
-
-   *Expected, and worth stating.* At `beta = 0.9` the memory is ten steps and the
-   accumulated spin is ~`1.8e-3` rad, which P7 already computed as immaterial.
-   The mechanism is not supposed to pay here. **The test is the `beta` sweep** --
-   `0.9 / 0.95 / 0.99` with and without the correction -- because the claim is
-   that it raises the ceiling, not that it helps at today's setting.
-
-   *Still open on the same axis:* **couple `beta` to frame motion**, shortening
-   memory when rotation makes the moment stale, costing nothing new. Which
-   signal drives it -- speed, curve, or spin -- is untested.
-
-   *The run was global `r128`, not the per-role table.* Both arms match so the
-   comparison holds, but `r` varies per role under the table and so does the
-   rotation, so a table re-check is owed before this is called settled.
-
-   *The bar.* Lag, spin and curve are the right instruments for asking what the
-   frame is doing and **none of them ranks a design** -- the arm with the lowest
-   spin and lag measured all session had a mediocre target. Either mechanism
-   clears a loss bar or it does not ship.
-
-3. **Stochastic rounding on the projected moment** -- shipped with lead 2, and
-   not yet separated from it. A floor under `beta`, where lead 2 is the ceiling.
-
-   The moment is bf16 in storage. **The result that killed SR on the basis does
-   not transfer.** The frame has no sub-ulp update to lose; an EMA is the
-   opposite object. Its increment is `(1 - beta) * g` against an
-   accumulator of order `|g|`, and bf16's eight mantissa bits put the relative
-   ulp at ~`2^-8`: at `beta = 0.9` the increment is ~25 ulp and safe, at `0.99`
-   ~2.6 ulp on average, so every element contributing less than the mean rounds
-   away. Longer memory is where round-to-nearest starts eating the signal.
-
-   **And P7's bf16 verdict was conditioned on `beta = 0.9`.** Spin contributes
-   `0.0018` of smear against `0.0194` from legitimate motion, raising the total
-   from 1.936% to 1.948% -- immaterial, at that memory length. Lengthen the
-   memory and the spin random-walks over more updates, so the verdict does not
-   automatically survive the change it is being asked to permit. The dtype
-   question and the `beta` question are one question.
-
-   *The arm.* `copy_stochastic_` on the moment accumulate, then re-sweep `beta`
-   at `0.9 / 0.95 / 0.99`. SR moving nothing at `0.9` closes it. SR *changing the
-   shape of the beta curve* says the sweep that recorded `0.95` as dominated was
-   partly measuring its increment rounding away.
-
-4. **`eta` is unswept, and nothing bounds it any more.** The `0.02` cliff was
-   dead planes, not step size: retested at `0.05` -- 2.5x past the old
-   divergence point, at bs1, the batch where it used to break -- 300 steps ran
-   clean on a fixed seed (`eta5e-2-bs1-r128-300-s1`).
-
-   | read | `eta` 0.01 | `eta` 0.05 |
-   |---|---:|---:|
-   | target | 1.737169 | 1.739179 |
-   | source | 2.913690 | 2.915922 |
-   | `transport_speed` | 0.001555 | 0.005780 |
-   | `transport_curve` | 0.6981 | 0.5926 |
-   | `turn_fraction` | 0.2524 | 0.1828 |
-   | participation / concentration | 0.01228 / 0.8287 | 0.01236 / 0.8285 |
-
-   **The agreement clamp is a real governor.** 5x `eta` bought 3.7x speed,
-   because `turn_fraction` *fell* -- a larger proposed turn puts more matrices on
-   the ceiling, and the controller absorbed a quarter of the increase itself.
-   The aim panel is flat to four decimals, which is the control: `eta` moves the
-   response, not the aim.
-
-   **`0.05` is worse, so `0.01` still stands.** Target `+2.0e-3` against a `3e-4`
-   floor is a real regression; source `+2.2e-3` is marginal. But `eta` has
-   stopped being a constant with a stability wall under it and become an ordinary
-   tuning parameter that has never been swept downward or in the `0.01`-`0.03`
-   interior. Cheap: bs1, 300 steps, a minute an arm.
+**Also open: `beta` at the calm step.** `0.9` remains the optimum at both step
+sizes measured (`0.5` and `0.99` both worse, matched step), but `0.99`'s penalty
+shrank sixfold when the step halved. Whether the optimum actually moves at a
+calmer step than we have run is untested, and it is the same axis as the LR
+question.
 
 ---
+
+## P15. A per-matrix learning rate from the overshoot meter
+
+**The idea.** Smooth `grad_moment_cosine` per matrix; where it is negative,
+damp that matrix's LR; where it is not, decay the damping back toward the
+default. Asymmetric on purpose -- the configured LR stays a ceiling, so the
+worst case is a slower run rather than a diverged one. It can run entirely
+on-device: the damping factor is a 0-dim tensor multiplying the update, so it
+adds no sync. State is two scalars per matrix.
+
+**Why it is not obvious.** The global version of this knob produced P14's win,
+which is the argument for it. Against it: per-matrix step allocation has already
+been measured loss-invisible once (`ARCHIVE.md`, the closed P2 -- damping by
+agreement changed nothing at 20x spread in contested-step size, and what
+difference there was favoured *not* damping). Cosine is a different signal --
+feedback on overshoot rather than feedforward on confidence -- so it is not
+refuted, but the family's prior is poor.
+
+**The measurement that decides whether to build it, and it is nearly free.**
+Accumulate `cosine^2` alongside `cosine` and report the spread across matrices,
+split by role. If every matrix sits at the same cosine, the controller is a
+global LR schedule in costume and P14's rule already delivers it. Real spread
+structured by role is the case worth building; real spread that is unstructured
+step-to-step makes the EMA time constant the whole design problem.
+
+**Two traps if it gets built.** A damping-only controller lowers the aggregate
+step, so it must be compared against a global LR tuned to the same
+`update_to_param_ratio` or it will re-measure the LR axis. And damping cuts
+overshoot, which raises cosine, which decays the damping, which restores
+overshoot -- a limit cycle unless the decay is slower than the response. Rprop's
+bounded multiplicative factors are the place to steal from, with the caveat that
+that lineage was built for low-noise regimes and this is the opposite.
+
+---
+
+## P16. `eta` is unswept, and nothing bounds it any more
+
+The `0.02` cliff was dead planes, not step size: retested at `0.05` -- 2.5x past
+the old divergence point, at bs1, the batch where it used to break -- 300 steps
+ran clean on a fixed seed (`eta5e-2-bs1-r128-300-s1`).
+
+| read | `eta` 0.01 | `eta` 0.05 |
+|---|---:|---:|
+| target | 1.737169 | 1.739179 |
+| source | 2.913690 | 2.915922 |
+| `transport_speed` | 0.001555 | 0.005780 |
+| `transport_curve` | 0.6981 | 0.5926 |
+| `turn_fraction` | 0.2524 | 0.1828 |
+
+**The agreement clamp is a real governor.** 5x `eta` bought 3.7x speed, because
+`turn_fraction` *fell* -- a larger proposed turn puts more matrices on the
+ceiling and the controller absorbed a quarter of the increase itself. The aim
+panel is flat to four decimals, which is the control: `eta` moves the response,
+not the aim.
+
+**`0.05` is worse, so `0.01` stands**, but `eta` has stopped being a constant
+with a stability wall under it and become an ordinary tuning parameter never
+swept downward or in the `0.01`-`0.03` interior. Cheap: bs1, 300 steps, a minute
+an arm. **Do not make the aim hot to simulate higher rank** -- better loss from a
+hotter `eta` would not mean a better basis, and the basis is the track, not the
+goal.
+
+---
+
 
 ## P13. Rank: the table works, Anima has not seen it
 
@@ -254,66 +173,22 @@ it does not stand.
 
 ---
 
-## P11. The learning rate has not been re-swept since the table
-
-`rank` is no longer a sweep axis -- it is a calibrated table. The LR is, and it
-has not moved since before the aim's shape, its magnitude rule, and the rank
-allocation all changed. A substantial algorithm change invalidates the sweep
-behind it.
-
-**What is known.** Target finishes long before source stops degrading: on the
-`4e-4` 1k baseline, steps 300-1000 improved target by `0.0086` while degrading
-source by `0.0555`. Halving to `2e-4` was better on **both** axes at every
-checkpoint and had still not found its floor at 1k, so `1e-4` is a live question
-rather than a formality. Target down / source up is this harness's known
-effective-LR axis; a Pareto move on both heads is the only kind that is off it.
-
-**Two things the sweep must control for.**
-
-*The rank/step coupling.* The orthogonalized update has `||.||_F = sqrt(r)`, so
-`update_to_param_ratio` tracks `sqrt(r/128)` to four figures. Within a model
-across roles that coupling is wanted -- the step scales with the number of
-directions the gradient demonstrably supports. But it means **a table change is
-also an LR change**: the calibrated table runs 1.2% leaner than its predecessor
-and reads `1.651e-4` against a global r128's `1.437e-4`. Compare at matched
-`update_to_param_ratio`, not at matched nominal LR. This is also why every rank
-comparison in the archive conflates subspace and step, and why none of them can
-be read as a clean rank result.
-
-*Stochastic rounding on the weight write* (`stochastic.py`, the bf16 parameter
-update -- nothing to do with the basis update, which was tested separately and is
-worse with it). Stochastic rounding delivers updates that round-to-nearest used
-to discard, so the same nominal LR moves weights further -- more real progress
-per step is also more forgetting per step. If that is what the source degradation
-is, the fix is the LR and not a mechanism. Settled by running the sweep with
-`stochastic_rounding` on and off, same rank table, batch and step count: same
-shape with a horizontal offset confirms it, different shapes mean something else.
-**Read at step 300** -- past 300 this lane measures forgetting, not learning.
-
-**And there is no historical baseline to lean on.** The newest wandb directory in
-the lab predates the lab's own final commit (a 1456-deletion tracking rewrite),
-and not one of 197 stored run directories logs `basis_update_interval`. Every
-archived number also carries a fallback that was barely training -- bf16 storage
-updated through `torch.optim._functional.adamw`, exactly the round-to-nearest
-loss `stochastic.py` documents. Fixed now, but the archive is not a clean control
-for anything touching update magnitude.
-
----
-
 ## P5. Magic number census
 
 | constant | where | status |
 |---|---|---|
-| `GEODESIC_STEPSIZE = 0.01` (`eta`) | geodesic step | calibratable, not derivable, and no longer cliff-bounded -- unswept, P2 lead 3 |
+| `GEODESIC_STEPSIZE = 0.01` (`eta`) | geodesic step | calibratable, not derivable, and no longer cliff-bounded -- unswept, P16 |
 | `AGREEMENT_PLANES` `k = 16` | agreement meter | a second gain on `eta`'s quantity; accepted, not resolved |
 | rank cap `min(m,n)/2` | `effective_rank` | P13 item 3; the fraction is still a choice |
-| `grad_clip_norm = 1.0` | raw clip | mandatory; the threshold itself untested across models |
-| `beta = 0.9`, `eps = 1e-8` | moment | the `beta` sweep carries a bf16 confound, P2 lead 3; `eps` inherited |
-| `AURORA_PP_ITERATIONS = 1`, `AURORA_PP_BETA = 0.5` | direction map | inherited from the method |
+| `beta = 0.9`, `eps = 1e-8` | moment | measured optimum at two step sizes, but it moves with noise and with LR (P14); `eps` inherited |
+| `AURORA_PP_ITERATIONS = 1`, `AURORA_PP_BETA = 0.5` | direction map | inherited from the method; measured at 0-3% of the polar map's cost, so nothing to save by dropping it |
+| `NEWTON_SCHULZ_COEFFICIENTS`, 5 steps | polar map | the largest single cost in the optimizer; P12 |
 | `1e-12` floors | numerical | never read against the precision they run in |
 
 **Goal.** Fewer constants, and the survivors derived or at least scale-free. The
 controller half is done (`ARCHIVE.md`); the rows above are what did not yield.
+`grad_clip_norm` left the census by deletion rather than by calibration -- see
+`SPEC.md` step 1.
 
 **The lesson from the one that was wrong.** The annealer's liveness test sat at
 `1e-6 * sigma_max`, six orders of magnitude below fp32's resolution, so no plane
@@ -340,6 +215,37 @@ been run on the release.
 
 **Goal.** Name all five, decide which are load-bearing and which are accidents,
 then look at the step path as a whole.
+
+**The largest lever is the polar map's dtype, and it is a faithfulness gap.**
+Both references run the Newton-Schulz iteration in low precision -- the Polar
+Express reference casts to bf16 "for speed", HeavyBall stochastically rounds
+into bf16. UsuiTrack runs it in fp32. Measured on a 4070 SUPER, batched:
+
+| shape | fp32 | bf16 | speedup | orthogonality residual |
+|---|---:|---:|---:|---|
+| (32, 2048, 128) | 1.836 ms | 0.750 ms | 2.45x | 1.7e-2 -> 3.1e-2 |
+| (32, 2048, 512) | 22.043 ms | 6.251 ms | 3.53x | 9.0e-3 -> 2.4e-2 |
+| (8, 4096, 256) | 3.066 ms | 1.034 ms | 2.97x | 1.3e-2 -> 3.0e-2 |
+
+Note what fp32 buys: at five iterations the map is only ~1% orthogonal anyway,
+so this is 1% versus 3% on a quantity the design already treats as approximate,
+for 2.5-3.5x. The right shape is HeavyBall's -- stochastic rounding into bf16,
+not a plain cast. Needs a loss arm, not an assertion.
+
+**Second lever: the iteration count.** 5 -> 3 steps saves 37%, 5 -> 1 saves 74%.
+Polar Express coefficients are fitted for a planned iteration count, so a 3-step
+run needs its own fitted triple rather than the first three rows of the 5-step
+schedule.
+
+**Provenance, checked against both references.** Our schedule is HeavyBall's
+`zeropower_via_newtonschulz5` -- the Muon-lineage speedrun coefficients credited
+to `@scottjmaddox` / `@YouJiacheng` -- not the Polar Express series, whose first
+triple is `(8.2373, -23.1577, 16.6806)`. The iteration body is algebraically
+identical to both references; normalization matches HeavyBall (the Polar Express
+reference additionally multiplies the norm by 1.01). `SPEC.md` step 7 states
+this correctly; `README.md` claimed Polar Express and has been fixed. The
+projector's single-step Stiefel retraction *does* use the genuine Polar Express
+fixed point `(1.875, -1.25, 0.375)`.
 
 ---
 
@@ -395,6 +301,19 @@ bs16 x seq1024, seed 1, `2e-4`, beta `0.9`, 1k steps. Noise floors: target
 | per-role table (12,032 planes) | 1.667302 | 3.079098 | Pareto over global |
 | calibrated table (11,886 planes) | 1.667920 | ~= | reproduced from `RankCalibrator` |
 | `side=right`, r128 | 1.677500 | 3.089930 | best geometry, worst loss |
+
+Current code, per-role table, same lane. `beta` arms are at matched
+`update_to_param_ratio`, which under ortho-first means each carries its own LR.
+
+| arm | target | source | ratio |
+|---|---:|---:|---:|
+| `beta 0.9`, `lr 4e-4` (cosine-zero) | **1.665708** | **3.040611** | 0.000076 |
+| `beta 0.9`, `lr 8.7e-4` (old default step) | 1.669194 | 3.086723 | 0.000165 |
+| `beta 0.5`, `lr 1.6e-4` | 1.690248 | 3.013536 | 0.000077 |
+| `beta 0.99`, `lr 1.29e-3` | 1.681707 | 3.138621 | 0.000075 |
+| `beta 0`, `lr 2e-4` | 1.685989 | 3.020878 | 0.000166 |
+
+`moment_persistence` reads within `1e-3` of zero in every one of them.
 
 **Anima**, full finetune, 2B DiT, rank 64, bs4 x 768px, `1e-5`, 2304 steps, under
 the derived live floor: wandb `9elbwps6`, clean, model saved. Flow-matching loss

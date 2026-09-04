@@ -100,15 +100,15 @@ accuracy, it corrupts the tracked frame for every step after it.
 
 ```text
 raw gradient G
-  -> sanitize and raw clip
+  -> sanitize
   -> stable EIGH initialization on the first step
   -> held-frame projected gradient Z
   -> Rayleigh-normalized one-state Oja tangent
-  -> projected EMA M
   -> release full gradient; retain rank-sized pending work
   -> Aurora leverage balance (normalization)
   -> Newton-Schulz polar map (orthogonalization)
   -> Muon aspect scale, read from the parameter shape
+  -> projected EMA M of the orthogonalized direction
   -> lift through the held frame Q
   -> parameter update
   -> exact Oja frame move
@@ -119,31 +119,28 @@ The moment is the last thing written, and everything above it reads the held
 frame `Q`. The lift is through `Q`, not `Q_+`: the frame moves after the
 parameter update, so no step lifts through a frame it did not measure in.
 
-### 1. Sanitize and raw clip
+### 1. Sanitize
 
-Let `S(G)` replace each non-finite entry with zero. With threshold `c=1` by
-default,
+Let `G` replace each non-finite entry with zero. Its Frobenius norm is measured
+for telemetry and applied to nothing.
 
-$$G_c=S(G)\min\left(1,\frac{c}{\max(\|S(G)\|_F,10^{-12})}\right).$$
+**There is no gradient clipping, because no consumer can see the magnitude.**
+The Oja tangent is exactly invariant to a uniform rescale (step 4: `action` and
+`rayleigh` are both quadratic in `G` and divide). The update orthogonalizes each
+step's projected gradient *before* the average (step 7), and the polar map
+discards singular values, so a per-step rescale -- which is exactly what a clip
+is -- cannot reach the moment either. A blip batch contributes one unit-spectrum
+direction weighted like every other step. Running a 180x blip through a clipped
+and an unclipped trajectory agrees to float noise, pinned by
+`test_the_update_is_invariant_to_gradient_scale`.
 
-This occurs before all matrix consumers, and there is no off switch: `c` has no
-`None`. Clipping the raw gradient protects the projected moment, which is linear
-in `G` and accumulates, and a guard installed later cannot protect an earlier
-memory. It does **not** protect the frame: the Oja tangent is exactly invariant
-to a uniform rescale of the gradient (see step 4), so the clip changes basis
-motion by nothing at all. A single blip batch (grad norm spiking
-~180x) otherwise reaches both at full size, and a frame that has turned toward
-one is wrong for as long as it takes the tracker to turn back.
-
-Making it mandatory also collapses the update to a single implementation.
-Once `c` is always present, the only thing that varies between steps is whether
-the frame exists yet and whether a basis update is due, so the tangent is built
-in exactly one place: the fused per-side kernel. There is no second readable
-copy to drift out of sync with it -- that is what this document is for.
+The update is still a single implementation: the only thing that varies between
+steps is whether the frame exists yet and whether a basis update is due, so the
+tangent is built in exactly one place, the fused per-side kernel.
 
 ### 2. Initialize the frame
 
-Normalize `A = G_c / ||G_c||_F` and form the symmetrized side Gram:
+Normalize `A = G / ||G||_F` and form the symmetrized side Gram:
 
 $$K=A^\top A\quad\text{(right)},\qquad K=AA^\top\quad\text{(left)}.$$
 
@@ -158,7 +155,7 @@ Gram.
 
 Using the held frame before the current Oja move,
 
-$$Z_t=\Pi_{Q_t}(G_{c,t}).$$
+$$Z_t=\Pi_{Q_t}(G_t).$$
 
 ### 4. Track with one-state Oja
 
@@ -166,8 +163,8 @@ After EIGH initialization, the live frame updates on the configured basis-update
 cadence (default every full gradient). Reuse the held-frame projection to form
 the covariance action:
 
-$$A=G_c^\top Z\quad\text{(right)},\qquad
-A=G_cZ^\top\quad\text{(left)},$$
+$$A=G^\top Z\quad\text{(right)},\qquad
+A=GZ^\top\quad\text{(left)},$$
 
 and form the symmetrized Rayleigh matrix and horizontal tangent
 
@@ -231,7 +228,7 @@ not scheduled. A `max(0.01, 1/t)` anneal previously sat here, answering a proble
 that no longer exists: while an upstream factored second moment warmed up, the
 Gram whose eigenspace the tracker targets was itself shifting, so the frame
 chased a moving target and a hot start was the correct compensation. The target
-is now the leading eigenspace of `G_c^T G_c` from the first step and moves only
+is now the leading eigenspace of `G^T G` from the first step and moves only
 as the model does. Removing the schedule also makes the tracker observable: with
 a constant step and a measured `transport_speed`, frame motion is one annealing
 term rather than the product of two, so "the tracker settled" is separable from
@@ -251,10 +248,10 @@ The zero-singular-value limit is `sin(eta sigma) / sigma -> eta`.
 
 **Raw `sigma` is a contrast ratio, not a magnitude, and it is no longer the
 step.** Both `A` and `R` are quadratic in the gradient, so the division by
-`mean(diag R)` cancels gradient scale exactly: rescaling `G_c` by any constant
+`mean(diag R)` cancels gradient scale exactly: rescaling `G` by any constant
 leaves `Delta` and every `sigma_i` bit-identical (verified across a 1000x range).
 What `sigma` measures is out-of-frame coupling against mean in-frame energy per
-plane. It is scale-free in the gradient and unaffected by `grad_clip_norm`, but
+plane. It is scale-free in the gradient, which is half of why there is no clip, but
 *not* rank-free -- a nuclear norm over `r` planes, growing roughly linearly in
 `r` (~37.6 at rank 64 against ~80 at rank 128 on the same problem). Driving the
 frame with it directly was the released rule until the controller above replaced
@@ -283,9 +280,31 @@ second tracker state and requires a full matrix gradient on every step.
 
 ### 5. Accumulate momentum
 
-$$M_t=\beta M_{t-1}+(1-\beta)Z_t,\qquad \beta=0.9.$$
+The moment integrates the *orthogonalized* direction `O_t` of step 7, not the
+projected gradient:
 
-There is no EMA bias correction.
+$$M_t=\beta M_{t-1}+(1-\beta)O_t,\qquad \beta=0.9.$$
+
+There is no EMA bias correction, so the moment is undersized for roughly
+`1/(1-beta)` steps at the start of a run.
+
+**Ordering the polar map before the average is what makes `M`'s magnitude
+mean something.** Every step enters the sum with a flat spectrum, so one
+batch's dominant plane cannot own the memory by being large, and what survives
+is agreement: planes held across the window keep their length, planes that
+oscillate cancel toward zero, and the step shrinks in proportion. Under the
+reverse order a moment that had cancelled to a fifteenth of the gradient still
+took a full-sized step, because the polar map restored it on the way out.
+
+**What the moment is for.** The projected gradient stream is white -- measured
+`moment_persistence` within `1e-3` of zero at 2-, 10- and 100-step windows on
+LFM at bs16. So the moment is a variance reducer, not a persistence extractor:
+it buys `sqrt((1+beta)/(1-beta))` in signal fraction, 4.4x at `beta = 0.9`, and
+pays in staleness as the mean drifts under the moving parameters. `0.9` is the
+measured optimum of that trade; `0.5` is too weak a filter and `0.99` too stale.
+Removing the moment entirely costs `1.8e-2` on target. The staleness half is
+set by how far the parameters move, so `beta` and `lr` are one parameter with
+two names: halving the step cut `0.99`'s penalty sixfold.
 
 ### 6. Transport momentum through frame motion
 
@@ -343,12 +362,12 @@ name. The **leverage balancing** is
 [Aurora](https://github.com/tilde-research/aurora-release) (Tilde Research): a
 diagonal row rescale that changes how force is distributed across rows and
 orthogonalizes nothing. The **orthogonalization** is the Newton-Schulz polar
-map of the Muon lineage, and it is the step that discards `M`'s singular values
-so that `alpha` alone sets the step size. Both are reimplemented from the
+map of the Muon lineage, and it is the step that discards `Z`'s singular values
+so that a batch's magnitude never reaches the average. Both are reimplemented from the
 methods; neither is a runtime dependency. UsuiTrack takes only the rectangular
 direction map from Aurora, per the decision note at the end of this section.
 
-Balancing acts only on `M`. For a rectangular tensor, orient it as
+Balancing acts on `Z_t`, this step's projected gradient. For a rectangular tensor, orient it as
 `A:[p,q]`, `p >= q`, transposing if needed. Initialize row scaling
 
 $$D_{0,ii}=1/\|A_{i,:}\|_2.$$
@@ -360,7 +379,7 @@ $$D_{k+1,ii}=D_{k,ii}
 \left(\frac{q/p}{\|P_{k,i,:}\|_2^2}\right)^{1/2}$$
 
 with the diagonal update omitted after the iteration. Transpose back. Square
-tensors skip leverage balancing and use `NS(M)` directly.
+tensors skip leverage balancing and use `NS(Z)` directly.
 
 `NS` first divides by Frobenius norm and orients its input with rows no greater
 than columns. Five default Newton-Schulz polynomial steps apply, using the
@@ -385,7 +404,11 @@ k    a         b         c
 ```
 
 The result `O_t` is an approximate leverage-balanced polar direction, not an
-exact SVD polar factor.
+exact SVD polar factor: at five iterations its orthogonality residual is ~1e-2.
+Its Frobenius norm is constant per matrix, `sqrt(r)` times the aspect scale,
+which is what makes `||M||/||O||` a pure agreement read. The scale is a
+per-matrix constant and commutes with the average, so applying it here is the
+same magnitude convention as applying it last.
 
 **Decision (projected balancing):** Aurora's balancing chooses direction inside
 the retained update space. UsuiTrack, not Aurora, owns momentum, basis motion,
@@ -401,9 +424,15 @@ U_t=\Lambda_{Q_{t+}}(\widehat U_t).$$
 **What this factor guarantees.** In Muon it enforces `||U||_F = sqrt(m)`
 whichever way the weight is stored, because the orthogonalized object there has
 the parameter's own two dimensions. Here the orthogonalized object is
-`M:[d,r]`, whose polar factor has norm `sqrt(r)`, so the product is
+`Z:[d,r]`, whose polar factor has norm `sqrt(r)`, so a single step would give
 
 $$\|U_t\|_F=\sqrt{m}\,\sqrt{r/\min(m,n)}.$$
+
+What lands is `M_t`, the average of those directions, so the delivered norm is
+that bound times the agreement `||M||/||O||` -- 0.23 on LFM at `beta = 0.9`,
+stable across a 4.4x change in learning rate, since it is a property of the
+gradients rather than of the step. A learning rate that matches another
+configuration's `update_to_param_ratio` therefore has to divide by it.
 
 The invariant holds at `r = min(m,n)` and is attenuated by `sqrt(r/min(m,n))`
 below it -- a factor that varies with rank and with `min(m,n)`. Both are
@@ -422,7 +451,7 @@ Matrix parameters retain no full-size first or second moment.
 
 **Rounding.** For bf16 `W`, the lift and the update are accumulated in fp32 and
 written back once through stochastic rounding (`stochastic_rounding=True`,
-default). Orthogonalization means `alpha` alone sets the step size, so a
+default). The step size is `alpha` times an agreement well below one, so a
 well-conditioned run puts `alpha * U` well under a bf16 ulp -- measured at
 ~1/76 ulp on a 2B DiT at `alpha=2e-5` -- and round-to-nearest then discards
 every step. `U` is never cast to `W`'s dtype on the way in; a single rounding
@@ -433,15 +462,16 @@ is not rounded twice. See `usuitrack/stochastic.py`.
 
 For each matrix, phase one runs exactly once after its full gradient is complete:
 
-1. sanitize and clip `G` (always);
-2. form the clipped gradient `G_c`;
-3. read `Z_t` and, after initialization, form `Delta_t` in the held frame `Q_t`;
-4. update `M_t`;
-5. retain `M_t`, the optional `Delta_t`, and the frame reference, then release `G`.
+1. sanitize `G`;
+2. read `Z_t` and, after initialization, form `Delta_t` in the held frame `Q_t`;
+3. retain `Z_t`, the optional `Delta_t`, and the frame reference, then release `G`.
 
-Phase one does not move the basis or update the parameter. Phase two runs in
-`step()`: it batches tangent-Gram eigendecompositions, moves each frame to
-`Q_{t+}`, applies the balanced polar map to `M_t`, lifts through `Q_{t+}`, and updates `W`.
+Phase one does not move the basis, update the moment, or update the parameter:
+the moment now waits for the polar map, and the polar map is batched across
+matrices. Phase two runs in `step()`: it batches the balanced polar map over
+same-shaped `Z_t`, blends each `O_t` into `M_t`, lifts `M_t` through `Q_t`,
+updates `W`, then batches the tangent-Gram eigendecompositions and moves each
+frame to `Q_{t+}`.
 
 `prepare(param)` exposes phase one explicitly. A no-accumulation training loop
 can invoke it from a `register_post_accumulate_grad_hook` callback to release
@@ -549,8 +579,9 @@ against a long quiet interval reads as zero.
 | `agreement_ceiling` | the fleet divisor `G`, one scalar per step. Rises as `tangent_participation` rises; a flat or collapsing gain means the controller has stopped tracking the aim's spread |
 | `tangent_participation` | `(sum_i lambda_i)^2 / (r sum_i lambda_i^2)`, in `[1/r, 1]`: the effective number of planes carrying the aim, as a fraction of `r`. The bulk of the same spectrum concentration reads the head of |
 | `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_participation`: participation is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
-| `projected_grad_norm` | norm of the clipped gradient inside the held frame |
-| `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |
+| `projected_grad_norm` | norm of the sanitized gradient inside the held frame |
+| `moment_persistence` | how much coherent signal the average holds once the floor of an independent stream is subtracted. An EMA of independent constant-norm directions already has norm `w = sqrt((1-beta)/(1+beta))` from incomplete cancellation, so with `||M||/||O||` as `rho`, this reports `(rho^2 - w^2)/(1 - w^2)`: 0 is a white stream, 1 a direction held throughout, negative anti-correlated. The raw ratio the step size follows is recoverable as `p(1-w^2) + w^2` |
+| `grad_moment_cosine` | this step's direction against the moment as it stood *before* the blend, reconstructed so the reading is not self-referential. Read it as an overshoot meter: positive means the step under-travels and the next gradient still points where the last one did, negative means it overshoots and the gradient has flipped behind it. Zero is critically damped, which makes it a learning-rate read -- the LR that zeroes it beat a 2.2x hotter one on both eval heads |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
 | `transport_lag` | net distance a sampled frame covered over `diagnostics_lag_interval` basis updates, same unit as the speed. Also the projected moment's smear: set the interval to `1/(1-beta)` and it reads how far the moment's own history has drifted from the coordinates it was accumulated in |
@@ -628,13 +659,16 @@ These choices define the current design; they are redesignable.
 5. **Moving-frame momentum:** identity coordinates preserve the projected
    moment's spectrum through the chosen frame rotation.
 6. **No second moment on the full gradient:** the tangent and the moment both
-   read the clipped gradient directly. A frame fitted on `G` is the leading
+   read the sanitized gradient directly. A frame fitted on `G` is the leading
    eigenspace of `G^T G`, so the Oja residual is zero there and the tracker
    converges when the gradient's principal subspace stops moving; any two-sided
    rescale is a congruence rather than a similarity and destroys that property.
-7. **Raw clipping before all consumers:** bounds what one batch can write into
-   the projected moment. It has no effect on the frame, which is scale-invariant
-   by construction.
+7. **Orthogonalize before averaging, and no gradient clip:** the polar map runs
+   on each step's projected gradient, so a batch's magnitude never reaches the
+   moment and every consumer is scale-invariant. That retires the clip, and it
+   makes `||M||` an agreement read the step size follows. Measured loss-neutral
+   against averaging first; it is kept for the invariance and the observability,
+   not for a loss delta.
 8. **Balanced polar direction plus a parameter-shape aspect scale:** direction
    belongs to projected geometry; scale remains tied to parameter geometry, with
    the invariant that justified it holding only at full rank (see step 8).

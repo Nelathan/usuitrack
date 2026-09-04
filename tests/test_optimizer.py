@@ -3,6 +3,7 @@ import math
 
 import pytest
 import torch
+from torch import Tensor
 
 from usuitrack import SubspaceProjector, UsuiTrack
 
@@ -173,12 +174,9 @@ def test_live_kernel_tangent_is_horizontal(side):
     # leading eigenspace of `G^T G`, so the Oja action lands entirely inside it
     # and the horizontal residual is exactly zero, which makes this assertion
     # vacuous.
-    _projected, _moment, tangent, _norm = kernel(
+    _projected, tangent, _norm = kernel(
         torch.randn(ROWS, COLS),
         basis,
-        torch.zeros(projected_shape),
-        1.0,  # grad_clip_norm
-        0.95,  # beta
     )
 
     frame = projector.canonical_basis()
@@ -217,14 +215,12 @@ def test_a_fitted_frame_is_a_fixed_point_of_its_own_gradient():
     basis = projector.basis
     assert basis is not None
 
-    _projected, _moment, tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
-        gradient, basis, torch.zeros(ROWS, RANK), 1.0, 0.95
-    )
+    _projected, tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(gradient, basis)
     assert float(tangent.abs().max()) < 1e-5, float(tangent.abs().max())
 
 
 def test_kernel_matches_a_hand_rolled_step():
-    """The fused kernel is the written-out update, not a path that merely runs."""
+    """The fused kernel is the written-out projection, not a path that merely runs."""
     torch.manual_seed(0)
     gradient = torch.randn(ROWS, COLS)
     projector = SubspaceProjector(rank=RANK, side="right")
@@ -232,21 +228,120 @@ def test_kernel_matches_a_hand_rolled_step():
     basis = projector.basis
     assert basis is not None
 
-    moment = torch.randn(ROWS, RANK).mul_(1e-3)
-    untouched = moment.clone()
-    expected = moment.clone()
-    projected, blended, _tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(
-        gradient, basis, moment, 1.0, 0.95
-    )
+    projected, _tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(gradient, basis)
 
-    clipped = gradient * (1.0 / gradient.float().norm()).clamp(max=1.0)
-    assert torch.allclose(projected, clipped @ basis.mT, atol=1e-6)
-    expected.mul_(0.95).add_(projected, alpha=0.05)
-    assert torch.allclose(blended, expected, atol=1e-6)
-    # Returned, never written back here. The step commits the moment once, after
-    # the frame rotation, so a kernel that stored it would round it twice.
-    assert torch.equal(moment, untouched)
-    assert blended.dtype is torch.float32
+    assert torch.allclose(projected, gradient @ basis.mT, atol=1e-6)
+
+
+def test_the_moment_integrates_orthogonalized_directions():
+    """The polar map runs before the average, and the average is the update.
+
+    Written out at the integration site, because that is where the order lives:
+    one step from a zero moment must leave `(1 - beta)` of the *orthogonalized*
+    projected gradient in state, not `(1 - beta)` of the gradient itself, and the
+    weight must move by that moment rather than by a re-orthogonalized copy of
+    it.
+    """
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    before = weight.detach().clone()
+    optimizer = UsuiTrack([weight], lr=0.1, rank=RANK, side="right", beta=0.9, weight_decay=0.0)
+
+    gradient = torch.randn(ROWS, COLS)
+    weight.grad = gradient.clone()
+    optimizer.step()
+
+    state = optimizer.state[weight]
+    basis = state["basis"]
+    direction = UsuiTrack._orthogonalize_update(gradient @ basis.mT, UsuiTrack._muon_aspect_scale((ROWS, COLS)))
+
+    torch.testing.assert_close(state["projected_exp_avg"].float(), 0.1 * direction, atol=1e-3, rtol=0)
+    # The frame does not move on the step that fits it, so the update lifts
+    # through the same basis the moment lives in.
+    expected_step = (0.1 * direction) @ basis
+    torch.testing.assert_close((before - weight.detach()) / 0.1, expected_step, atol=1e-3, rtol=0)
+
+
+def test_a_contested_direction_takes_a_smaller_step_than_an_agreed_one():
+    """Disagreement costs step size, which is the whole point of ortho-first.
+
+    Both arms hand the moment a unit-spectrum direction of identical size every
+    step; only the sign pattern differs. `G` and `-G` share `G^T G`, so a frame
+    fitted on either is a fixed point of both streams and the frame contributes
+    nothing to the difference. Under the old order -- average, then
+    orthogonalize -- the two arms would take steps of exactly the same size,
+    because the polar map restored whatever magnitude the cancellation removed.
+    """
+
+    def final_step_norm(signs: list[int]) -> float:
+        torch.manual_seed(0)
+        weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+        optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right", beta=0.9)
+        gradient = torch.randn(ROWS, COLS)
+        for sign in signs:
+            before = weight.detach().clone()
+            weight.grad = gradient * sign
+            optimizer.step()
+            motion = float((weight.detach() - before).norm())
+        return motion
+
+    agreed = final_step_norm([1] * 8)
+    contested = final_step_norm([1, -1] * 4)
+    assert contested < 0.5 * agreed, (contested, agreed)
+
+
+def test_moment_persistence_reads_zero_on_an_independent_stream():
+    """The metric must subtract its own floor, or it can never reach zero.
+
+    An EMA of independent constant-norm directions has norm
+    `sqrt((1-beta)/(1+beta))` from incomplete cancellation alone -- 0.229 at
+    beta 0.9 -- so the raw ratio reports "agreement" for a stream that has none.
+    Fed white noise the corrected read sits at zero; fed one repeated direction
+    it sits at one.
+    """
+    def persistence(repeat: bool) -> float:
+        torch.manual_seed(0)
+        weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+        optimizer = UsuiTrack([weight], lr=1e-4, rank=RANK, side="right", beta=0.9)
+        optimizer.diagnostics = "full"
+        fixed = torch.randn(ROWS, COLS)
+        for _ in range(200):
+            weight.grad = fixed.clone() if repeat else torch.randn(ROWS, COLS)
+            optimizer.step()
+            if _ == 149:
+                optimizer.pop_diagnostics()  # drop the acquisition transient
+        return optimizer.pop_diagnostics()["moment_persistence"]
+
+    assert abs(persistence(repeat=False)) < 0.05, persistence(repeat=False)
+    assert persistence(repeat=True) > 0.9, persistence(repeat=True)
+
+
+def test_the_update_is_invariant_to_gradient_scale():
+    """Why there is no gradient clip: nothing downstream can see the magnitude.
+
+    The polar map runs on each step's projected gradient before it enters the
+    moment, so a per-step rescale -- which is exactly what a clip is -- cannot
+    reach the average. The aim is scale-free for its own reason: `action` and
+    `rayleigh` are both quadratic in `G`, so their ratio cancels the factor.
+    A 180x blip is the case the clip existed for, and it is included here.
+    """
+
+    def trajectory(scales: list[float]) -> tuple[Tensor, Tensor]:
+        torch.manual_seed(0)
+        weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+        optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right", beta=0.9)
+        generator = torch.Generator().manual_seed(7)
+        for scale in scales:
+            weight.grad = torch.randn(ROWS, COLS, generator=generator) * scale
+            optimizer.step()
+        return weight.detach().clone(), optimizer.state[weight]["projected_exp_avg"].float()
+
+    blip = [180.0 if step == 5 else 1.0 for step in range(12)]
+    scaled, scaled_moment = trajectory(blip)
+    unit, unit_moment = trajectory([1.0] * 12)
+
+    torch.testing.assert_close(scaled, unit, atol=1e-5, rtol=0)
+    torch.testing.assert_close(scaled_moment, unit_moment, atol=1e-4, rtol=0)
 
 
 def test_polar_factor_of_a_frame_overlap_is_orthogonal():

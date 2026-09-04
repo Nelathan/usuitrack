@@ -43,6 +43,13 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 # true under any experiment that transforms the tangent between the two.
 GEODESIC_STEPSIZE = 0.01
 
+# Control arm for the ortho-first integration: put the second polar map back, so
+# the moment contributes direction only and the step is restored to full size
+# however much the average cancelled. It isolates the spectral-fairness half of
+# ortho-first (which survives here) from the agreement-as-magnitude half (which
+# does not), and exists to be deleted with whichever arm loses.
+REORTHOGONALIZE_MOMENT = False
+
 # Meter width for the agreement controller: how many of the tangent's leading
 # planes the persistence read spans. One plane is too noisy to steer with -- its
 # reading plateaus by step 75 and carries ~40% interval noise -- while 16 declines
@@ -57,8 +64,11 @@ AGREEMENT_PLANES = 16
 class MatrixUpdate:
     param: Tensor
     projector: SubspaceProjector
-    projected_exp_avg: Tensor
+    projected_grad: Tensor
     original_shape: tuple[int, ...]
+    # Filled by `_apply_matrix_update_buckets`, which is where the orthogonalized
+    # direction is integrated; `_commit_moments` rounds it into state.
+    projected_exp_avg: Tensor | None = None
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
     transport_speed: Tensor | None = None
@@ -87,7 +97,6 @@ class UsuiTrack(Optimizer):
         weight_decay: float = 0.0,
         rank: int = 32,
         side: ProjectionSide | str = ProjectionSide.AUTO,
-        grad_clip_norm: float = 1.0,
         basis_update_interval: int = 1,
         consume_grad: bool = True,
         release_matrix_grads: bool = False,
@@ -104,8 +113,6 @@ class UsuiTrack(Optimizer):
             raise ValueError(f"weight_decay must be non-negative, got {weight_decay}")
         if rank <= 0:
             raise ValueError(f"rank must be positive, got {rank}")
-        if grad_clip_norm <= 0:
-            raise ValueError(f"grad_clip_norm must be positive, got {grad_clip_norm}")
         if basis_update_interval <= 0:
             raise ValueError(f"basis_update_interval must be positive, got {basis_update_interval}")
         if release_matrix_grads and not consume_grad:
@@ -118,7 +125,6 @@ class UsuiTrack(Optimizer):
             weight_decay=weight_decay,
             rank=rank,
             side=ProjectionSide(side).value,
-            grad_clip_norm=grad_clip_norm,
             consume_grad=consume_grad,
             compile_tensor_kernels=compile_tensor_kernels,
             basis_update_interval=basis_update_interval,
@@ -388,13 +394,13 @@ class UsuiTrack(Optimizer):
             drifting; low concentration with high participation is a frame
             turning on a near-isotropic noise tail, which is a mechanism for
             integrating batch noise into the basis.
-        ``projected_grad_norm``, ``grad_to_moment_ratio``
-            Scale of the gradient inside the frame, and how much of
-            the moment is this batch rather than history. The ratio is against
-            the moment *after* this step's update, which sits at ``1/(1 - beta)``
-            on the first step and settles well below it once the moment has
-            history; it can spike when a fresh gradient cancels the moment it
-            just went into.
+        ``projected_grad_norm``, ``moment_persistence``
+            Scale of the gradient inside the frame, and how much coherent
+            signal the average holds once the incomplete-cancellation floor of an
+            independent stream is subtracted. 0 is a white stream, 1 a direction
+            held for the whole memory, negative anti-correlated. The raw norm
+            ratio the step size follows is recoverable from it as
+            ``p (1 - w^2) + w^2`` with ``w^2 = (1 - beta)/(1 + beta)``.
         ``update_to_param_ratio``
             Mean per-step weight motion against current weight norm. Flat
             through healthy training; mostly useful for finding a sane learning
@@ -599,35 +605,31 @@ class UsuiTrack(Optimizer):
         # which fits the frame rather than moving it, and a step where the basis
         # update is not due under basis_update_interval > 1.
         #
-        # Clipping happens on the RAW gradient, upstream of every consumer. A
-        # blip batch (grad norm spiking ~180x) otherwise reaches the frame and
-        # the moment at full size, and a basis that has adapted to one is
-        # corrupt for as long as it takes the tracker to turn back. Observed: a
-        # single step-54 blip collapsed alignment for the whole back half of a
-        # 100-step run. A guard installed downstream cannot protect upstream
-        # state, which is why the projected-grad clip could not stop it and why
-        # grad_clip_norm has no off switch.
+        # There is no gradient clipping, because with the polar map ahead of the
+        # average there is nothing left for it to protect. Every consumer of the
+        # gradient is now insensitive to its magnitude: the aim divides a
+        # quadratic by a quadratic, and the update orthogonalizes each step
+        # before it enters the moment, so a blip contributes one unit-spectrum
+        # direction weighted like any other step. A clip is exercised on every
+        # step of a real run and changes the trajectory by float noise
+        # (`test_the_update_is_invariant_to_gradient_scale`). Under the old order
+        # it was load-bearing -- the moment absorbed a 180x gradient at full
+        # size, and one step-54 blip collapsed alignment for the back half of a
+        # 100-step run. Sanitizing non-finite gradients is a different job and
+        # stays.
         diagnostics = self._diagnostics_sink()
         self._record_incoming_grad_diagnostics(diagnostics, grad)
-        grad, raw_grad_norm = self._sanitize_and_clip_grad_tensors(grad, float(group["grad_clip_norm"]))
+        grad, raw_grad_norm = self._sanitize_grad_tensors(grad)
         if not projector.is_initialized:
             self._initialize_projector(projector, grad, state)
         projected_grad = projector.project(grad)
 
-        stored = state.get("projected_exp_avg")
         state["step"] = state.get("step", 0) + 1
-        if stored is None:
-            stored = torch.zeros_like(projected_grad)
-            state["projected_exp_avg"] = stored
-        beta = float(group["beta"])
-        projected_exp_avg = stored.to(dtype=torch.float32, copy=True)
-        projected_exp_avg.mul_(beta).add_(projected_grad.float(), alpha=1.0 - beta)
-        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg, group["beta"])
 
         return MatrixUpdate(
             param=p,
             projector=projector,
-            projected_exp_avg=projected_exp_avg,
+            projected_grad=projected_grad,
             original_shape=tuple(p.shape),
             oja_tangent=None,
             raw_grad_norm=raw_grad_norm,
@@ -652,21 +654,15 @@ class UsuiTrack(Optimizer):
         ) or (
             self._prepare_tracker_right_tensors if is_right else self._prepare_tracker_left_tensors
         )
-        projected_grad, projected_exp_avg, oja_tangent, raw_grad_norm = prepare(
+        projected_grad, oja_tangent, raw_grad_norm = prepare(
             grad,
             basis,
-            state["projected_exp_avg"],
-            float(group["grad_clip_norm"]),
-            float(group["beta"]),
         )
-        # Deliberately outside the compiled kernel: measuring in there would put
-        # the reductions in the graph whether or not anyone asked for them.
-        self._record_projection_diagnostics(diagnostics, projected_grad, projected_exp_avg, group["beta"])
 
         return MatrixUpdate(
             param=p,
             projector=projector,
-            projected_exp_avg=projected_exp_avg,
+            projected_grad=projected_grad,
             original_shape=tuple(p.shape),
             oja_tangent=oja_tangent,
             raw_grad_norm=raw_grad_norm,
@@ -688,51 +684,66 @@ class UsuiTrack(Optimizer):
     def _record_projection_diagnostics(
         diagnostics: DiagnosticsAccumulator | None,
         projected_grad: Tensor,
-        projected_exp_avg: Tensor | None,
+        direction: Tensor,
+        moment: Tensor,
         beta: float,
     ) -> None:
         if diagnostics is None:
             return
-        projected_grad_norm = projected_grad.float().norm()
-        diagnostics.add("projected_grad_norm", projected_grad_norm)
-        if projected_exp_avg is None:
+        diagnostics.add("projected_grad_norm", projected_grad.float().norm())
+        direction = direction.float()
+        direction_norm = direction.norm()
+        if beta <= 0.0:
+            # `w` below is 1 and the read is 0/0: with no memory the moment is
+            # this direction and there is no averaging to have a floor.
             return
-        moment = projected_exp_avg.float()
-        diagnostics.add("grad_to_moment_ratio", projected_grad_norm / moment.norm().clamp_min(1e-12))
+        # Persistence with the noise floor taken out. An EMA of *independent*
+        # constant-norm directions already has norm `w = sqrt((1-beta)/(1+beta))`
+        # -- 0.229 at beta 0.9 -- purely from incomplete cancellation, so the raw
+        # ratio never approaches zero and cannot be compared across beta. Writing
+        # `d = mu + n`, `||M||^2 = ||mu||^2 + (1 - ||mu||^2) w^2`, so this inverts
+        # to the mean's share of the direction's energy: 0 is a white stream, 1 a
+        # direction held throughout, and negative is anti-correlated, which is
+        # what the raw gradient stream reads before the polar map.
+        #
+        # It bounds the mean's *energy*, not its worth. A mean far too small to
+        # move this read still decides where a thousand accumulated steps land,
+        # because it is the only component the weight sum does not cancel.
+        floor_sq = (1.0 - beta) / (1.0 + beta)
+        ratio_sq = (moment.norm() / direction_norm.clamp_min(1e-12)).square()
+        diagnostics.add("moment_persistence", (ratio_sq - floor_sq) / (1.0 - floor_sq))
         # Agreement is asked of the moment as it stood BEFORE this step's blend,
         # recovered exactly from the post-update moment. The post-update moment
-        # already contains `1 - beta` of this very gradient, which would make the
-        # measurement partly self-referential -- it would report agreement with
-        # itself. Reconstructing costs one axpy and keeps the fused kernel free
-        # of telemetry.
-        if beta <= 0.0:
-            # No memory, so there is no prior moment to agree or disagree with:
-            # the moment *is* this gradient. Reporting 1.0 would be true and
-            # useless; reporting nothing keeps the metric meaning one thing.
-            return
-        moment_before = (moment - (1.0 - beta) * projected_grad.float()) / beta
+        # already contains `1 - beta` of this very direction, which would make
+        # the measurement partly self-referential -- it would report agreement
+        # with itself. Reconstructing costs one axpy.
+        #
+        # Read as an overshoot meter: positive means the step under-travels and
+        # the next gradient still points the way the last one did, negative means
+        # it overshoots the valley and the gradient has flipped behind it. Zero is
+        # critically damped, which makes this a learning-rate read and not merely
+        # a description of the moment.
+        moment_before = (moment - (1.0 - beta) * direction) / beta
         diagnostics.add(
             "grad_moment_cosine",
-            (projected_grad.float() * moment_before).sum()
-            / (projected_grad_norm * moment_before.norm()).clamp_min(1e-12),
+            (direction * moment_before).sum() / (direction_norm * moment_before.norm()).clamp_min(1e-12),
         )
 
     @staticmethod
     def _prepare_tracker_right_tensors(
         grad: Tensor,
         basis: Tensor,
-        projected_exp_avg: Tensor,
-        grad_clip_norm: float,
-        beta: float,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """One fused pass: clip, project in the held frame, aim, accumulate.
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """One fused pass: clip, project in the held frame, aim.
 
         Both consumers -- the Oja tangent that steers the basis and the
-        projected moment that becomes the update -- read the same raw clipped
-        gradient, so the held-frame projection is computed once and shared.
+        projected gradient that becomes the update -- read the same sanitized
+        gradient, so the held-frame projection is computed once and shared. The
+        moment is not built here: it integrates orthogonalized directions, and
+        the polar map that produces them is batched across matrices.
         """
 
-        grad, raw_grad_norm = UsuiTrack._sanitize_and_clip_grad_tensors(grad, grad_clip_norm)
+        grad, raw_grad_norm = UsuiTrack._sanitize_grad_tensors(grad)
         projected_grad = grad @ basis.mT
         work = grad.float()
         frame = basis.float().mT
@@ -742,29 +753,16 @@ class UsuiTrack(Optimizer):
         rayleigh = 0.5 * (rayleigh + rayleigh.mT)
         tangent = action - frame @ rayleigh
         tangent = tangent / rayleigh.diagonal().mean().clamp_min(1e-12)
-        # The moment is accumulated in fp32 and handed back rather than rounded
-        # into its bf16 home here. It stays in fp32 for the rest of the step --
-        # through the polar map and through the frame rotation below -- so the
-        # step rounds it exactly once, at the commit, instead of once here and
-        # again after the rotation.
-        # `copy=True` because `.float()` on an already-fp32 moment aliases the
-        # stored tensor, and this must not write through to state: the step
-        # commits once, after the rotation.
-        moment = projected_exp_avg.to(dtype=torch.float32, copy=True)
-        moment.mul_(beta).add_(projected_grad.float(), alpha=1.0 - beta)
-        return projected_grad, moment, tangent, raw_grad_norm
+        return projected_grad, tangent, raw_grad_norm
 
     @staticmethod
     def _prepare_tracker_left_tensors(
         grad: Tensor,
         basis: Tensor,
-        projected_exp_avg: Tensor,
-        grad_clip_norm: float,
-        beta: float,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """Left-side twin of `_prepare_tracker_right_tensors`."""
 
-        grad, raw_grad_norm = UsuiTrack._sanitize_and_clip_grad_tensors(grad, grad_clip_norm)
+        grad, raw_grad_norm = UsuiTrack._sanitize_grad_tensors(grad)
         projected_grad = basis.mT @ grad
         work = grad.float()
         frame = basis.float()
@@ -774,58 +772,84 @@ class UsuiTrack(Optimizer):
         rayleigh = 0.5 * (rayleigh + rayleigh.mT)
         tangent = action - frame @ rayleigh
         tangent = tangent / rayleigh.diagonal().mean().clamp_min(1e-12)
-        # The moment is accumulated in fp32 and handed back rather than rounded
-        # into its bf16 home here. It stays in fp32 for the rest of the step --
-        # through the polar map and through the frame rotation below -- so the
-        # step rounds it exactly once, at the commit, instead of once here and
-        # again after the rotation.
-        # `copy=True` because `.float()` on an already-fp32 moment aliases the
-        # stored tensor, and this must not write through to state: the step
-        # commits once, after the rotation.
-        moment = projected_exp_avg.to(dtype=torch.float32, copy=True)
-        moment.mul_(beta).add_(projected_grad.float(), alpha=1.0 - beta)
-        return projected_grad, moment, tangent, raw_grad_norm
+        return projected_grad, tangent, raw_grad_norm
 
     @staticmethod
-    def _sanitize_and_clip_grad_tensors(grad: Tensor, grad_clip_norm: float) -> tuple[Tensor, Tensor]:
+    def _sanitize_grad_tensors(grad: Tensor) -> tuple[Tensor, Tensor]:
+        """Replace non-finite entries and report the raw norm for telemetry.
+
+        The norm is measured, never applied: nothing downstream scales by it.
+        """
+
         grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
-        raw_grad_norm = grad.float().norm().detach()
-        clip_scale = (grad.new_tensor(grad_clip_norm) / raw_grad_norm.clamp_min(1e-12)).clamp(max=1.0)
-        return grad.mul(clip_scale), raw_grad_norm
+        return grad, grad.float().norm().detach()
 
     def _apply_matrix_update_buckets(self, entries: list[MatrixUpdate], group: dict) -> None:
-        """Group same-shaped moments for one Newton-Schulz call each.
+        """Orthogonalize this step's gradient, then integrate the direction.
 
-        Keyed on the projected shape (torch.stack's actual requirement) and the
-        scale, not the original parameter shape that scale is computed from.
-        Several original shapes can share a scale -- `_muon_aspect_scale` clamps
-        to 1.0 for every matrix tracked on its wider side, so a fleet of
+        **The polar map runs before the average, not after.** Every step enters
+        the moment with a flat spectrum, so one batch's dominant plane cannot own
+        the memory by being large -- the same reordering that fixed the aim,
+        where a directional burst used to own the turn. What the average keeps is
+        magnitude as agreement: planes that persist stay long, planes that
+        oscillate cancel toward zero, and the step shrinks where the direction is
+        contested instead of being restored to full size by a second polar map.
+        Under the old order that restoration was unconditional, which is why a
+        moment that had cancelled to a fifteenth of the gradient still took a
+        full-sized step. `REORTHOGONALIZE_MOMENT` puts it back as the control.
+
+        Grouped so one Newton-Schulz call serves every same-shaped matrix. Keyed
+        on the projected shape (torch.stack's actual requirement) and the scale,
+        not the original parameter shape that scale is computed from. Several
+        original shapes can share a scale -- `_muon_aspect_scale` clamps to 1.0
+        for every matrix tracked on its wider side, so a fleet of
         differently-shaped `w2`-like matrices collapses into one bucket. The
         scale each entry receives is exact, the same float it would have gotten
         alone; the orthogonalized direction is not bitwise identical to running
         the matrix solo, at the same ulp-level float tolerance every other
-        batched-vs-solo comparison in this optimizer already carries.
+        batched-vs-solo comparison in this optimizer already carries. The scale
+        is a per-matrix constant, so applying it here and averaging afterwards is
+        the same magnitude convention as applying it last.
         """
 
         if not entries:
             return
 
+        beta = float(group["beta"])
+        diagnostics = self._diagnostics_sink()
         buckets: dict[tuple, list[MatrixUpdate]] = {}
         for entry in entries:
-            projected_exp_avg = entry.projected_exp_avg
             scale = UsuiTrack._muon_aspect_scale(entry.original_shape)
-            key = (tuple(projected_exp_avg.shape), scale)
+            key = (tuple(entry.projected_grad.shape), scale)
             buckets.setdefault(key, []).append(entry)
 
         for (_projected_shape, scale), bucket_entries in buckets.items():
-            if len(bucket_entries) == 1:
-                update_hats = [self._orthogonalize_update_runtime(bucket_entries[0].projected_exp_avg, scale)]
-            else:
-                stacked = torch.stack([entry.projected_exp_avg for entry in bucket_entries])
-                stacked_update_hats = self._orthogonalize_update_runtime(stacked, scale)
-                update_hats = list(stacked_update_hats.unbind(0))
+            directions = self._orthogonalize_bucket([e.projected_grad for e in bucket_entries], scale)
+            for entry, direction in zip(bucket_entries, directions, strict=True):
+                state = self.state[entry.param]
+                stored = state.get("projected_exp_avg")
+                if stored is None:
+                    stored = torch.zeros_like(entry.projected_grad)
+                    state["projected_exp_avg"] = stored
+                # fp32 from here through the frame rotation to a single rounded
+                # commit in `_commit_moments`. `copy=True` because `.float()` on
+                # an already-fp32 moment aliases the stored tensor, and this must
+                # not write through to state before the rotation has been applied.
+                moment = stored.to(dtype=torch.float32, copy=True)
+                moment.mul_(beta).add_(direction.float(), alpha=1.0 - beta)
+                entry.projected_exp_avg = moment
+                self._record_projection_diagnostics(diagnostics, entry.projected_grad, direction, moment, beta)
+
+            moments = [entry.projected_exp_avg for entry in bucket_entries]
+            update_hats = self._orthogonalize_bucket(moments, scale) if REORTHOGONALIZE_MOMENT else moments
             for entry, update_hat in zip(bucket_entries, update_hats, strict=True):
                 self._apply_matrix_update(entry, update_hat, group)
+
+    def _orthogonalize_bucket(self, tensors: list[Tensor], scale: float) -> list[Tensor]:
+        if len(tensors) == 1:
+            return [self._orthogonalize_update_runtime(tensors[0], scale)]
+        stacked = self._orthogonalize_update_runtime(torch.stack(tensors), scale)
+        return list(stacked.unbind(0))
 
     def _apply_basis_updates(self, entries: list[MatrixUpdate], group: dict) -> None:
         pending = [entry for entry in entries if entry.oja_tangent is not None]

@@ -85,9 +85,11 @@ See [`examples/`](examples) for a plain-PyTorch loop, an HF `Trainer`
 integration, and a full-finetune run through Unsloth's `FastModel` loader
 (no LoRA, no quantization: UsuiTrack drives the full weights directly).
 
-Gradient clipping is always on (`grad_clip_norm`, default `1.0`) and cannot be
-disabled: it is what protects the basis and the projected moment from a single
-bad batch.
+There is no gradient clipping, and nothing to configure: every consumer of the
+gradient is insensitive to its magnitude. The basis tracker divides one
+quadratic in `G` by another, and the update orthogonalizes each step before it
+enters the moment, so a bad batch contributes one unit-spectrum direction
+weighted like any other step. Non-finite entries are still zeroed.
 
 ### Is the tracker actually tracking?
 
@@ -166,8 +168,9 @@ constant beyond the step size itself. Direction comes from two steps kept apart:
 a leverage-balancing row rescale
 ([Aurora](https://github.com/tilde-research/aurora-release), from Tilde
 Research), then a Newton-Schulz polar map that does the orthogonalizing, using
-the optimal coefficient schedule from Amsel, Persson, Musco, and Gower's ["The
-Polar Express"](https://arxiv.org/abs/2505.16932). Magnitude comes from Muon's
+the per-step-tuned quintic schedule from the Muon lineage (see `docs/SPEC.md`
+step 7 for provenance). The polar map runs on each step's projected gradient,
+before the moment averages it. Magnitude comes from Muon's
 aspect factor on the original parameter shape -- which enforces a
 storage-invariant update norm at full rank and, under a rank-`r` projection,
 leaves a `sqrt(r/min(m,n))` residual instead; see `docs/SPEC.md` step 8.

@@ -395,6 +395,96 @@ is reporting a lower bound. `PLAN.md` P13 item 3.
 ---
 ---
 
+## CLOSED -- the aim does not ignore persistence; there is no persistence to ignore
+
+**Answer: the projected gradient stream is white, and the moment is a variance
+reducer rather than a persistence extractor.** P2 ran for two weeks on the
+premise that the aim weights single-batch bursts over structure that repeats.
+The premise is false at bs16 on LFM, and the measurement that killed it is
+`moment_persistence`: the mean's share of the direction's energy, with the
+incomplete-cancellation floor `w = sqrt((1-beta)/(1+beta))` of an independent
+stream subtracted. It reads within `1e-3` of zero at `beta` `0.5`, `0.9` and
+`0.99` -- windows of 2, 10 and 100 steps. There is no autocorrelation anywhere
+in reach for a better integrator to extract.
+
+**What the moment does instead.** Averaging `k` independent directions lifts the
+signal fraction by `sqrt((1+beta)/(1-beta))` -- 4.4x at `0.9` -- while leaving
+the *norm* indistinguishable from white, because a mean far too small to move
+`||M||` is still the only component a thousand accumulated steps do not cancel.
+That is why the norm read and the loss read disagreed, and why the early
+conclusion drawn from the norm ("the memory holds nothing, delete it") was
+wrong: removing the moment costs `1.8e-2` on target, 61x the floor.
+
+| beta | target | source | note |
+|---:|---:|---:|---|
+| 0 | 1.685989 | 3.020878 | no averaging |
+| 0.9 | 1.667731 | 3.080167 | optimum |
+| 0.95 | 1.680874 | 3.115532 | |
+| 0.99 | 1.761981 | 3.280230 | |
+
+An interior optimum, and a bias-variance one: averaging buys signal fraction and
+pays in staleness as the mean drifts under the moving parameters. **`beta` and
+`lr` are one parameter with two names** -- halving the aggregate step cut
+`0.99`'s penalty against `0.9` from `9.4e-2` to `1.6e-2`, sixfold, from nothing
+but travelling less far per step. The optimum should therefore rise with noise
+and fall with step size, which predicts a higher `beta` for Anima at bs4.
+
+**Forgetting is displacement.** Source degrades monotonically in `beta` at
+matched aggregate step, in every sweep run. Same path length, different net
+distance: coherent motion goes somewhere, incoherent motion mills around.
+Adaptation and forgetting are the same quantity read from two directions, so the
+question is the exchange rate, and `0.9` buys target improvement at 6x the
+efficiency of `0.95` while `0.99` pays source and gets nothing.
+
+**Lead 1, the cross-covariance aim `G^T M`, is dead on this evidence.** It was
+motivated by `E[G]^T E[G]` surviving while `Cov(G)` cancels. With the stream
+white and `E[G]` at or below the noise level in frame coordinates, that target is
+close to empty and the construction buys nothing for its matmul.
+
+**Lead 2, the moment's frame rotation, is built and measured neutral.** It
+corrects exactly what identity transport gets wrong -- the frame's in-span
+rotation, dominated by bf16 rounding on the basis write at `5.6e-4` per update
+against `9e-6` of genuine holonomy. It fires correctly and changes no loss:
+`transport_spin` is `~9e-4` per step, and a beta sweep with the correction in
+place still degrades monotonically above `0.9`. Kept because it is the coherent
+thing to do with a moment in moving-frame coordinates, not for a loss delta.
+
+**Lead 3, stochastic rounding on the moment, shipped with it and is likewise not
+separable from it by loss.** It is load-bearing for a different reason: once the
+polar map runs before the average, the moment's information lives in near
+cancellations, which is exactly where round-to-nearest eats it.
+
+**The ordering fix that came out of this, and why it is not a win.** The aim's
+own fix -- orthogonalize, then integrate -- was applied to the update path:
+`EMA(ortho(Z))` instead of `ortho(EMA(Z))`. It does what it claims. The raw
+stream is mildly *anti*-correlated (4-6% above the white line, `grad_moment_cosine`
+`-0.0166`); after the reorder it sits exactly on the white line (`-0.0026` at
+matched step). But the loss cannot see it, at either step size:
+
+| arm | target | source |
+|---|---:|---:|
+| `ortho(EMA(Z))`, the old order | 1.667731 | 3.080167 |
+| `ortho(EMA(ortho(Z)))` | 1.668745 | 3.086352 |
+| `EMA(ortho(Z))` | 1.669194 | 3.086723 |
+
+**The analogy broke at one place: the update path already had a terminal polar
+map and the aim never did.** A burst still dominates the old order's sum, but the
+exit polar map flattens that sum's spectrum before it reaches the weights, so
+the two orders nearly commute and only plane selection and signs survive the
+difference. The reorder is kept for the scale invariance it creates (which
+retired `grad_clip_norm`) and for making `moment_persistence` measurable at all
+-- not for loss.
+
+**And per-matrix step allocation is loss-invisible.** `EMA(ortho(Z))` scales each
+matrix's step by its own agreement; the control re-orthogonalizes and discards
+that. Their contested-step sizes differ 20x (5% versus 99.98% of an agreed step,
+`test_a_contested_direction_takes_a_smaller_step_than_an_agreed_one`) and their
+losses differ by `4.5e-4` at the hot step and `9.0e-4` at the calm one -- both at
+or below floor, both mildly favouring *not* damping. Modules with noisy
+directions should keep walking.
+
+---
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that
