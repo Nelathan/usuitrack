@@ -50,9 +50,17 @@ corrupted a meter and here it steers.
 level rather than per matrix, and `turn` clamps at 1 (fleet mean 0.50, so not
 saturated). That moves a correlation by hundredths, not from +1 to 0.
 
-**The design this points at.** Measure subspace stability over the live set --
-the planes that actually move -- and when it is stable, take the full `eta`. No
-magnitude-derived divisor, no magnitude-ordered window.
+**The gain itself is not what is in question.** Scaling the turn by how well the
+frame repeats, and slowing it as agreement falls, is the right shape: a converged
+basis orbits on batch noise, and a controller that keeps turning at full `eta`
+through that is integrating noise into the frame. What failed is one divisor
+inside it, and the open question is whether the gain can be given a sensor that
+works or whether this lane has to accept that there is no gain sensor and set the
+turn some other way. **Deferred by decision -- discuss before building.**
+
+**The design the measurement points at.** Measure subspace stability over the
+live set -- the planes that actually move -- and when it is stable, take the full
+`eta`. No magnitude-derived divisor, no magnitude-ordered window.
 
 **What to run before changing anything.** Publish, as diagnostics only, the
 subspace agreement over all live planes beside the current top-`k` one, and the
@@ -115,10 +123,23 @@ the model's motion.
 
 **Still open, because far is not the same as right.** Displacement says the
 class is not frozen; it says nothing about whether it is over- or under-trained
-relative to the matrices. What would settle it is a paired arm at the same
-matrix lr with `fallback_lr` at `5e-6` and something like `2e-5`, judged on
-samples. Treat it as a careful sweep: this is the class that went non-finite on
-this model before, and `nonfinite_grads` is the first read to check.
+relative to the matrices. Three arms, and they are not the same experiment:
+
+- **`5e-6` (current).** The status quo, and the only one with samples behind it.
+- **`2e-5`.** More AdamW motion on the class that already dominates. Careful, not
+  bold: this is the class that went non-finite on this model before, so
+  `nonfinite_grads` is the first read to check.
+- **Frozen.** The one that answers a different and arguably better question:
+  what does UsuiTrack alone do to this model? Today every Anima result is a mix
+  of a tracked matrix update and an AdamW step that carries most of the
+  displacement, so no sample has ever been attributable to the optimizer under
+  test. Freezing gives the first clean read of it. The cost is real and should
+  be stated before running it -- AdaLN modulation is where a DiT adapts
+  conditioning strength, and freezing it may simply mean the model cannot move
+  far enough to show anything. That failure is itself informative, and cheap.
+
+The frozen arm is the interesting one and it is not obviously the safe one. It
+goes on the list as a deliberate arm, not as a default.
 
 ---
 
@@ -265,7 +286,7 @@ goal.
    `rank_table` and a `calibrate_rank`, and drains the `RankCalibrator` through
    the `pop_diagnostics` the trainer already calls on its logging cadence -- one
    logging interval is one window, and the report reaches both the log and
-   `loss_log.db` under `usuitrack/rankcal/*`. The side map stayed the hand map;
+   `loss_log.db` under `rankcal/*`. The side map stayed the hand map;
    the lab's `d_model` heuristic was **not** ported. Cross-attention `to_k`/`to_v`
    therefore tracked their 1024-wide text-context side through the calibration and
    run 9 -- held fixed on purpose, since there was no capacity to retest it there.
@@ -401,7 +422,7 @@ goal.
    The fleet mean cannot say which roles missed, which is the whole reason this
    is still open after a full run. `track_live_planes` fixes that: it attaches
    the `RankCalibrator` at the table's own ranks, with no rank override, so a
-   training run reports `rankcal/<role>/live_fraction` every logging window. The
+   training run reports `rankcal/<role>_live_fraction` every logging window. The
    meter never needed the oversized rank -- and read at the rank the table
    actually uses, `frac` **is** the correction factor. Run 11 carries it, so this
    closes from a run we were doing anyway rather than from a separate probe.

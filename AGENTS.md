@@ -166,10 +166,12 @@ config; that name is the output directory.
 A rank calibration is the same harness with `calibrate_rank` in
 `optimizer_params`: every role runs at one oversized rank and the per-role
 live-plane report drains on the logging cadence, to the log and to
-`loss_log.db` under `usuitrack/rankcal/*`. `r_cal 256` fits at bs4/768.
+`loss_log.db` under `rankcal/*` -- its own group, flat inside it as
+`rankcal/<role>_<stat>`, because a logger that renders one level of grouping
+renders two as nothing. `r_cal 256` fits at bs4/768.
 
 `track_live_planes: true` attaches the same reporter without overriding the
-rank, so a *training* run publishes `rankcal/<role>/live_fraction` at the ranks
+rank, so a *training* run publishes `rankcal/<role>_live_fraction` at the ranks
 its table actually uses. Default it on: the fleet mean cannot say which roles a
 sizing rule missed.
 

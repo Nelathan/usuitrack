@@ -23,7 +23,7 @@ were quoting could not answer the question we were asking it:
   0.556 at step 20.
 - **`track_live_planes`** (ai-toolkit) attaches the `RankCalibrator` at the
   table's own ranks with no rank override, so a *training* run publishes
-  `rankcal/<role>/live_fraction` every logging window. The meter never needed the
+  `rankcal/<role>_live_fraction` every logging window. The meter never needed the
   oversized rank. This was asked for two sessions ago and argued down; the run-10
   miss is the bill for that.
 
@@ -92,9 +92,11 @@ disk. **Take it on every Anima run from here.**
 
 1. **Read run 11.** Samples first -- they are the verdict on this lane and
    nothing else has ever ranked a design here. Then
-   `rankcal/<role>/live_fraction`, which closes `PLAN.md` P13 item 4, and
-   `transport_curve`, which is the first honest read of whether this basis
-   travels or churns.
+   `rankcal/<role>_live_fraction`, which closes `PLAN.md` P13 item 4, and
+   `transport_curve`, which reads 0.625 -- five-eighths of each window's basis
+   travel cancels. Read that as expected, not as a defect: a converged basis
+   orbits on batch noise, and the curve alone cannot separate "converged and
+   orbiting" from "never converged". It is a floor read, not a verdict.
 2. **Run `dist.py` over run 11's checkpoints** against run 10's numbers above.
    If doubling the lr did not roughly double the displacement, the step size is
    not the lever and the run count is.
@@ -106,7 +108,10 @@ disk. **Take it on every Anima run from here.**
    the frame turns further when one direction dominates -- which nobody chose,
    and which is the magnitude read re-entering the gate one step after the polar
    map discarded it. Settling it costs one diagnostic and no behaviour change:
-   publish the live-set agreement beside the top-`k` one.
+   publish the live-set agreement beside the top-`k` one. **Deferred by
+   decision** -- the gain's *shape* is right (a converged basis orbits on batch
+   noise, and the turn should slow as agreement falls); what is open is whether
+   it can be given a working sensor at all. Discuss before building.
 4. Then P18 (`fallback_lr`, never swept), P15 (cosine spread), P16 (`eta`).
 
 ## Traps
