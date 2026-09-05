@@ -98,10 +98,15 @@ disk. **Take it on every Anima run from here.**
 2. **Run `dist.py` over run 11's checkpoints** against run 10's numbers above.
    If doubling the lr did not roughly double the displacement, the step size is
    not the lever and the run count is.
-3. **P17 is the sharpest open question and it is new.** The controller's divisor
-   is computed from a magnitude-weighted spectrum that the geodesic discards,
-   and the head it measures agreement on is 1.26 effective planes wide. Settling
-   it costs one diagnostic and no behaviour change.
+3. **P17 is the sharpest open question and it is new.** `agreement_ceiling`
+   assumes the raw agreement scales with the aim's spread, so that dividing by
+   the spread makes "stable" mean one thing at any width. It does not:
+   `corr(excess, ceiling)` is `-0.16` and `-0.01` on runs 9 and 10 where the
+   premise needs `+1`. What the divisor actually does is brake with diffusion --
+   the frame turns further when one direction dominates -- which nobody chose,
+   and which is the magnitude read re-entering the gate one step after the polar
+   map discarded it. Settling it costs one diagnostic and no behaviour change:
+   publish the live-set agreement beside the top-`k` one.
 4. Then P18 (`fallback_lr`, never swept), P15 (cosine spread), P16 (`eta`).
 
 ## Traps

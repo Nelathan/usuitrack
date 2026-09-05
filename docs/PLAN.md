@@ -10,49 +10,62 @@ the frozen former PLAN as an investigation log below them. Where a line here say
 
 ---
 
-## P17. The controller is gated on a spectrum the geodesic ignores
+## P17. The turn controller's divisor is a brake, and nothing chose it
 
-**The mismatch.** Under the current order the tangent is orthogonalized before
-the geodesic reads it, so every live plane turns by exactly `eta * scale` no
-matter what its eigenvalue said. `_record_followed_step` already exists because
-of this: `transport_speed` used to be read from the eigenvalues, the proposal
-came out 2.2x the motion actually followed, and the fix was to measure the frame.
+**The agreement read is already magnitude-free where it counts.** `head` is
+orthonormal eigenvectors and the overlap is a pure subspace comparison, which is
+the right shape: after the polar map every live plane turns by `eta * scale`
+regardless of its eigenvalue, so the only thing worth asking of the frame is
+whether its directions repeat.
 
-The same eigenvalues are still load-bearing in three other places, and two of
-them are not diagnostics:
+Two places still carry magnitude. Which `AGREEMENT_PLANES` get compared is an
+eigenvalue ordering, so consecutive windows can hold different planes even when
+the live subspace is identical. And the divisor, `agreement_ceiling =
+tangent_effective_planes / k`, is the magnitude-weighted effective rank
+outright.
 
-- `agreement_ceiling`, the controller's divisor, is `tangent_effective_planes /
-  k` -- the effective rank of the magnitude-weighted spectrum.
-- the agreement itself is measured on `directions[..., :AGREEMENT_PLANES]`, the
-  16 leading planes *in magnitude order*.
-- `tangent_concentration` and `tangent_effective_planes` report that spectrum.
+**The divisor's premise is false, measured.** It assumes the raw agreement scales
+with the aim's spread -- that a wider spectrum mechanically lowers the top-`k`
+overlap, so dividing by the spread makes "stable" mean the same thing at any
+width. Reconstructing the numerator as `excess = turn_fraction *
+agreement_ceiling` over runs 9 and 10 (steps > 200, `n = 210` each):
 
-So the gate on how far the basis turns is calibrated on a magnitude ordering that
-the turn itself discards. This is the same class of error as the speed read that
-was already fixed, one level up: there it corrupted a meter, here it steers the
-controller.
+| | run 9 | run 10 |
+|---|---:|---:|
+| corr(excess, ceiling) -- should be ~ +1 | **-0.164** | **-0.008** |
+| corr(turn, ceiling) | -0.431 | -0.321 |
+| corr(turn, concentration) | +0.357 | +0.238 |
+| corr(turn, live_fraction) | -0.256 | -0.098 |
 
-**What makes it urgent is how thin the head is.** Anima runs `agreement_ceiling`
-at `0.079` with `k = 16`, which is **1.26 effective planes**. Fifteen of the
-sixteen planes the controller measures repeatability on are ordered by noise, and
-`tangent_concentration` at `0.86` says the same thing from the head: one plane
-owns the spectrum. The natural window under an orthogonalized turn is not the
-magnitude-leading 16 but the **live set** -- the planes that actually move.
+The agreement does not carry the spread. So the ceiling divides by a quantity
+absent from its numerator, and the result is not a normalization but a **brake
+that engages with diffusion**: the frame turns further when one direction
+dominates and less when the aim spreads. Not the policy anyone chose, and it is
+the magnitude read re-entering the gate one step after the turn discarded it --
+the same class of error already fixed for `transport_speed`, except there it
+corrupted a meter and here it steers.
 
-**Predictions, so this is falsifiable.** If the ordering is noise, the top-16
-agreement should be much lower than the agreement of the live subspace as a
-whole, and `turn_fraction` should be systematically under-reading how well the
-frame repeats. If the two agree, the magnitude ordering is carrying real
-information even after the turn discards it, and the ceiling stands as is.
+*Read the aggregation honestly.* `turn_fraction` is a fleet mean and
+`agreement_ceiling` a fleet median, so `excess` is reconstructed at the fleet
+level rather than per matrix, and `turn` clamps at 1 (fleet mean 0.50, so not
+saturated). That moves a correlation by hundredths, not from +1 to 0.
 
-**How to settle it, and it is cheap.** Publish the subspace agreement over all
-live planes beside the top-`k` one, on the same run, as a diagnostic only. Two
-numbers, no behaviour change, one run. Only if they diverge does the controller
-change, and then the change is a window, not a mechanism.
+**The design this points at.** Measure subspace stability over the live set --
+the planes that actually move -- and when it is stable, take the full `eta`. No
+magnitude-derived divisor, no magnitude-ordered window.
 
-**Do not fold this into a rank question.** A leaner table raises the live
-fraction and the effective-plane count moves barely at all, so the two axes look
-alike in the logs and are not.
+**What to run before changing anything.** Publish, as diagnostics only, the
+subspace agreement over all live planes beside the current top-`k` one, and the
+raw agreement itself rather than only the quotient. One run, no behaviour change.
+If the live-set agreement is high and flat while the top-`k` one wanders, the
+window is the bug; if both wander together, the frame genuinely is not repeating
+and the brake is doing something real.
+
+**Two things this is not.** It is not a rank question -- a leaner table raises
+live fraction while the effective-plane count barely moves, so the two axes look
+alike in the logs. And the answer is not "the head is too thin": the effective
+rank is a magnitude statistic, and quoting it to size a window that operates
+after the polar map is the discredited read wearing a new hat.
 
 ---
 

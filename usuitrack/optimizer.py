@@ -396,7 +396,10 @@ class UsuiTrack(Optimizer):
             near-isotropic noise tail, which is a mechanism for integrating batch
             noise into the basis. They are also near-perfectly anti-correlated on
             a real run (``-0.95`` over two Anima runs), so a story in which one
-            causes the other is a story about one number.
+            causes the other is a story about one number. Both are magnitude
+            statistics, and the geodesic turns every live plane by ``eta *
+            scale`` whatever the eigenvalue said -- so neither describes the
+            motion, only the aim it was formed from.
         ``projected_grad_norm``, ``raw_grad_norm``, ``grad_capture``,
         ``moment_persistence``
             Scale of the gradient inside the frame, outside it, their ratio, and
