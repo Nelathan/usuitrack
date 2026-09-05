@@ -126,7 +126,7 @@ interesting one over a long run: how structured the space being tracked still
 is. It is the leading direction's share of the tangent's energy, so it falls as
 the gradient's principal subspace flattens and the easy structure gets used up.
 Measured on a 1k finetune it reads `0.79` early and `0.68` by the end, while
-`tangent_participation` climbs from `0.014` to `0.020` -- the same story from the
+`tangent_effective_planes` climbs -- the same story from the
 other side, with more planes carrying comparable energy. Read together they say
 how much anisotropy is left to track, not whether the frame is chasing noise;
 speed, curve and spin are what answer that.

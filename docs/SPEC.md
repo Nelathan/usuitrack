@@ -576,10 +576,12 @@ against a long quiet interval reads as zero.
 | `transport_speed` | chordal distance the subspace moved in one geodesic, per plane, measured from the frames before and after: `||Q_now - Q_old (Q_old^T Q_now)||_F / sqrt(r)`. Every motion metric below shares this unit, so they can be divided by one another |
 | `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
 | `turn_fraction` | the controller's own output: mean turn scale in `[0,1]`, so a logged point says how much of `eta` the frame is actually taking. Without it an `eta` ladder is blind, since `eta` and the scale multiply |
-| `agreement_ceiling` | the fleet divisor `G`, one scalar per step. Rises as `tangent_participation` rises; a flat or collapsing gain means the controller has stopped tracking the aim's spread |
-| `tangent_participation` | `(sum_i lambda_i)^2 / (r sum_i lambda_i^2)`, in `[1/r, 1]`: the effective number of planes carrying the aim, as a fraction of `r`. The bulk of the same spectrum concentration reads the head of |
-| `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_participation`: participation is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
+| `agreement_ceiling` | the fleet divisor `G`, one scalar per step: `tangent_effective_planes / k` reduced over the fleet, so the two are one measurement at two reductions. A flat or collapsing gain means the controller has stopped tracking the aim's spread |
+| `tangent_effective_planes` | `(sum_i lambda_i)^2 / sum_i lambda_i^2`, in `[1, r]`: the effective number of planes carrying the aim. The bulk of the same spectrum concentration reads the head of. Published as a count, not a fraction of `r`, so it compares across rank settings -- as a fraction a leaner table raises it while the spectrum is unchanged |
+| `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_effective_planes`: the plane count is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
 | `projected_grad_norm` | norm of the sanitized gradient inside the held frame |
+| `raw_grad_norm` | norm of the same gradient before projection, as it arrived |
+| `grad_capture` | `projected_grad_norm / raw_grad_norm`: the share of the gradient's magnitude the frame catches. The only one of the three that reads the basis rather than the model -- the projected norm alone falls with a leaner rank even when every kept plane catches as much as before |
 | `moment_persistence` | how much coherent signal the average holds once the floor of an independent stream is subtracted. An EMA of independent constant-norm directions already has norm `w = sqrt((1-beta)/(1+beta))` from incomplete cancellation, so with `||M||/||O||` as `rho`, this reports `(rho^2 - w^2)/(1 - w^2)`: 0 is a white stream, 1 a direction held throughout, negative anti-correlated. The raw ratio the step size follows is recoverable as `p(1-w^2) + w^2` |
 | `grad_moment_cosine` | this step's direction against the moment as it stood *before* the blend, reconstructed so the reading is not self-referential. Read it as an overshoot meter: positive means the step under-travels and the next gradient still points where the last one did, negative means it overshoots and the gradient has flipped behind it. Zero is critically damped, which makes it a learning-rate read -- the LR that zeroes it beat a 2.2x hotter one on both eval heads |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
@@ -605,10 +607,11 @@ what accumulates over a window is holonomy plus retraction and rounding error.
 the geodesic was handed. Those agree only while nothing stands between the aim
 and the frame, and they are not the same quantity the moment anything transforms
 the geodesic -- an orthogonalized tangent turns every live plane by `eta`
-whatever `sigma` said. `tangent_concentration` and `tangent_participation` do
-come free from those eigenvalues. Read speed and concentration together: the same
-speed is a confident drift when concentration is high and a frame spinning on its
-noise tail when it is low.
+whatever `sigma` said. `tangent_concentration` and `tangent_effective_planes` do
+come free from those eigenvalues, and they are two views of one spectrum: on real
+runs they anti-correlate at `-0.95`, so neither can be evidence for the other.
+Read speed and concentration together: the same speed is a confident drift when
+concentration is high and a frame spinning on its noise tail when it is low.
 
 The tangent Gram is decomposed bare. There is no jitter and no retry: a failing
 `eigh` fails, because its result steers the frame and a silently rescued

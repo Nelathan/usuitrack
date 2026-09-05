@@ -377,27 +377,34 @@ class UsuiTrack(Optimizer):
             the controller has run out of range above it. ``agreement_ceiling``
             is what the frame was *measured against*: the fleet's attainable
             agreement, one scalar per step, and the denominator the fraction is
-            formed from. It should rise with ``tangent_participation``, since
-            that is what it is derived from; a ceiling that goes flat while
-            participation moves means the yardstick has stopped tracking the
-            aim's spread, which is the failure a frozen anchor has by
-            construction. Read the fraction with ``eta`` in mind -- the two
-            multiply, so a displacement says nothing about which produced it.
-        ``tangent_concentration``, ``tangent_participation``
-            Where that motion went, both in ``[1/r, 1]`` and both free from the
-            same eigenvalues. Concentration is the leading plane's share of the
-            tangent's energy -- the head of the spectrum. Participation is the
-            effective number of planes carrying it, ``(sum lambda)^2 / (r sum
-            lambda^2)`` -- the bulk. They separate because the spectrum is a
-            power law with no edge: a high head does not imply a short tail.
-            High concentration with low participation is a confident aim
-            drifting; low concentration with high participation is a frame
-            turning on a near-isotropic noise tail, which is a mechanism for
-            integrating batch noise into the basis.
-        ``projected_grad_norm``, ``moment_persistence``
-            Scale of the gradient inside the frame, and how much coherent
-            signal the average holds once the incomplete-cancellation floor of an
-            independent stream is subtracted. 0 is a white stream, 1 a direction
+            formed from. It is ``tangent_effective_planes / k`` reduced over the
+            fleet, so the two are one measurement at two reductions; a ceiling
+            that goes flat while the plane count moves means the yardstick has
+            stopped tracking the aim's spread, which is the failure a frozen
+            anchor has by construction. Read the fraction with ``eta`` in mind --
+            the two multiply, so a displacement says nothing about which produced
+            it.
+        ``tangent_concentration``, ``tangent_effective_planes``
+            Where that motion went, both read from the same eigenvalues.
+            Concentration is the leading plane's share of the tangent's energy in
+            ``[1/r, 1]`` -- the head of the spectrum. The plane count is the
+            effective number of planes carrying it, ``(sum lambda)^2 / sum
+            lambda^2`` in ``[1, r]`` -- the bulk. They separate because the
+            spectrum is a power law with no edge: a high head does not imply a
+            short tail. High concentration with few planes is a confident aim
+            drifting; low concentration with many is a frame turning on a
+            near-isotropic noise tail, which is a mechanism for integrating batch
+            noise into the basis. They are also near-perfectly anti-correlated on
+            a real run (``-0.95`` over two Anima runs), so a story in which one
+            causes the other is a story about one number.
+        ``projected_grad_norm``, ``raw_grad_norm``, ``grad_capture``,
+        ``moment_persistence``
+            Scale of the gradient inside the frame, outside it, their ratio, and
+            how much coherent signal the average holds once the
+            incomplete-cancellation floor of an independent stream is subtracted.
+            Only the ratio can say whether the basis catches the gradient: the
+            projected norm alone falls with a leaner rank even when every kept
+            plane catches as much as before. 0 is a white stream, 1 a direction
             held for the whole memory, negative anti-correlated. The raw norm
             ratio the step size follows is recoverable from it as
             ``p (1 - w^2) + w^2`` with ``w^2 = (1 - beta)/(1 + beta)``.
@@ -687,10 +694,21 @@ class UsuiTrack(Optimizer):
         direction: Tensor,
         moment: Tensor,
         beta: float,
+        raw_grad_norm: Tensor | None,
     ) -> None:
         if diagnostics is None:
             return
-        diagnostics.add("projected_grad_norm", projected_grad.float().norm())
+        projected_norm = projected_grad.float().norm()
+        diagnostics.add("projected_grad_norm", projected_norm)
+        if raw_grad_norm is not None:
+            # The norm alone cannot answer "is the frame catching the gradient":
+            # it falls when the basis is leaner even though every kept plane
+            # catches as much as before. The ratio is the read that can, and it
+            # needs the raw norm published beside it because the two move for
+            # different reasons -- capture is the basis's business, the raw norm
+            # is the model's.
+            diagnostics.add("raw_grad_norm", raw_grad_norm.float())
+            diagnostics.add("grad_capture", projected_norm / raw_grad_norm.float().clamp_min(1e-12))
         direction = direction.float()
         direction_norm = direction.norm()
         if beta <= 0.0:
@@ -838,7 +856,9 @@ class UsuiTrack(Optimizer):
                 moment = stored.to(dtype=torch.float32, copy=True)
                 moment.mul_(beta).add_(direction.float(), alpha=1.0 - beta)
                 entry.projected_exp_avg = moment
-                self._record_projection_diagnostics(diagnostics, entry.projected_grad, direction, moment, beta)
+                self._record_projection_diagnostics(
+                    diagnostics, entry.projected_grad, direction, moment, beta, entry.raw_grad_norm
+                )
 
             moments = [entry.projected_exp_avg for entry in bucket_entries]
             update_hats = self._orthogonalize_bucket(moments, scale) if REORTHOGONALIZE_MOMENT else moments
@@ -1285,9 +1305,15 @@ class UsuiTrack(Optimizer):
         """The shape of the aim's spectrum: how concentrated, how many planes.
 
         `tangent_concentration` is the leading eigenvalue's share of the trace and
-        `tangent_participation` the spectrum's effective rank over `r`. Together
-        they separate a confident drift from a frame spinning on its noise tail --
-        the same displacement can be either.
+        `tangent_effective_planes` the spectrum's effective rank. Together they
+        separate a confident drift from a frame spinning on its noise tail -- the
+        same displacement can be either.
+
+        The plane count is published raw, not as a fraction of `r`. Divided by
+        the rank it is not comparable across rank settings: a leaner table raises
+        the fraction while the spectrum is unchanged, and one run read that as a
+        third more planes carrying the aim when the count had moved by six
+        percent.
 
         This used to publish `transport_speed` from these eigenvalues too, as the
         displacement the geodesic *would* produce. That reading is gone: speed is
@@ -1298,13 +1324,12 @@ class UsuiTrack(Optimizer):
         if diagnostics is None:
             return
         spectrum = eigenvalues.clamp_min(0.0)
-        rank = spectrum.shape[-1]
         energy = spectrum.sum(dim=-1).clamp_min(1e-12)
         concentration = spectrum.amax(dim=-1) / energy
-        participation = energy.square() / spectrum.square().sum(dim=-1).clamp_min(1e-12) / rank
+        planes = energy.square() / spectrum.square().sum(dim=-1).clamp_min(1e-12)
         samples = int(spectrum.shape[0])
         diagnostics.add("tangent_concentration", concentration.sum(), count=samples)
-        diagnostics.add("tangent_participation", participation.sum(), count=samples)
+        diagnostics.add("tangent_effective_planes", planes.sum(), count=samples)
 
     @staticmethod
     def _basis_update_step_size(group: dict) -> float:

@@ -10,6 +10,105 @@ the frozen former PLAN as an investigation log below them. Where a line here say
 
 ---
 
+## P17. The controller is gated on a spectrum the geodesic ignores
+
+**The mismatch.** Under the current order the tangent is orthogonalized before
+the geodesic reads it, so every live plane turns by exactly `eta * scale` no
+matter what its eigenvalue said. `_record_followed_step` already exists because
+of this: `transport_speed` used to be read from the eigenvalues, the proposal
+came out 2.2x the motion actually followed, and the fix was to measure the frame.
+
+The same eigenvalues are still load-bearing in three other places, and two of
+them are not diagnostics:
+
+- `agreement_ceiling`, the controller's divisor, is `tangent_effective_planes /
+  k` -- the effective rank of the magnitude-weighted spectrum.
+- the agreement itself is measured on `directions[..., :AGREEMENT_PLANES]`, the
+  16 leading planes *in magnitude order*.
+- `tangent_concentration` and `tangent_effective_planes` report that spectrum.
+
+So the gate on how far the basis turns is calibrated on a magnitude ordering that
+the turn itself discards. This is the same class of error as the speed read that
+was already fixed, one level up: there it corrupted a meter, here it steers the
+controller.
+
+**What makes it urgent is how thin the head is.** Anima runs `agreement_ceiling`
+at `0.079` with `k = 16`, which is **1.26 effective planes**. Fifteen of the
+sixteen planes the controller measures repeatability on are ordered by noise, and
+`tangent_concentration` at `0.86` says the same thing from the head: one plane
+owns the spectrum. The natural window under an orthogonalized turn is not the
+magnitude-leading 16 but the **live set** -- the planes that actually move.
+
+**Predictions, so this is falsifiable.** If the ordering is noise, the top-16
+agreement should be much lower than the agreement of the live subspace as a
+whole, and `turn_fraction` should be systematically under-reading how well the
+frame repeats. If the two agree, the magnitude ordering is carrying real
+information even after the turn discards it, and the ceiling stands as is.
+
+**How to settle it, and it is cheap.** Publish the subspace agreement over all
+live planes beside the top-`k` one, on the same run, as a diagnostic only. Two
+numbers, no behaviour change, one run. Only if they diverge does the controller
+change, and then the change is a window, not a mechanism.
+
+**Do not fold this into a rank question.** A leaner table raises the live
+fraction and the effective-plane count moves barely at all, so the two axes look
+alike in the logs and are not.
+
+---
+
+## P18. `fallback_lr` has never been swept, and the reason to raise it was wrong
+
+The AdamW fallback covers biases, norm gains, the AdaLN modulation linears and
+the positional embedding tables. It has sat at `5e-6` on Anima through runs 9,
+10 and 11 while the matrix lr went `2e-5` -> `5e-5` -> `1e-4`, so the ratio drifted
+from 4x to 20x without anyone choosing it.
+
+**The obvious inference from that drift is false.** "This class is being left
+behind" predicts it moves least; measured against the base weights it moves
+*most*, and it is the only part of the model that does not care what the
+optimizer is doing. Relative Frobenius distance from base at step 2200, run 9
+against run 10 -- 2.5x apart in matrix lr, and the fallback identical at `5e-6`:
+
+| role | run 9 | run 10 | delta |
+|---|---:|---:|---:|
+| AdaLN + norms (fallback) | 1.549e-2 | 1.559e-2 | **+0.6%** |
+| other fallback (embeddings) | 1.068e-2 | 1.075e-2 | +0.7% |
+| whole model | 8.571e-3 | 8.800e-3 | +2.7% |
+| `patch_embed` | 8.727e-3 | 1.315e-2 | +51% |
+| `attn1_k` | 3.101e-3 | 4.847e-3 | +56% |
+| `ff_down` | 1.655e-3 | 2.455e-3 | +48% |
+| `time_embed` | 2.132e-3 | 0 | frozen |
+
+Three things fall out at once.
+
+1. **The fallback class is the largest mover in the model** -- twice the fleet
+   and four times the leanest matrix role -- at a fifth of the matrix lr. AdamW's
+   step is normalized, so it travels at about its lr per step regardless of how
+   small its gradients are, while the tracker's step is not. A lr ratio is not a
+   motion ratio, and on this pair it is not even the right sign.
+2. **It dominates the whole-model number.** Total displacement moved 2.7%
+   between two runs whose matrix roles all moved ~50%, because the part that did
+   not change is the part that carries most of the distance. Every whole-model
+   displacement figure on this lane is mostly a read of AdamW at `5e-6`.
+3. **Matrix displacement is sublinear in lr.** 2.5x the lr bought ~1.5x the
+   travel -- some of that is the leaner table cutting the step, the rest is that
+   a hotter step in a noisier direction cancels more. Run 11 doubles the lr
+   again; if the exponent holds it should land ~1.3x run 10's matrix roles, and
+   if it lands at 2x something other than the step size changed.
+
+The uncomfortable reading: if sample character is carried by the AdaLN
+modulation, three runs of tuning the tracker have been tuning the minority of
+the model's motion.
+
+**Still open, because far is not the same as right.** Displacement says the
+class is not frozen; it says nothing about whether it is over- or under-trained
+relative to the matrices. What would settle it is a paired arm at the same
+matrix lr with `fallback_lr` at `5e-6` and something like `2e-5`, judged on
+samples. Treat it as a careful sweep: this is the class that went non-finite on
+this model before, and `nonfinite_grads` is the first read to check.
+
+---
+
 ## P14. The learning rate has a rule now, and it has not been used
 
 **`grad_moment_cosine` is a calibrated LR controller.** Positive means the step
@@ -27,11 +126,25 @@ zero is critically damped. Interpolating two reads (`+0.0024` at `2e-4`,
 `-2.0e-3` target and `-4.0e-2` source, 7x and 20x their floors. The first
 Pareto move on this lane that was not bought with distance.
 
-**Open.** The rule has been confirmed at one point on one model. It should be
-checked where it matters: does the cosine-zero LR track the noise floor across
-batch size, and does it hold on Anima at bs4, where a sweep is expensive and a
-rule that needs no sweep is worth the most? Until then it is a strong
-coincidence with a mechanism, not a law.
+**It does not appear to transfer to Anima.** The meter is flat there. Runs 9 and
+10 differ by 2.5x in lr (`2e-5` -> `5e-5`) and by rank table, side map and a
+frozen time module, and `grad_moment_cosine` reads `+0.00357` and `+0.00347`
+over 2100 steps -- a difference of `1e-4` against a step-to-step range of
+`-0.006..+0.017`. It does not move with the anneal either. A meter that does not
+respond to the knob it is supposed to calibrate cannot calibrate it, so on this
+lane the rule is currently mute rather than wrong: every read is positive, which
+says under-travelling, and no lr yet run has brought it near its crossing.
+
+This is also why run 11 stops spending runs to protect a clean read of it. The
+window means quoted in earlier notes (`+0.0038` for run 9, `+0.008..0.010` for
+run 10) were window artifacts on a noisy series; the full-run means are the
+numbers above and they are the same.
+
+**Open.** The rule has been confirmed at one point on one model, and has now
+failed to respond on a second. Whether the difference is the model, the batch
+noise (Anima at bs4 is far noisier -- see P17's 1.26 effective planes), or that
+Anima has never been run hot enough to reach the crossing, is unsettled. Until
+then it is a strong coincidence with a mechanism on LFM, not a law.
 
 **Two things any LR comparison must still control for.**
 
@@ -217,7 +330,7 @@ goal.
    this lane owes is to ortho-first -- the moment cancels *after*
    orthogonalization -- and is worth 2-4x.
 
-   **Run 10** (`anima_usuitrack_10_inner_lr5e5`, wandb `7ffli01x`) is that run,
+   **Run 10** (`anima_usuitrack_10_inner_lr5e5`, wandb `7ffli01x`) was that run,
    clean over 2304 steps: lr `5e-5` annealed from 75% to `1e-5`, the unrounded
    table on the inner-side map, and the time module frozen -- its two linears
    asked for 1.7 planes of 256 and modulate every block through AdaLN, so what
@@ -237,17 +350,52 @@ goal.
 
    The shallow anneal did its job: run 10 ends still moving at 7.1e-7 per step
    where run 9 had frozen at 1.7e-7. Loss remains what it always is on this lane,
-   flat within noise across three quite different configurations. **The samples
-   are the verdict and are unreviewed.**
+   flat within noise across three quite different configurations.
 
-4. **The sizing rule is off by the rank it was measured at.** Rank set to the
-   live count measured at `r_cal 256` should put `live_fraction` at ~0.95, and
-   run 10 landed at **0.854**. So the live count is not rank-invariant at the low
-   end: at ranks of 20-51 roughly 15% fewer planes clear the Gram floor than the
-   same roles showed at 256. To sit at 0.95 the rank has to go slightly *below*
-   the measured count, and by how much is unmeasured. Cheap probe, 12 minutes: run
-   a calibration at `r_cal` equal to the table itself and read what the same roles
-   report there. Until then the rule is "the measured count lands ~0.85".
+   **Run 10's samples are reviewed and read as perturbed-then-settled**: good
+   intermediate states, anatomical breakage in places, and a final anneal that
+   comes back to roughly the concepts training started from. The natural reading
+   is that the anneal dragged the model home. **It did not.** Distance from the
+   base weights, computed from the five checkpoints, rises monotonically through
+   the entire anneal -- 7.23e-3 at step 1400 to 8.80e-3 at 2200, with no role
+   anywhere in the model reversing:
+
+   | | 1400 | 1600 | 1800 | 2000 | 2200 |
+   |---|---:|---:|---:|---:|---:|
+   | whole model | 7.226e-3 | 7.760e-3 | 8.251e-3 | 8.627e-3 | 8.800e-3 |
+
+   Nothing is pulled back; the model only slows down. So the tail shape is not
+   the disease and the total is: **0.88% displacement over 2304 steps is simply
+   not far enough to change the model durably**, and the good intermediate states
+   were transient points along a short path. That argues the peak lr dominates
+   and the anneal floor barely matters -- which is the opposite of what run 10's
+   samples looked like they were saying.
+
+   This read exists because per-step telemetry cannot answer it. Like
+   `transport_speed` against `transport_curve` one level down,
+   `update_to_param_ratio` cannot distinguish a thousand steps that add from a
+   thousand that cancel. **Checkpoints against base can, they cost nothing but
+   disk reads, and this lane should take that read on every run.**
+
+4. **The sizing rule is off by the rank it was measured at, and run 11 is
+   reading it.** Rank set to the live count measured at `r_cal 256` should put
+   `live_fraction` at ~0.95, and run 10 landed at **0.854**. So the live count is
+   not rank-invariant at the low end: at ranks of 20-51 roughly 15% fewer planes
+   clear the Gram floor than the same roles showed at 256. To sit at 0.95 the
+   rank has to go slightly *below* the measured count, and by how much is
+   unmeasured.
+
+   The fleet mean cannot say which roles missed, which is the whole reason this
+   is still open after a full run. `track_live_planes` fixes that: it attaches
+   the `RankCalibrator` at the table's own ranks, with no rank override, so a
+   training run reports `rankcal/<role>/live_fraction` every logging window. The
+   meter never needed the oversized rank -- and read at the rank the table
+   actually uses, `frac` **is** the correction factor. Run 11 carries it, so this
+   closes from a run we were doing anyway rather than from a separate probe.
+
+   A per-role correction is also the shape the answer probably has: the roles
+   sit between 9 and 51 planes, the floor is `r * eps * lambda_max`, and there is
+   no reason a role at 9 and a role at 51 lose the same fraction.
 
    Free on the same run: `grad_moment_cosine` is core-tier, so P14's overshoot
    meter got its first Anima read. At `r_cal 256`/lr `2e-5` it sits at

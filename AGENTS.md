@@ -168,6 +168,17 @@ A rank calibration is the same harness with `calibrate_rank` in
 live-plane report drains on the logging cadence, to the log and to
 `loss_log.db` under `usuitrack/rankcal/*`. `r_cal 256` fits at bs4/768.
 
+`track_live_planes: true` attaches the same reporter without overriding the
+rank, so a *training* run publishes `rankcal/<role>/live_fraction` at the ranks
+its table actually uses. Default it on: the fleet mean cannot say which roles a
+sizing rule missed.
+
+`scripts/usuitrack_base_distance.py` reads a run's checkpoints against the base
+weights and prints relative displacement per role. It is the only read that
+separates travel from churn at the weight level -- `update_to_param_ratio` is
+per-step and cannot -- and it costs nothing but disk. Run it on every finished
+Anima run.
+
 **Output goes on `/mnt/luna`, not `/mnt/mars`.** Mars is full. Each Anima
 checkpoint is 3.9 GB plus a 757 MB `optimizer.pt`, so a run keeping five of them
 needs ~20 GB. Luna is NTFS under the kernel `ntfs3` driver at ~98 MB/s, and

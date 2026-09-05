@@ -413,7 +413,10 @@ def test_core_diagnostics_read_sane_values():
 
     assert diagnostics["transport_speed"] > 0
     assert 1.0 / RANK <= diagnostics["tangent_concentration"] <= 1.0
-    assert 1.0 / RANK <= diagnostics["tangent_participation"] <= 1.0
+    assert 1.0 <= diagnostics["tangent_effective_planes"] <= RANK
+    # Capture is a fraction of the gradient the frame holds, so it cannot exceed one.
+    assert 0.0 < diagnostics["grad_capture"] <= 1.0 + 1e-6
+    assert diagnostics["raw_grad_norm"] > 0
     # Structural, not measured: the controller can only ever scale the turn down.
     assert 0.0 <= diagnostics["turn_fraction"] <= 1.0
     # A healthy aim resolves every plane above the Gram's noise floor.
