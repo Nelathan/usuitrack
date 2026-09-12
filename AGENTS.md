@@ -199,6 +199,21 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
   step suppresses the periodic saves and nothing else, so even a throwaway
   calibration writes a full 3.9 GB checkpoint and a 1.4 GB optimizer state when
   it finishes. Budget the disk for it or delete it afterwards.
+- **Gradient accumulation goes through `accumulate()`, never ai-toolkit's
+  gradient path.** `gradient_accumulation: k` in the config delivers `k` batches
+  per step, and the patched `hook_train_loop` calls `optimizer.accumulate(weight)`
+  after each backward. Its own summation is unscaled -- `Accelerator()` takes no
+  arguments, so `accelerator.backward` divides by nothing -- which would be a
+  silent `k`x learning rate if we read `.grad`. We do not; each matrix gradient is
+  still consumed and freed by the hook. `gradient_accumulation_steps` is the
+  mutually exclusive accelerate-style key and is incompatible with this path.
+- **Raising `k` without raising `lr` is a colder run.** The step carries
+  `sqrt(a + (1-a)/k)` with `a = micro_batch_agreement`, so `k=4` at low agreement
+  halves it. The `sqrt(tokens per step)` rule below is what the mechanism already
+  does; do not apply it twice, and do not assume `lr` unchanged means step
+  unchanged.
+- **Poll a long run every 25 minutes**, not 50. Longer gaps measured worse in
+  practice for keeping the session's context cache warm.
 - **A `nohup` wrapper's completion is not the run's completion.** The tool
   notification fires when the launcher exits, seconds in. Check the log.
 - **Running a script by path puts its own directory on `sys.path`,** not the lab

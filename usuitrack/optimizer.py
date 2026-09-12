@@ -50,27 +50,58 @@ GEODESIC_STEPSIZE = 0.01
 # does not), and exists to be deleted with whichever arm loses.
 REORTHOGONALIZE_MOMENT = False
 
-# Meter width for the agreement controller: how many of the tangent's leading
-# planes the persistence read spans. One plane is too noisy to steer with -- its
-# reading plateaus by step 75 and carries ~40% interval noise -- while 16 declines
-# smoothly over a whole run. Widening `k` weakens the question rather than merely
-# smoothing it: the meter is a sum of squared cosines of principal angles, so it
-# asks whether a `k`-dimensional aim persists and forgives rotation inside it.
-# Clamped to the rank actually tracked, which matters below rank 16.
-AGREEMENT_PLANES = 16
 
 
 @dataclass
-class MatrixUpdate:
+class PreparedGrad:
+    """One micro-batch's matrix gradient, projected in the frame the step holds.
+
+    Produced once per `backward()` per matrix. Under gradient accumulation there
+    are `k` of these per optimizer step and `accumulate()` folds them into the
+    `MatrixUpdate` below one at a time, so this type never holds more than one
+    micro-batch's tensors and the full matrix gradient is still freed as soon as
+    it has been projected.
+    """
+
     param: Tensor
     projector: SubspaceProjector
     projected_grad: Tensor
     original_shape: tuple[int, ...]
-    # Filled by `_apply_matrix_update_buckets`, which is where the orthogonalized
-    # direction is integrated; `_commit_moments` rounds it into state.
-    projected_exp_avg: Tensor | None = None
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
+
+
+@dataclass
+class MatrixUpdate:
+    """One optimizer step's accumulated update for one matrix.
+
+    Every field summed over micro-batches carries that micro-batch's importance
+    weight, and `_resolve_accumulated` divides by `weight` before anything reads
+    them, so the moment and the geodesic see a weighted *mean* and not a total.
+    Without accumulation there is one micro-batch at weight 1.0 and this is the
+    single step it always was.
+    """
+
+    param: Tensor
+    projector: SubspaceProjector
+    original_shape: tuple[int, ...]
+    # Sum of `w_i * polar(projected grad_i)`, fp32. The polar map runs per
+    # micro-batch, ahead of this average -- see `_orthogonalized_directions`.
+    direction: Tensor
+    weight: float | Tensor
+    projected_grad_norm: Tensor
+    micro_batches: int = 0
+    oja_tangent: Tensor | None = None
+    raw_grad_norm: Tensor | None = None
+    # `sum w_i^2 ||d_i||^2` and `sum w_i^2`. Together with `direction` and
+    # `weight` these recover the mean pairwise cosine between the micro-batch
+    # directions without keeping the directions -- see
+    # `_record_micro_batch_agreement`.
+    direction_square_sum: Tensor | None = None
+    weight_square_sum: float | Tensor = 0.0
+    # Filled by `_integrate_step`, which is where the averaged direction enters
+    # the moment; `_commit_moments` rounds it into state.
+    projected_exp_avg: Tensor | None = None
     transport_speed: Tensor | None = None
     # The in-span rotation between the frame this step's moment was measured in
     # and the frame it will be read in next step. `None` when the basis did not
@@ -148,7 +179,13 @@ class UsuiTrack(Optimizer):
             if compile_tensor_kernels
             else None
         )
-        self._pending_matrix_updates: dict[Tensor, MatrixUpdate] = {}
+        # Two stages, and the split is what makes gradient accumulation cheap.
+        # `_pending_matrix_updates` holds at most one micro-batch, cleared by
+        # every `accumulate()`; `_accumulated` holds the weighted sums that
+        # `step()` applies. Neither enters a checkpoint: they are alive only
+        # between a backward and the step that consumes it.
+        self._pending_matrix_updates: dict[Tensor, PreparedGrad] = {}
+        self._accumulated: dict[Tensor, MatrixUpdate] = {}
         # "off", "core" or "full". The line between the two live tiers is state
         # and flops, not usefulness: `core` is everything derivable from tensors
         # the step already formed, so it can be left on for a whole training run
@@ -162,13 +199,6 @@ class UsuiTrack(Optimizer):
         # memory, so `1 / (1 - beta)` is the interval at which `transport_lag`
         # reads the moment's own smear rather than an arbitrary window.
         self.diagnostics_lag_interval = 10
-        # Agreement controller state. One `[d, AGREEMENT_PLANES]` bf16 buffer per
-        # matrix -- an eighth of the basis at rank 128 -- plus one scalar ceiling
-        # for the whole model. It feeds a ratio and never the update, so bf16 is
-        # ample.
-        self._agreement_previous: dict[Tensor, Tensor] = {}
-        self._agreement_pending: list[Tensor] = []
-        self._agreement_ceiling: Tensor | None = None
         self._lag_snapshots: dict[Tensor, Tensor] = {}
         self._lag_path: dict[Tensor, Tensor] = {}
         self._lag_sampled: set[Tensor] | None = None
@@ -248,18 +278,20 @@ class UsuiTrack(Optimizer):
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         # A caller (an OOM-retry path, say) may need to bail out after prepare()
-        # has already advanced moving-average state but before step() applied it.
-        # That advance cannot be undone: those parameters carry one Oja/moment
-        # step that never reached the weights. Not good, not worth killing a run
-        # over -- so warn and drop the pending work rather than raise.
-        if self._pending_matrix_updates:
+        # or accumulate() has consumed gradients but before step() applied them.
+        # Neither writes the moment or the frame -- both happen in step() -- so
+        # what is lost is the gradients themselves, plus a basis fitted on a
+        # first step. Not worth killing a run over, so warn and drop the work.
+        outstanding = len(self._pending_matrix_updates) + len(self._accumulated)
+        if outstanding:
             warnings.warn(
                 f"UsuiTrack: zero_grad() discarded prepared updates for "
-                f"{len(self._pending_matrix_updates)} matrix parameters. Their moment state "
-                f"has advanced by one step that will not reach the weights.",
+                f"{outstanding} matrix parameters. Those gradients never reached "
+                f"the weights.",
                 stacklevel=2,
             )
         self._pending_matrix_updates.clear()
+        self._accumulated.clear()
         super().zero_grad(set_to_none=set_to_none)
 
     DIAGNOSTIC_TIERS = ("off", "core", "full")
@@ -368,22 +400,6 @@ class UsuiTrack(Optimizer):
             not move together. It also grew with rank and shared its unit with
             nothing else here, which made it unreadable against the lag it was
             meant to be compared with.
-        ``turn_fraction``, ``agreement_ceiling``
-            The turn controller's own output, and the yardstick it divides by.
-            They are not two views of one number. ``turn_fraction`` is what the
-            frame *did*: the mean fraction of ``eta`` actually taken, in
-            ``[0, 1]``. Falling means the aim has stopped repeating and the
-            tracker is settling; pinned at one means every matrix is clamped and
-            the controller has run out of range above it. ``agreement_ceiling``
-            is what the frame was *measured against*: the fleet's attainable
-            agreement, one scalar per step, and the denominator the fraction is
-            formed from. It is ``tangent_effective_planes / k`` reduced over the
-            fleet, so the two are one measurement at two reductions; a ceiling
-            that goes flat while the plane count moves means the yardstick has
-            stopped tracking the aim's spread, which is the failure a frozen
-            anchor has by construction. Read the fraction with ``eta`` in mind --
-            the two multiply, so a displacement says nothing about which produced
-            it.
         ``tangent_concentration``, ``tangent_effective_planes``
             Where that motion went, both read from the same eigenvalues.
             Concentration is the leading plane's share of the tangent's energy in
@@ -397,9 +413,9 @@ class UsuiTrack(Optimizer):
             noise into the basis. They are also near-perfectly anti-correlated on
             a real run (``-0.95`` over two Anima runs), so a story in which one
             causes the other is a story about one number. Both are magnitude
-            statistics, and the geodesic turns every live plane by ``eta *
-            scale`` whatever the eigenvalue said -- so neither describes the
-            motion, only the aim it was formed from.
+            statistics, and the geodesic turns every live plane by ``eta``
+            whatever the eigenvalue said -- so neither describes the motion, only
+            the aim it was formed from.
         ``projected_grad_norm``, ``raw_grad_norm``, ``grad_capture``,
         ``moment_persistence``
             Scale of the gradient inside the frame, outside it, their ratio, and
@@ -423,6 +439,18 @@ class UsuiTrack(Optimizer):
             Read it beside ``tangent_concentration``: disagreement with a
             concentrated spectrum is structured drift, disagreement with a flat
             one is noise.
+        ``micro_batch_agreement``
+            Only present when a step accumulated two or more micro-batches. The
+            mean pairwise cosine between their orthogonalized directions, which
+            is the aim's signal-to-noise ratio ``|s|^2 / (|s|^2 + |n|^2)``: a
+            pure-noise aim reads zero, so this is an absolute level and not a
+            quantity needing a reference run. It is the only read here that
+            compares independently-sampled batches rather than one batch against
+            history, so it is the one that can say whether a frame has arrived or
+            is orbiting on noise. It also prices accumulation's effect on the
+            step: the mean of `k` disagreeing directions is shorter than each of
+            them, so a low reading means a smaller step at the same ``lr``, which
+            ``update_to_param_ratio`` will show.
         ``transport_lag``
             Only present at ``diagnostics = "full"``. The net distance each
             sampled frame covered over the last ``diagnostics_lag_interval``
@@ -486,10 +514,11 @@ class UsuiTrack(Optimizer):
         self,
         param: Tensor,
         require_full_grad: bool = False,
-    ) -> MatrixUpdate:
+    ) -> PreparedGrad:
         if param in self._pending_matrix_updates:
             raise RuntimeError(
-                "matrix parameter is already prepared; prepare/release does not support gradient accumulation before step()"
+                "matrix parameter is already prepared; call accumulate() between backward passes "
+                "to fold each micro-batch into the pending step"
             )
         grad = param.grad
         if require_full_grad and grad is None:
@@ -508,15 +537,25 @@ class UsuiTrack(Optimizer):
         return update
 
     def released_matrix_grad_norms(self) -> tuple[Tensor, ...]:
-        """Raw full-gradient norms retained for telemetry after matrix grads are released."""
+        """Raw full-gradient norms retained for telemetry after matrix grads are released.
 
-        return tuple(
-            self._pending_matrix_updates[param].raw_grad_norm
-            for group in self.param_groups
-            for param in group["params"]
-            if param in self._pending_matrix_updates
-            and self._pending_matrix_updates[param].raw_grad_norm is not None
-        )
+        Reads whichever stage holds the current step's work: the pending
+        micro-batch before `accumulate()`, and the accumulated weighted mean
+        after it, so a caller that reads this between the last backward and
+        `step()` sees the same quantity with or without accumulation.
+        """
+
+        norms = []
+        for group in self.param_groups:
+            for param in group["params"]:
+                pending = self._pending_matrix_updates.get(param)
+                if pending is not None and pending.raw_grad_norm is not None:
+                    norms.append(pending.raw_grad_norm)
+                    continue
+                entry = self._accumulated.get(param)
+                if entry is not None and entry.raw_grad_norm is not None:
+                    norms.append(entry.raw_grad_norm / entry.weight)
+        return tuple(norms)
 
     def _matrix_group(self, param: Tensor) -> dict | None:
         group = self._matrix_param_groups.get(param)
@@ -546,32 +585,86 @@ class UsuiTrack(Optimizer):
                     raise RuntimeError("UsuiTrack does not support sparse gradients")
 
     @torch.no_grad()
+    def accumulate(self, weight: float | Tensor = 1.0) -> None:
+        """Fold one micro-batch into the step `step()` will apply.
+
+        Call it after every ``backward()``, then ``step()`` once. One call per
+        step is what ``step()`` does on its own, so nothing changes; `k` calls
+        are gradient accumulation. The accumulation lives in projected space --
+        `[d, r]` per matrix against `[m, n]` for a gradient -- so a
+        ``release_matrix_grads`` run still consumes and frees one full matrix
+        gradient at a time and the effective batch rises for free.
+
+        ``weight`` is the micro-batch's **importance weight, not its gradient
+        magnitude**. Magnitude is discarded on purpose, and that discards the
+        between-micro-batch part of any per-sample loss weighting with it -- on
+        a flow-matching lane the timestep weight, whose mean over four samples
+        moves about +-13%. Passing it here restores exactly that. The weights
+        normalize by their own sum, so their scale is free and 1.0 everywhere
+        is the unweighted mean.
+
+        Three things hold across the group of micro-batches, and each is
+        load-bearing.
+
+        **The basis does not move.** Every micro-batch projects in one frame, so
+        the sum of their Oja tangents is a sum of vectors in a single tangent
+        space rather than an average over basepoints, which is what makes the
+        arithmetic mean the geometrically correct one and needs no spherical
+        machinery.
+
+        **The polar map runs per micro-batch, ahead of the average.** Averaging
+        raw projected gradients and orthogonalizing once would hand the step to
+        whichever micro-batch was loudest -- the same failure the moment's own
+        ordering exists to prevent.
+
+        **The moment is not touched until `step()`.** It costs one accumulator
+        per matrix and it buys honest telemetry: ``grad_moment_cosine`` and
+        ``moment_persistence`` read the step that was applied, never a partial
+        one.
+        """
+
+        self._validate_step_inputs()
+        for group in self.param_groups:
+            prepared: list[PreparedGrad] = []
+            for p in group["params"]:
+                if p not in self._pending_matrix_updates:
+                    if p.grad is None:
+                        continue
+                    self._prepare_matrix_param(p)
+                prepared.append(self._pending_matrix_updates.pop(p))
+            if not prepared:
+                continue
+            directions = self._orthogonalized_directions(prepared)
+            for entry, direction in zip(prepared, directions, strict=True):
+                self._fold_micro_batch(entry, direction, weight)
+
+    @torch.no_grad()
     def step(self, closure=None):
-        if closure is not None and (self.release_matrix_grads or self._pending_matrix_updates):
+        if closure is not None and (
+            self.release_matrix_grads or self._pending_matrix_updates or self._accumulated
+        ):
             raise RuntimeError("optimizer closures cannot run while matrix updates are pending")
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
-        self._validate_step_inputs()
+        # Whatever the caller did not fold in itself. A no-op when every
+        # micro-batch already went through `accumulate()`, and the whole of the
+        # un-accumulated path when none did.
+        self.accumulate()
         self._step_update_norm_sq = None
 
         for group in self.param_groups:
-            matrix_updates = []
-
-            for p in group["params"]:
-                if p in self._pending_matrix_updates:
-                    matrix_updates.append(self._pending_matrix_updates[p])
-                    continue
-                if p.grad is None:
-                    continue
-                matrix_updates.append(self._prepare_matrix_param(p))
+            matrix_updates = [
+                self._accumulated[p] for p in group["params"] if p in self._accumulated
+            ]
             if matrix_updates:
                 basis_update_due = self._basis_update_due(group)
                 group["matrix_step"] += 1
                 if basis_update_due:
                     group["basis_update_step"] += 1
+            self._resolve_accumulated(matrix_updates)
             # Weights first, frame second. Everything in this step -- the
             # held-frame projection, the Oja tangent, and the lift back -- must
             # see the same frame `Q_t`. Moving the frame first meant the update
@@ -580,10 +673,9 @@ class UsuiTrack(Optimizer):
             # however far the tracker had just turned. History is unaffected:
             # the moment is read next step in the moved frame, where identity
             # transport is exact because the geodesic is a rigid rotation.
-            self._apply_matrix_update_buckets(matrix_updates, group)
+            self._integrate_step(matrix_updates, group)
             self._apply_basis_updates(matrix_updates, group)
             self._commit_moments(matrix_updates)
-        self._commit_agreement_ceiling()
 
         # One sample per step, not per matrix: the quantity that means something
         # is the whole step's motion against the whole model's norm, so the
@@ -594,9 +686,155 @@ class UsuiTrack(Optimizer):
         self._step_update_norm_sq = None
 
         self._pending_matrix_updates.clear()
+        self._accumulated.clear()
         return loss
 
-    def _prepare_matrix_update(self, p: Tensor, grad: Tensor, group: dict) -> MatrixUpdate:
+    @torch.no_grad()
+    def _fold_micro_batch(
+        self, prepared: PreparedGrad, direction: Tensor, weight: float | Tensor
+    ) -> None:
+        """Add one orthogonalized micro-batch into this step's weighted sums."""
+
+        direction = direction.float() * weight
+        # The sums that outlive a single micro-batch are stored at the
+        # gradient's width; see `_fold_into`.
+        accumulator_dtype = prepared.projected_grad.dtype
+        # `w_i^2 ||d_i||^2`, the weighted-sum form the agreement read needs.
+        square = direction.square().sum()
+        projected_norm = prepared.projected_grad.float().norm() * weight
+        tangent = None if prepared.oja_tangent is None else prepared.oja_tangent.float() * weight
+        raw_norm = None if prepared.raw_grad_norm is None else prepared.raw_grad_norm.float() * weight
+
+        entry = self._accumulated.get(prepared.param)
+        if entry is None:
+            state = self.state[prepared.param]
+            if state.get("projected_exp_avg") is None:
+                # Allocated here, from the projected gradient, so the moment
+                # keeps the gradient's storage dtype rather than the fp32 the
+                # accumulator works in.
+                state["projected_exp_avg"] = torch.zeros_like(prepared.projected_grad)
+            self._accumulated[prepared.param] = MatrixUpdate(
+                param=prepared.param,
+                projector=prepared.projector,
+                original_shape=prepared.original_shape,
+                direction=self._fold_into(None, direction, accumulator_dtype),
+                weight=weight,
+                projected_grad_norm=projected_norm,
+                micro_batches=1,
+                oja_tangent=(
+                    None if tangent is None else self._fold_into(None, tangent, accumulator_dtype)
+                ),
+                raw_grad_norm=raw_norm,
+                direction_square_sum=square,
+                weight_square_sum=weight * weight,
+            )
+            return
+
+        # The projector is rebuilt per prepare over the same basis tensor; the
+        # latest one is the object `_apply_basis_updates` will write through.
+        entry.projector = prepared.projector
+        self._fold_into(entry.direction, direction, accumulator_dtype)
+        entry.weight = entry.weight + weight
+        entry.projected_grad_norm = entry.projected_grad_norm + projected_norm
+        entry.micro_batches += 1
+        if tangent is not None:
+            entry.oja_tangent = self._fold_into(entry.oja_tangent, tangent, accumulator_dtype)
+        if raw_norm is not None:
+            entry.raw_grad_norm = raw_norm if entry.raw_grad_norm is None else entry.raw_grad_norm + raw_norm
+        entry.direction_square_sum = entry.direction_square_sum + square
+        entry.weight_square_sum = entry.weight_square_sum + weight * weight
+
+    @staticmethod
+    @torch.no_grad()
+    def _fold_into(total: Tensor | None, increment: Tensor, dtype: torch.dtype) -> Tensor:
+        """Add one fp32 increment into a running sum stored in `dtype`.
+
+        The folded direction and the summed Oja tangent are the only `[d, r]`
+        buffers that stay resident *across* a micro-batch group, so unlike every
+        other temporary here they are live at the same time as each backward's
+        activations. They follow the gradient's storage dtype for the same
+        reason the moment does -- on a bf16 model that halves what coexists with
+        the backward, which is the difference between fitting and not at an
+        oversized rank on a 12 GB card, and on an fp32 model the sum stays
+        exact.
+
+        In bf16 the write is stochastically rounded, and that is not optional:
+        increment `i` of `k` is about `1/k` of the total it lands on, and
+        round-to-nearest drops a quarter-ulp change outright -- the same sub-ulp
+        loss `copy_stochastic_` exists to fix for weights. Rounded this way each
+        sum keeps its expectation equal to the fp32 sum.
+
+        The agreement read survives it. It recovers `a` from `||S||^2 - Q`, a
+        difference that is `(k-1) a` of `Q` -- under a percent at the agreement
+        this lane shows -- but the rounding error is per-element and unbiased, so
+        in the norm it shrinks as `1 / sqrt(d r)` and lands orders of magnitude
+        below that signal.
+        """
+
+        if total is None:
+            total = torch.zeros(increment.shape, dtype=dtype, device=increment.device)
+        if wants_stochastic_rounding(total):
+            copy_stochastic_(total, total.float().add_(increment))
+        else:
+            total.add_(increment.to(total.dtype))
+        return total
+
+    @torch.no_grad()
+    def _resolve_accumulated(self, entries: list[MatrixUpdate]) -> None:
+        """Turn the weighted sums into weighted means, once, before anything reads them.
+
+        Also the last point at which the micro-batches can still be told apart,
+        so the agreement read happens here.
+        """
+
+        diagnostics = self._diagnostics_sink()
+        for entry in entries:
+            self._record_micro_batch_agreement(diagnostics, entry)
+            # Back to fp32 as the means leave the accumulator: bf16 is the
+            # storage that had to be small, not the arithmetic downstream.
+            entry.direction = entry.direction.float() / entry.weight
+            entry.projected_grad_norm = entry.projected_grad_norm / entry.weight
+            if entry.oja_tangent is not None:
+                entry.oja_tangent = entry.oja_tangent.float() / entry.weight
+            if entry.raw_grad_norm is not None:
+                entry.raw_grad_norm = entry.raw_grad_norm / entry.weight
+
+    @staticmethod
+    def _record_micro_batch_agreement(
+        diagnostics: DiagnosticsAccumulator | None, entry: MatrixUpdate
+    ) -> None:
+        """Mean pairwise cosine between the micro-batch directions this step averaged.
+
+        The anchor-free level reference the aim has never had. Two
+        independently-sampled batch gradients agree in expectation by
+        ``|s|^2 / (|s|^2 + |n|^2)``, the aim's signal-to-noise ratio, and a pure
+        noise aim reads exactly zero -- so this is a distance above a floor
+        without needing a synthetic pure-noise run to establish the floor.
+        Agreement *between samples* is what the deleted top-`k` gain was
+        reaching for and could never measure from one batch's spectrum.
+
+        Published, and deliberately wired to nothing. A controller driven off
+        this would be the agreement gain again, and the objection to that was
+        never the sensor's quality: a magnitude functional has no business
+        gating a step whose whole purpose is that magnitude decides nothing.
+
+        Recovered from the sums rather than the directions, which is why the
+        directions need not be kept. With `S = sum w_i d_i`, `Q = sum w_i^2
+        ||d_i||^2` and equal `||d_i||` -- the polar factor's Frobenius norm is
+        fixed by shape, so they are equal to Newton-Schulz's convergence error
+        -- the mean pairwise cosine is `w2 (||S||^2 - Q) / (Q (W^2 - w2))`.
+        Costs one norm of a tensor already in hand, on device, no sync.
+        """
+
+        if diagnostics is None or entry.micro_batches < 2 or entry.direction_square_sum is None:
+            return
+        square_sum = entry.direction_square_sum
+        pairs = entry.weight * entry.weight - entry.weight_square_sum
+        denominator = square_sum * pairs / entry.weight_square_sum
+        agreement = (entry.direction.float().square().sum() - square_sum) / denominator
+        diagnostics.add("micro_batch_agreement", agreement)
+
+    def _prepare_matrix_update(self, p: Tensor, grad: Tensor, group: dict) -> PreparedGrad:
         state = self.state[p]
         projector = self._projector_from_state(p, group, state)
 
@@ -634,9 +872,7 @@ class UsuiTrack(Optimizer):
             self._initialize_projector(projector, grad, state)
         projected_grad = projector.project(grad)
 
-        state["step"] = state.get("step", 0) + 1
-
-        return MatrixUpdate(
+        return PreparedGrad(
             param=p,
             projector=projector,
             projected_grad=projected_grad,
@@ -652,10 +888,9 @@ class UsuiTrack(Optimizer):
         projector: SubspaceProjector,
         state: dict,
         group: dict,
-    ) -> MatrixUpdate:
+    ) -> PreparedGrad:
         diagnostics = self._diagnostics_sink()
         self._record_incoming_grad_diagnostics(diagnostics, grad)
-        state["step"] = state.get("step", 0) + 1
         basis = projector.basis
         assert basis is not None
         is_right = projector._basis_side() is ProjectionSide.RIGHT
@@ -669,7 +904,7 @@ class UsuiTrack(Optimizer):
             basis,
         )
 
-        return MatrixUpdate(
+        return PreparedGrad(
             param=p,
             projector=projector,
             projected_grad=projected_grad,
@@ -693,15 +928,18 @@ class UsuiTrack(Optimizer):
     @staticmethod
     def _record_projection_diagnostics(
         diagnostics: DiagnosticsAccumulator | None,
-        projected_grad: Tensor,
-        direction: Tensor,
+        entry: MatrixUpdate,
         moment: Tensor,
         beta: float,
-        raw_grad_norm: Tensor | None,
     ) -> None:
         if diagnostics is None:
             return
-        projected_norm = projected_grad.float().norm()
+        direction = entry.direction
+        raw_grad_norm = entry.raw_grad_norm
+        # Already the micro-batch mean: `_resolve_accumulated` divided both the
+        # norm and the direction by the weight they were summed with, so every
+        # read below describes the step that is about to be applied.
+        projected_norm = entry.projected_grad_norm
         diagnostics.add("projected_grad_norm", projected_norm)
         if raw_grad_norm is not None:
             # The norm alone cannot answer "is the frame catching the gradient":
@@ -710,9 +948,8 @@ class UsuiTrack(Optimizer):
             # needs the raw norm published beside it because the two move for
             # different reasons -- capture is the basis's business, the raw norm
             # is the model's.
-            diagnostics.add("raw_grad_norm", raw_grad_norm.float())
-            diagnostics.add("grad_capture", projected_norm / raw_grad_norm.float().clamp_min(1e-12))
-        direction = direction.float()
+            diagnostics.add("raw_grad_norm", raw_grad_norm)
+            diagnostics.add("grad_capture", projected_norm / raw_grad_norm.clamp_min(1e-12))
         direction_norm = direction.norm()
         if beta <= 0.0:
             # `w` below is 1 and the read is 0/0: with no memory the moment is
@@ -726,6 +963,11 @@ class UsuiTrack(Optimizer):
         # to the mean's share of the direction's energy: 0 is a white stream, 1 a
         # direction held throughout, and negative is anti-correlated, which is
         # what the raw gradient stream reads before the polar map.
+        #
+        # Under accumulation the floor is approximate rather than exact: it
+        # assumes a constant-norm stream, and the mean of `k` micro-batch
+        # directions has a norm that falls with how much they disagree. Read
+        # `micro_batch_agreement` beside it, which measures exactly that.
         #
         # It bounds the mean's *energy*, not its worth. A mean far too small to
         # move this read still decides where a thousand accumulated steps land,
@@ -805,25 +1047,35 @@ class UsuiTrack(Optimizer):
         grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
         return grad, grad.float().norm().detach()
 
-    def _apply_matrix_update_buckets(self, entries: list[MatrixUpdate], group: dict) -> None:
-        """Orthogonalize this step's gradient, then integrate the direction.
+    def _orthogonalized_directions(self, prepared: list[PreparedGrad]) -> list[Tensor]:
+        """The polar map over one micro-batch's projected gradients.
 
-        **The polar map runs before the average, not after.** Every step enters
-        the moment with a flat spectrum, so one batch's dominant plane cannot own
-        the memory by being large -- the same reordering that fixed the aim,
-        where a directional burst used to own the turn. What the average keeps is
-        magnitude as agreement: planes that persist stay long, planes that
-        oscillate cancel toward zero, and the step shrinks where the direction is
-        contested instead of being restored to full size by a second polar map.
-        Under the old order that restoration was unconditional, which is why a
-        moment that had cancelled to a fifteenth of the gradient still took a
-        full-sized step. `REORTHOGONALIZE_MOMENT` puts it back as the control.
+        **The polar map runs before the average, not after** -- before the
+        moment's average, and under accumulation before the micro-batches'
+        average too. Every contribution enters with a flat spectrum, so one
+        batch's dominant plane cannot own the memory by being large, the same
+        reordering that fixed the aim where a directional burst used to own the
+        turn. What the averages keep is magnitude as agreement: planes that
+        persist stay long, planes that oscillate cancel toward zero, and the
+        step shrinks where the direction is contested instead of being restored
+        to full size by a second polar map. Under the old order that restoration
+        was unconditional, which is why a moment that had cancelled to a
+        fifteenth of the gradient still took a full-sized step.
+        `REORTHOGONALIZE_MOMENT` puts it back as the control.
+        """
 
-        Grouped so one Newton-Schulz call serves every same-shaped matrix. Keyed
-        on the projected shape (torch.stack's actual requirement) and the scale,
-        not the original parameter shape that scale is computed from. Several
-        original shapes can share a scale -- `_muon_aspect_scale` clamps to 1.0
-        for every matrix tracked on its wider side, so a fleet of
+        return self._bucketed_polar(
+            [entry.projected_grad for entry in prepared],
+            [entry.original_shape for entry in prepared],
+        )
+
+    def _bucketed_polar(self, tensors: list[Tensor], shapes: list[tuple[int, ...]]) -> list[Tensor]:
+        """One Newton-Schulz call per group of entries sharing shape and scale.
+
+        Keyed on the projected shape (torch.stack's actual requirement) and the
+        scale, not the original parameter shape that scale is computed from.
+        Several original shapes can share a scale -- `_muon_aspect_scale` clamps
+        to 1.0 for every matrix tracked on its wider side, so a fleet of
         differently-shaped `w2`-like matrices collapses into one bucket. The
         scale each entry receives is exact, the same float it would have gotten
         alone; the orthogonalized direction is not bitwise identical to running
@@ -833,40 +1085,48 @@ class UsuiTrack(Optimizer):
         the same magnitude convention as applying it last.
         """
 
+        buckets: dict[tuple, list[int]] = {}
+        for index, (tensor, shape) in enumerate(zip(tensors, shapes, strict=True)):
+            key = (tuple(tensor.shape), UsuiTrack._muon_aspect_scale(shape))
+            buckets.setdefault(key, []).append(index)
+
+        mapped: list[Tensor | None] = [None] * len(tensors)
+        for (_projected_shape, scale), indices in buckets.items():
+            directions = self._orthogonalize_bucket([tensors[index] for index in indices], scale)
+            for index, direction in zip(indices, directions, strict=True):
+                mapped[index] = direction
+        assert all(direction is not None for direction in mapped)
+        return mapped  # type: ignore[return-value]
+
+    def _integrate_step(self, entries: list[MatrixUpdate], group: dict) -> None:
+        """Blend this step's averaged direction into the moment and move the weights."""
+
         if not entries:
             return
 
         beta = float(group["beta"])
         diagnostics = self._diagnostics_sink()
-        buckets: dict[tuple, list[MatrixUpdate]] = {}
         for entry in entries:
-            scale = UsuiTrack._muon_aspect_scale(entry.original_shape)
-            key = (tuple(entry.projected_grad.shape), scale)
-            buckets.setdefault(key, []).append(entry)
+            state = self.state[entry.param]
+            state["step"] = state.get("step", 0) + 1
+            stored = state["projected_exp_avg"]
+            # fp32 from here through the frame rotation to a single rounded
+            # commit in `_commit_moments`. `copy=True` because `.float()` on
+            # an already-fp32 moment aliases the stored tensor, and this must
+            # not write through to state before the rotation has been applied.
+            moment = stored.to(dtype=torch.float32, copy=True)
+            moment.mul_(beta).add_(entry.direction, alpha=1.0 - beta)
+            entry.projected_exp_avg = moment
+            self._record_projection_diagnostics(diagnostics, entry, moment, beta)
 
-        for (_projected_shape, scale), bucket_entries in buckets.items():
-            directions = self._orthogonalize_bucket([e.projected_grad for e in bucket_entries], scale)
-            for entry, direction in zip(bucket_entries, directions, strict=True):
-                state = self.state[entry.param]
-                stored = state.get("projected_exp_avg")
-                if stored is None:
-                    stored = torch.zeros_like(entry.projected_grad)
-                    state["projected_exp_avg"] = stored
-                # fp32 from here through the frame rotation to a single rounded
-                # commit in `_commit_moments`. `copy=True` because `.float()` on
-                # an already-fp32 moment aliases the stored tensor, and this must
-                # not write through to state before the rotation has been applied.
-                moment = stored.to(dtype=torch.float32, copy=True)
-                moment.mul_(beta).add_(direction.float(), alpha=1.0 - beta)
-                entry.projected_exp_avg = moment
-                self._record_projection_diagnostics(
-                    diagnostics, entry.projected_grad, direction, moment, beta, entry.raw_grad_norm
-                )
-
-            moments = [entry.projected_exp_avg for entry in bucket_entries]
-            update_hats = self._orthogonalize_bucket(moments, scale) if REORTHOGONALIZE_MOMENT else moments
-            for entry, update_hat in zip(bucket_entries, update_hats, strict=True):
-                self._apply_matrix_update(entry, update_hat, group)
+        moments = [entry.projected_exp_avg for entry in entries]
+        update_hats = (
+            self._bucketed_polar(moments, [entry.original_shape for entry in entries])
+            if REORTHOGONALIZE_MOMENT
+            else moments
+        )
+        for entry, update_hat in zip(entries, update_hats, strict=True):
+            self._apply_matrix_update(entry, update_hat, group)
 
     def _orthogonalize_bucket(self, tensors: list[Tensor], scale: float) -> list[Tensor]:
         if len(tensors) == 1:
@@ -910,7 +1170,7 @@ class UsuiTrack(Optimizer):
                 frames = torch.stack([entry.projector.canonical_basis() for entry in selected_entries])
                 selected_tangents = torch.stack([entry.oja_tangent for entry in selected_entries if entry.oja_tangent is not None])
                 selected_vectors = eigenvectors[indices]
-                selected_tangents, selected_values = self._anneal_tangent(
+                selected_tangents, selected_values = self._polar_tangent(
                     selected_entries,
                     selected_tangents,
                     eigenvalues[indices],
@@ -1007,175 +1267,88 @@ class UsuiTrack(Optimizer):
                 stored.copy_(moment)
 
     @torch.no_grad()
-    def _anneal_tangent(
+    def _polar_tangent(
         self,
         entries: list[MatrixUpdate],
         tangents: Tensor,
         eigenvalues: Tensor,
         eigenvectors: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """Turn every plane by the same angle, scaled by how much the aim repeats.
+        """Turn every live plane by the same angle, `eta`, with no gain on top.
 
-        Two decisions, taken together because neither survives alone.
+        **Magnitude decides nothing.** The tangent is replaced by its polar
+        factor, which is the same distrust of magnitude the weight update already
+        applies: Newton-Schulz throws away the projected moment's singular values
+        because direction is what survives a noisy batch and magnitude is not,
+        and the tangent's singular values deserve no more credit. They would only
+        decide how the frame's motion is divided between planes, and the leading
+        plane -- which owns most of the displacement -- is measurably the least
+        persistent thing in the aim. `polar(Delta) = Delta V diag(1/sigma) V^T`
+        falls straight out of the eigendecomposition the geodesic already needs,
+        so this costs two `[r, r]` matmuls and no Newton-Schulz.
 
-        **Every live plane turns by the same angle.** The tangent is replaced by
-        its polar factor, which is the same distrust of magnitude the weight
-        update already applies: Newton-Schulz throws away the projected moment's
-        singular values because direction is what survives a noisy batch and
-        magnitude is not, and the tangent's singular values deserve no more
-        credit. They only decide how the frame's motion is divided between
-        planes, and the leading plane -- which owns most of the displacement --
-        is measurably the least persistent thing in the aim. `polar(Delta) =
-        Delta V diag(1/sigma) V^T` falls straight out of the eigendecomposition
-        the geodesic already needs, so this costs two `[r,r]` matmuls and no
-        Newton-Schulz. Numerically dead planes are held still rather than divided
-        by, preserving the identity that a zero singular plane does not move.
+        **Dead planes are held still**, not merely handed a zero tangent column.
+        A plane is live only if it clears the Gram's own numerical noise floor:
+        a symmetric `[r, r]` decomposition carries backward error of order
+        `r * eps * lambda_max`, which is `sqrt(r * eps) * sigma_max` in these
+        units -- `2.8e-3` at rank 64 in fp32. The threshold here used to be
+        `1e-6 * sigma_max`, six orders below what fp32 can resolve, so no plane
+        was ever dead. Measured, that mattered and not equally: LFM at rank 128
+        resolves 79% of its planes, Anima at rank 64 resolves 45%. Under the old
+        threshold the rest were driven anyway -- `1 / sigma` promotes a rounding
+        artifact to a unit-norm direction and the polar step turns it by the same
+        angle as the plane carrying the signal -- and on Anima those noise
+        directions fed back into the next tangent Gram until `eigh` failed within
+        twenty steps. The zero must reach the *angle*, not just the tangent: the
+        geodesic reads `cos(eta * sigma)` on the frame's own component along each
+        eigenvector, so a dead plane handed a live angle contracts that component
+        against a tangent term that is zero, which is not a rotation.
 
-        **How far it turns comes from time, not from the spectrum.** Bare polar
-        has no fixed point: it turns by `eta` forever, whether or not the frame
-        has arrived. And the spectrum cannot supply one, because measured under
-        this transform it is a smooth power law -- `sigma^2 ~ k^-1.5` across four
-        decades -- with no edge separating signal from noise. The time axis can. A
-        skewed frame emits a residual that repeats, since it is re-measuring its
-        own lag every step, while an aligned frame emits uncorrelated batch
-        noise. So the turn is scaled by `agreement`, the mean squared cosine of
-        the principal angles between this step's top-`k` aim and the previous
-        step's.
+        **There is no gain, and the reason is that nothing measured one.** The
+        turn used to be scaled by how well the aim repeated -- the mean squared
+        cosine of the principal angles between consecutive top-`k` aims, divided
+        by an attainable ceiling. The shape of that idea is still right: a
+        converged frame orbits on batch noise and should stop turning. What has
+        never existed is a sensor for it. The two-lag form that would derive the
+        anchor instead of remembering it is falsified in `ARCHIVE.md` -- the
+        aim's persistence *shape* is stationary while its level is not, so the
+        ratio holds at ~0.81 and anneals nothing. The ceiling that replaced it is
+        `effective_rank / k`, a magnitude functional gating a step this method
+        exists to make magnitude-free, and on Anima it annealed the turn by 1.21x
+        over 2100 steps -- close to inert. A controller that cannot tell arrival
+        from batch noise is not a controller. Constant turn until something
+        measures the thing the gain was for.
 
-        **The normalization carries no fitted constant.** Chance agreement between
-        two random `k`-subspaces of the `(d-r)`-dimensional horizontal complement
-        is `k/(d-r)`, the `floor` below, subtracted so that an aim agreeing only
-        by chance stops the frame. The top of the range is not perfect agreement:
-        a single-batch aim never repeats exactly, so what is attainable is set by
-        how many planes the aim actually occupies. The aim's effective rank is
-        `(sum lambda)^2 / sum lambda^2`, and a top-`k` meter can at best reproduce
-        that many directions, so `effective_rank / k` is the agreement a matrix
-        could reach. The fleet median of that is the ceiling the meter is read
-        against.
-
-        Why the fleet and not each matrix: per matrix, a matrix's own effective
-        rank predicts its own attainable agreement with a 3.6x spread -- worse
-        than using no per-matrix term at all -- while the fleet median lands
-        within 6% of the fleet median of the ceilings actually observed. The
-        signal is in the fleet, not the individual, which is also what makes one
-        global yardstick defensible: the ceilings span only 2.4x across the middle
-        80%. Dividing by a shared ceiling therefore leaves the differences between
-        matrices intact, so a matrix that holds its aim longer keeps turning
-        instead of having that normalized away.
-
-        The ceiling is recomputed every step from eigenvalues already in hand, with a
-        one-step lag so the median spans the whole model rather than whichever
-        bucket is in flight. Nothing is remembered, which is the property a
-        running peak could not have: measured, the attainable ceiling *rises ~47%
-        over a run* as the gradient's principal subspace flattens and the aim
-        spreads over more planes, so an anchor frozen during acquisition is
-        describing a spectrum the model has since left.
-
-        `scale <= 1` is structural, so the frame can never turn harder than bare
-        polar at the same `eta` -- a bound rather than a measurement. It matters:
-        normalizing the other way, with acquisition running 4x hot, was tried and
-        diverged inside 14 steps. With no history there is no evidence the aim
-        repeats, so the scale is zero and the frame holds; that costs exactly one
-        basis update and is what keeps the first turn off the stability cliff.
-
-        Honest limit: the meter plateaus above its floor rather than reaching it,
-        so this anneals the turn by ~4x and then holds. It buys acquisition and a
-        derived scale; it is not a stopping condition for the frame.
+        Its price is named: nothing here slows down near the answer. `eta` is the
+        only remaining term, and scheduling it on the prior that aiming gets
+        harder as the loss surface smooths is a knob we have, not a sensor.
         """
 
         sigma = eigenvalues.clamp_min(0.0).sqrt()
-        # A plane is live only if it clears the Gram's own numerical noise floor.
-        # A symmetric `[r, r]` decomposition carries backward error of order
-        # `r * eps * lambda_max`, which is `sqrt(r * eps) * sigma_max` in these
-        # units -- `2.8e-3` at rank 64 in fp32. The threshold here used to be
-        # `1e-6 * sigma_max`, or `1e-12` in eigenvalue terms: six orders of
-        # magnitude below what fp32 can resolve, so no plane was ever dead.
-        # Measured, that mattered everywhere and not equally: LFM at rank 128
-        # resolves 79% of its planes, Anima at rank 64 resolves 45%. Under the
-        # old threshold the rest were driven anyway -- `1 / sigma` promotes a
-        # rounding artifact to a unit-norm direction, and the polar step then
-        # turns it by the same angle as the plane carrying the signal. On LFM
-        # that cost nothing measurable; on Anima the noise directions fed back
-        # into the next tangent Gram and `eigh` failed within twenty steps.
         noise_floor = math.sqrt(sigma.shape[-1] * torch.finfo(sigma.dtype).eps)
         live = sigma > noise_floor * sigma.amax(dim=-1, keepdim=True).clamp_min(1e-30)
         inverse = torch.where(live, 1.0 / sigma.clamp_min(1e-30), torch.zeros_like(sigma))
 
-        # Normalized columns of `Delta V`: the tangent's plane directions. `eigh`
-        # returns ascending, so flipping puts the leading plane first and the
-        # meter's `head` is a plain prefix.
-        directions = ((tangents @ eigenvectors) * inverse.unsqueeze(-2).to(tangents.dtype)).flip(-1)
-        rank = directions.shape[-1]
-        keep = min(AGREEMENT_PLANES, rank)
-        head = directions[..., :keep].float()
-        floor = keep / max(1, directions.shape[-2] - rank)
-
-        stored = [self._agreement_previous.get(entry.param) for entry in entries]
-        for entry, current in zip(entries, head.unbind(0), strict=True):
-            self._agreement_previous[entry.param] = current.to(torch.bfloat16)
-
-        scale = torch.zeros(head.shape[0], device=tangents.device, dtype=torch.float32)
-        ceiling = self._agreement_ceiling
-        ready = [index for index, past in enumerate(stored) if past is not None and past.shape == head.shape[1:]]
-        if ready and ceiling is not None:
-            rows = torch.tensor(ready, device=tangents.device)
-            cross = head[rows].mT @ torch.stack([stored[index] for index in ready]).float()
-            agreement = cross.square().flatten(1).sum(-1) / keep
-            excess = (agreement - floor).clamp_min(0.0)
-            scale[rows] = (excess / ceiling.clamp_min(1e-12)).clamp(0.0, 1.0)
-
-        # Next step's divisor, per matrix and so free of any assumption that one
-        # rank spans the fleet: `effective_rank / k` with both read from this
-        # matrix's own spectrum.
-        spectrum = eigenvalues.clamp_min(0.0).float()
-        energy = spectrum.sum(dim=-1).clamp_min(1e-12)
-        attainable = energy.square() / spectrum.square().sum(dim=-1).clamp_min(1e-12) / keep
-        self._agreement_pending.append(attainable)
+        # `Delta V diag(1/sigma) V^T`, the polar factor: unit-length plane
+        # directions carried back into the eigenbasis the geodesic reads.
+        directions = (tangents @ eigenvectors) * inverse.unsqueeze(-2).to(tangents.dtype)
+        polar = directions @ eigenvectors.mT
 
         if self.rank_calibrator is not None:
             group = self._matrix_param_groups.get(entries[0].param)
             label = group.get("calibration_label") if group is not None else None
             if label is not None:
-                self.rank_calibrator.observe(label, rank, [entry.param for entry in entries], live.sum(dim=-1))
+                self.rank_calibrator.observe(label, sigma.shape[-1], [entry.param for entry in entries], live.sum(dim=-1))
 
         diagnostics = self._diagnostics_sink()
         if diagnostics is not None:
-            diagnostics.add("turn_fraction", scale.sum(), count=scale.shape[0])
-            diagnostics.add("tangent_live_fraction", live.sum() / rank, count=live.shape[0])
+            diagnostics.add("tangent_live_fraction", live.sum() / sigma.shape[-1], count=live.shape[0])
 
-        # The geodesic reads its per-plane angles as `sqrt(eigenvalues)`, and the
-        # polar factor's own singular values are all one, so handing it `scale^2`
-        # is what makes every live plane turn by exactly `eta * scale`.
-        annealed = (directions.flip(-1) @ eigenvectors.mT) * scale.to(tangents.dtype).reshape(-1, 1, 1)
-        # Dead planes get a zero angle, not merely a zero tangent column. The
-        # geodesic reads `cos(eta * sigma)` on the frame's own component along
-        # each eigenvector, so a dead plane handed the live angle contracts that
-        # component while the tangent term it should have been rotated against is
-        # zero. That is not a rotation, and it is the identity this method claims
-        # when it says a zero singular plane does not move.
-        values = torch.where(
-            live,
-            scale.square().unsqueeze(-1),
-            torch.zeros_like(scale).unsqueeze(-1),
-        ).to(eigenvalues.dtype)
-        return annealed, values
-
-    @torch.no_grad()
-    def _commit_agreement_ceiling(self) -> None:
-        """Fold this step's attainable ceilings into the divisor the next one uses.
-
-        Median rather than mean, because the fleet contains matrices whose aim is
-        near-rank-one and the controller should not be steered by them. Committed
-        once per step, after every group, so the fleet is the model.
-        """
-
-        if not self._agreement_pending:
-            return
-        self._agreement_ceiling = torch.cat(self._agreement_pending).median()
-        self._agreement_pending.clear()
-        diagnostics = self._diagnostics_sink()
-        if diagnostics is not None:
-            diagnostics.add("agreement_ceiling", self._agreement_ceiling)
+        # The geodesic reads its per-plane angles as `sqrt(values)` and the polar
+        # factor's own singular values are all one, so unit values are what make
+        # every live plane turn by exactly `eta`.
+        values = live.to(eigenvalues.dtype)
+        return polar, values
 
     def _lag_sample(self) -> set[Tensor]:
         """The matrices the snapshot instruments follow, chosen once.

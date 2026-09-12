@@ -108,6 +108,7 @@ raw gradient G
   -> Aurora leverage balance (normalization)
   -> Newton-Schulz polar map (orthogonalization)
   -> Muon aspect scale, read from the parameter shape
+  -> under accumulation: weighted mean over the group's micro-batches
   -> projected EMA M of the orthogonalized direction
   -> lift through the held frame Q
   -> parameter update
@@ -183,44 +184,44 @@ angle, and how large that angle is comes from time rather than from the spectrum
 
 $$\operatorname{polar}(\Delta)=\Delta V\operatorname{diag}(1/\sigma_i)V^\top,$$
 
-with numerically dead planes (`sigma_i <= 1e-6 sigma_max`) held at zero rather
-than divided by, preserving the identity that a zero-singular plane does not
-move. This is the same distrust of magnitude the weight update already applies:
+with numerically dead planes -- `sigma_i <= sqrt(r eps) sigma_max`, the Gram's
+own backward error -- held at zero rather than divided by, preserving the
+identity that a zero-singular plane does not move. The zero reaches the angle,
+not merely the tangent column: a dead plane handed a live angle would contract
+the frame's component along that eigenvector against a tangent term that is
+zero, which is not a rotation. This is the same distrust of magnitude the weight update already applies:
 Newton-Schulz discards the projected moment's singular values because direction
 survives a noisy batch and magnitude does not, and the tangent's singular values
 only decide how motion is divided between planes. It costs two `[r,r]` matmuls
 and reuses the eigendecomposition the geodesic already needs.
 
-**Agreement annealing.** Bare polar has no fixed point -- it turns by `eta`
-forever -- and the spectrum cannot supply one: measured under this transform it
-is a smooth power law, `sigma^2 ~ k^{-1.5}` across four decades, with no edge
-separating signal from noise. The time axis can. With `H_t` the leading
-`k = min(16, r)` normalized plane directions of `Delta_t`,
+**The turn is constant.** Every live plane turns by exactly `eta`, and nothing
+scales it. Bare polar has no fixed point -- it turns by `eta` forever, whether or
+not the frame has arrived -- and no measurement has ever supplied one. The
+spectrum cannot: under this transform it is a smooth power law, `sigma^2 ~
+k^{-1.5}` across four decades, with no edge separating signal from noise. The
+time axis was tried and did not deliver either. A gain scaled by how well
+consecutive top-`k` aims agreed, divided by an attainable ceiling
+`(\sum\lambda)^2/(\sum\lambda^2 k)`, shipped for several runs and is now
+removed on two grounds: the ceiling is a magnitude functional gating a step whose
+whole purpose is to be magnitude-free, and on Anima it annealed the turn by 1.21x
+over 2100 steps while on LFM it looked like it worked. The anchor-free two-lag
+form that would replace the ceiling is separately falsified -- the aim's
+persistence *shape* is stationary while its level is not, so the ratio holds near
+0.81 and anneals nothing (`ARCHIVE.md`).
 
-$$a_t=\frac{\lVert H_t^\top H_{t-1}\rVert_F^2}{k},\qquad
-s_t=\operatorname{clamp}\!\left(\frac{a_t-k/(d-r)}{G_t},\,0,\,1\right),$$
+The shape of the idea remains right: a converged frame orbits on batch noise and
+should stop turning. What does not exist is a sensor that can tell arrival from
+batch noise, and at bs4 a spreading aim is what noise alone produces. Until one
+exists the turn is constant, which at least makes frame motion a single term that
+`transport_speed` and `transport_curve` read directly. `eta` is then the only
+handle, and scheduling it on the prior that aiming gets harder as the surface
+smooths is a knob, not a sensor.
 
-and the geodesic runs on `s_t polar(Delta)`, so every live plane turns by exactly
-`eta s_t`. `a_t` is the mean squared cosine of the principal angles between
-consecutive top-`k` aims: it asks whether a `k`-dimensional aim persists and
-forgives rotation inside it. A skewed frame re-measures its own lag every step
-and reads high; an aligned frame emits uncorrelated batch noise and reads low.
-
-Neither anchor is fitted. `k/(d-r)` is the agreement of two random `k`-subspaces
-of the horizontal complement, so an aim agreeing only by chance stops the frame.
-The divisor `G_t` is the fleet median of `(\sum\lambda)^2/(\sum\lambda^2 k)` --
-each matrix's own effective aim rank over the meter width -- computed every step
-from eigenvalues already in hand, with a one-step lag so the median spans the
-whole model rather than one bucket. It is a fleet quantity because per matrix it
-does not work: a matrix's own effective rank predicts its own attainable
-agreement with a 3.6x spread, worse than no per-matrix term, while the fleet
-median lands within 6% of the fleet median of the ceilings observed. Nothing is
-remembered; the attainable ceiling rises ~47% over a run as the aim spreads over
-more planes, so any frozen anchor describes a spectrum the model has left.
-
-`s_t <= 1` is structural, so the frame can never turn harder than bare polar at
-the same `eta` -- a bound, not a measurement. With no stored aim the scale is
-zero and the frame is held for one basis update.
+There is no cold start. It existed because the gain had no history on the first
+update and because a full turn at an `eta` chosen for a scale near 0.05 failed
+`eigh`; masking dead planes removed that failure, whose cause was rounding
+artifacts promoted to unit-norm directions by `1/sigma`, not step size.
 
 $$\eta=0.01,$$
 
@@ -254,14 +255,15 @@ What `sigma` measures is out-of-frame coupling against mean in-frame energy per
 plane. It is scale-free in the gradient, which is half of why there is no clip, but
 *not* rank-free -- a nuclear norm over `r` planes, growing roughly linearly in
 `r` (~37.6 at rank 64 against ~80 at rank 128 on the same problem). Driving the
-frame with it directly was the released rule until the controller above replaced
-it, and the reason is that its self-annealing is an acquisition transient only:
+frame with it directly was the released rule until the polar transform above
+replaced it, and the reason is that its self-annealing is an acquisition transient only:
 `sigma` falls sharply over roughly twenty steps, then flattens and declines a few
 percent across the remaining ~900. Rescaling it by a constant (`sigma_max`, the
 tangent's Frobenius norm) cannot fix that, because a ratio cannot shrink as its
 numerator does; capping the angle fails at the other end, costing acquisition.
-Both were tried and reverted, and neither is what the agreement controller does:
-it reads a different axis entirely.
+Both were tried and reverted. The constant turn above sidesteps the question:
+`sigma` decides nothing, so its acquisition transient cannot leak into the
+frame's motion.
 
 Tangent-Gram eigendecompositions are batched across matrices that share a
 rank and shape. A per-role rank table (see "Rank calibration") splits that
@@ -284,6 +286,23 @@ The moment integrates the *orthogonalized* direction `O_t` of step 7, not the
 projected gradient:
 
 $$M_t=\beta M_{t-1}+(1-\beta)O_t,\qquad \beta=0.9.$$
+
+Under gradient accumulation `O_t` is the importance-weighted mean of the group's
+micro-batch directions, `O_t = sum_i w_i O_t^{(i)} / sum_i w_i`, each
+orthogonalized on its own before the average. The frame is held for the whole
+group, so the tangents average in one tangent space and `Delta_t` is their mean
+by the same weights. `w_i` is the micro-batch's importance weight and never its
+gradient magnitude; the weights normalize, so their scale is free.
+
+**Accumulation is self-anchoring in the learning rate, and this is a consequence
+rather than a design.** `||O^{(i)}||` is fixed by shape, so the mean of `k`
+directions is shorter than each of them in proportion to how much they disagree:
+measured, the step scales by `sqrt(a + (1-a)/k)` where `a` is
+`micro_batch_agreement`, to within 3% over `k` in 1-8. At `a` near zero that is
+`1/sqrt(k)`, which is exactly the `sqrt`-of-batch-size learning-rate rule
+arriving through the mechanism instead of through a config. Holding the step size
+fixed across a change in `k` therefore means raising the nominal `lr` by
+`sqrt(k)`, and a run that does not do so is running colder than its predecessor.
 
 There is no EMA bias correction, so the moment is undersized for roughly
 `1/(1-beta)` steps at the start of a run.
@@ -473,25 +492,43 @@ same-shaped `Z_t`, blends each `O_t` into `M_t`, lifts `M_t` through `Q_t`,
 updates `W`, then batches the tangent-Gram eigendecompositions and moves each
 frame to `Q_{t+}`.
 
-`prepare(param)` exposes phase one explicitly. A no-accumulation training loop
-can invoke it from a `register_post_accumulate_grad_hook` callback to release
-each full matrix gradient as soon as it is consumed (`release_matrix_grads=True`
-at construction).
+`prepare(param)` exposes phase one explicitly. A training loop can invoke it
+from a `register_post_accumulate_grad_hook` callback to release each full matrix
+gradient as soon as it is consumed (`release_matrix_grads=True` at
+construction).
+
+`accumulate(weight)` closes one micro-batch: it runs the batched polar map over
+whatever phase one has prepared and folds each `O` into this step's weighted
+sums, then clears the pending work so the next backward can reuse it. Called
+once per `backward()`, so one call per step is the ordinary path and `k` calls
+are gradient accumulation. `step()` calls it for anything the caller left
+pending, which is why a loop that never mentions it behaves as it always did.
+
+The group's two running sums -- the folded direction and the summed Oja tangent
+-- are stored at the projected gradient's own dtype, the rule the moment
+follows. They are the only `[d, r]` buffers resident across a group, so on a
+bf16 model they are live alongside each backward's activations at half the cost
+fp32 would carry. A bf16 sum is written with stochastic rounding: increment `i`
+of `k` lands at about `1/k` of the total, which round-to-nearest drops, and
+stochastic rounding keeps each sum's expectation equal to the fp32 sum. The
+weighted means are formed in fp32 as they leave the accumulator.
 
 The split is deliberately not a transaction, and cannot be made one at this
 memory budget. Phase one exists so that `G` can be freed the moment it is
 consumed; deferring the moment update to `step()` would mean
 holding a matrix-sized gradient per parameter until then, which is
 the cost the two-phase design exists to avoid. So state commits in two places:
-phase one commits the moving averages, phase two commits the weight. Normal
+phase one commits the projected work, phase two commits the moment, the frame
+and the weight. Normal
 completion of a step still requires `step()`, not `zero_grad()`. But a caller
 that must bail out mid-step regardless (an OOM-retry loop, say) is allowed to:
 `zero_grad()` drops any pending prepared update rather than rejecting the
-call. This does not roll back the moving-average state prepare() already
-advanced -- that one step's contribution to projected-moment state
-is unrecoverable -- it only clears the retained tangent so the next
-`prepare()`/`step()` starts clean. Repeated preparation, gradient accumulation
-before `step()`, and optimizer closures with pending work remain unsupported.
+call. Nothing needs rolling back: neither the moment nor the
+frame moves before `step()`, so what is dropped is the gradients themselves,
+plus a frame fitted on a first step. It clears the retained tangent so the next
+`prepare()`/`step()` starts clean. Repeated preparation of the same parameter
+without an `accumulate()` between, and optimizer closures with pending work,
+remain unsupported.
 
 ## Parameter eligibility
 
@@ -575,8 +612,6 @@ against a long quiet interval reads as zero.
 |---|---|
 | `transport_speed` | chordal distance the subspace moved in one geodesic, per plane, measured from the frames before and after: `||Q_now - Q_old (Q_old^T Q_now)||_F / sqrt(r)`. Every motion metric below shares this unit, so they can be divided by one another |
 | `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
-| `turn_fraction` | the controller's own output: mean turn scale in `[0,1]`, so a logged point says how much of `eta` the frame is actually taking. Without it an `eta` ladder is blind, since `eta` and the scale multiply |
-| `agreement_ceiling` | the fleet divisor `G`, one scalar per step: `tangent_effective_planes / k` reduced over the fleet, so the two are one measurement at two reductions. A flat or collapsing gain means the controller has stopped tracking the aim's spread |
 | `tangent_effective_planes` | `(sum_i lambda_i)^2 / sum_i lambda_i^2`, in `[1, r]`: the effective number of planes carrying the aim. The bulk of the same spectrum concentration reads the head of. Published as a count, not a fraction of `r`, so it compares across rank settings -- as a fraction a leaner table raises it while the spectrum is unchanged |
 | `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_effective_planes`: the plane count is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
 | `projected_grad_norm` | norm of the sanitized gradient inside the held frame |
@@ -620,6 +655,22 @@ keeps its try-then-jitter fallback -- different matrix, once per parameter rathe
 than once per step.
 
 
+### micro_batch_agreement
+
+Mean pairwise cosine between the orthogonalized directions of the micro-batches
+one step averaged. Present only when a step accumulated two or more, and
+recovered from the running sums rather than the directions: with
+`S = sum w_i O^{(i)}`, `Q = sum w_i^2 ||O^{(i)}||^2`, `W = sum w_i` and
+`w_2 = sum w_i^2`, it is `w_2 (||S||^2 - Q) / (Q (W^2 - w_2))`, exact when the
+`||O^{(i)}||` are equal, which the polar map makes them to its convergence error.
+
+It estimates the aim's signal-to-noise ratio `|s|^2/(|s|^2 + |n|^2)` from
+independently drawn batches, so a pure-noise aim reads zero and the reading is an
+absolute level rather than a quantity needing a reference run. It also prices
+accumulation's effect on the step through `sqrt(a + (1-a)/k)`. It is wired to
+nothing: a controller driven off it would be a magnitude functional gating a step
+whose whole purpose is that magnitude decides nothing.
+
 ## Rank calibration
 
 `RankCalibrator` is an opt-in instrument for choosing a per-role rank table. It
@@ -631,9 +682,10 @@ Run the model at a rank deliberately above what any matrix needs.
 `_anneal_tangent` feeds the calibrator one live-plane count per matrix per basis
 update -- the same `tangent_live_fraction` numerator, planes clearing the Gram
 noise floor -- tagged with the param group's `calibration_label`. `roll()` closes
-a window: per label, the mean and median of that count over the label's matrices,
-one host transfer. `report()` returns, per label over the windows after the first
-(the first is the acquisition transient), `mean / median / std / frac`.
+a window: per label, the mean, median and geometric mean of that count over the
+label's matrices, one host transfer. `report()` returns, per label over the
+windows after the first (the first is the acquisition transient),
+`mean / median / geomean / std / frac`.
 
 `live_n` is how many directions the gradient drives. While the basis has headroom
 it barely moves with the basis rank, so this measures what a right-sized run
@@ -642,6 +694,14 @@ would resolve. The table is that count directly -- a basis sized to it runs at
 rounding, clamping to `min(m,n)//2`) is a hand step, kept out of the tool.
 `frac = mean / rank` is a headroom read: high `frac` means the count is a lower
 bound and the role will be mildly under-provisioned, which is the safe side.
+
+`geomean` is the estimator that matches the quantity's shape: live planes follow
+the rank they were measured at as `live ~ r^alpha`, so the distribution across a
+role's matrices is log-linear and the arithmetic mean is pulled by its high tail.
+It lands between the mean and the median, biased low, which is the direction
+under-provisioning already argues for. Floored at one plane, since no rank names
+fewer and `log(0)` is not a measurement -- a role whose frames are wholly dead
+reads 1 here and 0 on the mean, and the pair is what says so.
 
 A per-role table costs the equal-rank `eigh` batching described under step 4.
 

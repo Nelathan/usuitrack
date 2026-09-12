@@ -51,9 +51,16 @@ class RankCalibrator:
     transfer, reducing it per label to the mean and median over that label's
     matrices. ``report`` summarises the windows after the first (the first is the
     acquisition transient). It reports measurements only; picking a rank from
-    them -- mean or median, rounding, bucket clamp -- is a hand step, kept
-    outside this tool. ``frac`` (mean live count over the rank the run used) is a
-    headroom read.
+    them -- mean, median or geometric mean, rounding, bucket clamp -- is a hand
+    step, kept outside this tool. ``frac`` (mean live count over the rank the run
+    used) is a headroom read.
+
+    ``geomean`` is there because the quantity is log-linear rather than linear:
+    live planes follow the rank they were measured at as ``live ~ r^alpha``, so
+    the geometric mean is the central estimator of a power law and the arithmetic
+    one is not. It lands between the mean and the median and is biased low, which
+    is the direction the hand rule already reaches for -- over-provisioning has
+    measured about twice as costly as under-provisioning.
     """
 
     def __init__(self) -> None:
@@ -62,6 +69,7 @@ class RankCalibrator:
         self._rank: dict[str, int] = {}
         self._win_mean: defaultdict[str, list[float]] = defaultdict(list)
         self._win_median: defaultdict[str, list[float]] = defaultdict(list)
+        self._win_geomean: defaultdict[str, list[float]] = defaultdict(list)
 
     @torch.no_grad()
     def observe(self, label: str, rank: int, params: list, live_counts: Tensor) -> None:
@@ -87,6 +95,11 @@ class RankCalibrator:
             ).cpu()
             self._win_mean[label].append(float(per_matrix.mean()))
             self._win_median[label].append(float(per_matrix.median()))
+            # Floored at one plane, because that is the smallest basis a rank can
+            # name and `log(0)` is not a measurement. A role whose frames are
+            # entirely dead reads 1 here and 0 on the mean, which is the pair
+            # that says so.
+            self._win_geomean[label].append(float(per_matrix.clamp_min(1.0).log().mean().exp()))
         self._sum = defaultdict(dict)
         self._count = defaultdict(dict)
 
@@ -95,11 +108,13 @@ class RankCalibrator:
         for label in self._win_median:
             means = self._win_mean[label][1:] or self._win_mean[label]
             medians = self._win_median[label][1:] or self._win_median[label]
+            geomeans = self._win_geomean[label][1:] or self._win_geomean[label]
             mean = float(torch.tensor(means).mean())
             out[label] = {
                 "windows": len(means),
                 "mean": mean,
                 "median": float(torch.tensor(medians).median()),
+                "geomean": float(torch.tensor(geomeans).log().mean().exp()),
                 "std": float(torch.tensor(means).std(unbiased=False)) if len(means) > 1 else 0.0,
                 "frac": mean / self._rank[label],
             }

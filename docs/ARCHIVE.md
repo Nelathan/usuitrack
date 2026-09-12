@@ -485,6 +485,59 @@ directions should keep walking.
 
 ---
 
+## CLOSED -- the agreement gain is removed; the turn is constant
+
+The frame turned by `eta * s_t`, with `s_t` the top-`k` aim agreement less its
+chance floor, divided by the fleet median attainable ceiling
+`(sum lambda)^2 / (sum lambda^2 k)`. It is gone. Every live plane now turns by
+`eta`, and nothing scales it.
+
+**The correlation test that was going to condemn it was invalid.** The charge was
+that the divisor's premise -- raw agreement scales with the aim's spread -- is
+false, on `corr(excess, ceiling)` of `-0.164` and `-0.008` over runs 9 and 10
+where the premise wanted `+1`. That expectation only holds if the true
+persistence is constant. It is not: `excess` falls monotonically over a run while
+the ceiling rises monotonically, so a *correct* normalizer with an
+anti-correlated numerator lands near zero too. Run 11, in 400-step buckets:
+ceiling `0.0783 -> 0.0819` (+4.6%) while excess `0.0447 -> 0.0387` (-13%). The
+test cannot separate "the divisor is wrong" from "the divisor is right and
+persistence is falling", and it was quoted as though it could.
+
+**What removes it is the principle, which never needed the test.** The ceiling is
+`effective_rank / k`, a magnitude functional, gating a step whose entire purpose
+is that magnitude decides nothing -- the polar map exists to discard the tangent's
+singular values, and the gate handed them back one step later. That objection is
+independent of any correlation. `tangent_effective_planes` reading `1.46` is the
+same trap from the other side: it is the aim's magnitude concentration, not the
+count of planes that turn, which is the *live* count near `0.85 r`.
+
+**And it did not deliver.** On Anima the gain annealed the turn 1.21x over 2100
+steps (`turn_fraction` `0.571 -> 0.472`) against 3.2x on LFM at `k = 16`. Close
+to inert on the lane that matters, convincing on the lane with a batch size 4x
+larger. The honest reading is that it may work at a batch that gives contrast,
+and that we cannot buy one here.
+
+**The escape hatch was already closed.** Deriving the anchor instead of
+remembering it collapses to the aim's two-lag autocorrelation, and that is
+falsified above: the persistence *shape* is stationary (`excess2/excess1` ~ 0.81
+throughout) while its level falls ~4x, so the ratio anneals nothing and lands
+beside bare ortho. An anchor is structural. With no defensible anchor and no
+sensor, a constant turn is the honest state.
+
+**What went with it.** `AGREEMENT_PLANES`, the `[d,16]` bf16 buffer per matrix,
+the fleet ceiling commit, and the `turn_fraction` / `agreement_ceiling`
+diagnostics. Also the cold start: the first update's zero turn existed because
+the meter had no history, and its stability justification -- `eigh` failing on a
+full-magnitude first turn -- was separately fixed by masking dead planes, whose
+real cause was `1/sigma` promoting rounding artifacts to unit-norm directions.
+`test_every_live_plane_turns_by_exactly_eta` now asserts the chordal residual
+equals `sin(eta)` rather than bounding it, which is the sharpest available
+statement that no magnitude survives into the frame's motion.
+
+**What stays open** is P19: the shape of the idea is still right -- a converged
+frame orbits on batch noise and should stop turning -- and there is no sensor for
+it.
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that

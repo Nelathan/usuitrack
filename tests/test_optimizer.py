@@ -77,10 +77,14 @@ def test_prepare_release_matches_ordinary_step_exactly():
 
 
 def test_plain_gradient_accumulation_without_release_matches_manual_grad_sum():
-    """UsuiTrack has no accumulation-aware bookkeeping: it just reads
-    param.grad at step() time. Two backward() calls before one step() (no
-    release_matrix_grads, no zero_grad in between) must therefore behave
-    identically to a single step() on the pre-summed gradient."""
+    """The summed-gradient path, which is not what accumulate() does.
+
+    Two backward() calls before one step() with no accumulate() between them
+    leave a summed gradient in param.grad, and step() reads it as one gradient
+    -- identical to a single step() on the pre-summed tensor. That is a larger
+    gradient for one step, not a larger batch: the polar map discards the
+    magnitude, so the two micro-batches never get to disagree. accumulate() is
+    the path that averages them; this one is what happens without it."""
 
     torch.manual_seed(2)
     accumulated = torch.nn.Linear(COLS, ROWS, bias=False)
@@ -374,15 +378,21 @@ def test_frame_rotation_is_the_identity_when_transport_is_exact():
 
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
+    # Captured from the commit, because step() clears its own bookkeeping before
+    # returning -- read afterwards this asserted nothing at all.
+    rotations = []
+    commit = optimizer._commit_moments
+
+    def capture(entries):
+        rotations.extend(entry.frame_rotation for entry in entries)
+        return commit(entries)
+
+    optimizer._commit_moments = capture
     _run(params, optimizer, 4)
 
-    for param in params:
-        if param.ndim != 2:
-            continue
-        entry = optimizer._pending_matrix_updates.get(param)
-        rotation = entry.frame_rotation if entry is not None else None
-        if rotation is None:
-            continue
+    observed = [rotation for rotation in rotations if rotation is not None]
+    assert len(observed) == 6, "one rotation per matrix per basis update after the fitting step"
+    for rotation in observed:
         torch.testing.assert_close(rotation, torch.eye(rotation.shape[-1]), atol=1e-5, rtol=0)
 
 
@@ -417,11 +427,8 @@ def test_core_diagnostics_read_sane_values():
     # Capture is a fraction of the gradient the frame holds, so it cannot exceed one.
     assert 0.0 < diagnostics["grad_capture"] <= 1.0 + 1e-6
     assert diagnostics["raw_grad_norm"] > 0
-    # Structural, not measured: the controller can only ever scale the turn down.
-    assert 0.0 <= diagnostics["turn_fraction"] <= 1.0
     # A healthy aim resolves every plane above the Gram's noise floor.
     assert diagnostics["tangent_live_fraction"] == 1.0
-    assert diagnostics["agreement_ceiling"] > 0.0
     assert diagnostics["update_to_param_ratio"] > 0
     assert diagnostics["nonfinite_grads"] == 0.0
 
@@ -589,17 +596,16 @@ def test_spin_separates_in_span_rotation_from_subspace_motion():
     assert spin < 1e-5, spin
 
 
-def test_agreement_controller_holds_the_frame_until_the_aim_has_repeated():
-    """No history means no evidence the aim repeats, so the first turn is zero.
+def test_the_frame_turns_from_the_very_first_basis_update():
+    """There is no cold start any more, and that is a deliberate change.
 
-    This is the property that keeps the first basis update off the stability
-    cliff. Before it was there the cold start took a full-magnitude turn at an
-    `eta` chosen for a scale near 0.05, and `eigh` on the tangent Gram failed
-    outright. It costs exactly one basis update.
-
-    "Held" is not bitwise identity: a scale of zero still runs the geodesic and
-    its Polar-Express retraction, so the frame comes back changed at the
-    retraction's own error. That is the level the check is written against.
+    The gain used to return zero with no history -- no evidence the aim repeats,
+    no turn -- which is what kept the first update off the stability cliff back
+    when a full-magnitude turn at an `eta` chosen for a scale near 0.05 failed
+    `eigh` outright. Masking dead planes removed that cliff: the failure was
+    rounding artifacts promoted to unit-norm directions by `1 / sigma`, not step
+    size. With a constant turn there is no history to wait for, so the first
+    update turns like every other one.
     """
 
     def moved(before, after):
@@ -613,21 +619,17 @@ def test_agreement_controller_holds_the_frame_until_the_aim_has_repeated():
     _run([weight], optimizer, 1)
     first = optimizer.state[weight]["basis"].clone().float()
     _run([weight], optimizer, 1)
-    # Step two has a stored aim but no gain yet, so the frame is still held.
-    held = moved(first, optimizer.state[weight]["basis"].float())
-    assert held < 1e-5, held
-
-    _run([weight], optimizer, 3)
-    assert moved(first, optimizer.state[weight]["basis"].float()) > 100 * held
+    assert moved(first, optimizer.state[weight]["basis"].float()) > 1e-3
 
 
-def test_turn_fraction_never_exceeds_the_bare_step():
-    """`scale <= 1` is a bound on the geodesic, not an observation about it.
+def test_every_live_plane_turns_by_exactly_eta():
+    """The turn is `eta`, not `eta` times a meter, and that is now an equality.
 
-    Every live plane of the polar tangent has singular value one, so the angle
-    the geodesic takes is `eta * scale` exactly. The clamp is therefore the whole
-    guarantee that annealing can only ever slow the frame relative to turning
-    every plane by `eta`, whatever the meter reads.
+    Every live plane of the polar tangent has singular value one, so the geodesic
+    takes the angle `eta` on each of them and the chordal residual per plane is
+    `sin(eta)`. Under the agreement gain this could only be asserted as an upper
+    bound; with a constant turn the bound is the value, which is the sharpest
+    statement available that no magnitude survives into the frame's motion.
     """
 
     torch.manual_seed(0)
@@ -641,12 +643,13 @@ def test_turn_fraction_never_exceeds_the_bare_step():
     after = optimizer.state[weight]["basis"].float()
 
     drained = optimizer.pop_diagnostics()
-    assert 0.0 <= drained["turn_fraction"] <= 1.0
-    # Chordal distance per plane, the same unit `transport_speed` reports, and
-    # bounded above by the angle a scale of one would produce.
+    # The equality below only means "every plane turned by eta" if every plane
+    # was live to begin with.
+    assert drained["tangent_live_fraction"] == 1.0
+    # Chordal distance per plane, the same unit `transport_speed` reports.
     residual = after.mT - before.mT @ (before @ after.mT)
     moved = float(residual.norm() / math.sqrt(RANK))
-    assert moved <= math.sin(0.01) + 1e-6, moved
+    assert moved == pytest.approx(math.sin(0.01), rel=2e-3), moved
 
 
 def test_diagnostics_tier_rejects_a_typo_instead_of_silently_downgrading():
@@ -796,3 +799,168 @@ def test_matrices_sharing_a_scale_but_not_a_shape_still_bucket_correctly():
     # every other batched-vs-solo comparison in this file already carries.
     for shape in shapes:
         torch.testing.assert_close(together[shape], separate[shape], rtol=1e-5, atol=1e-6)
+
+
+def test_accumulated_micro_batches_average_to_the_single_step_they_repeat():
+    """`k` copies of one gradient are that gradient.
+
+    The invariant that says the accumulation is an average and not a sum: the
+    weighted mean of `k` identical orthogonalized directions is the direction,
+    and the mean of `k` identical Oja tangents is the tangent, so the step and
+    the geodesic land where one micro-batch would have put them. A sum would
+    scale the moment's increment by `k` and the frame's aim with it.
+    """
+
+    torch.manual_seed(0)
+    single = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    accumulated = torch.nn.Parameter(single.detach().clone())
+    one = UsuiTrack([single], lr=0.01, rank=RANK, side="right")
+    many = UsuiTrack([accumulated], lr=0.01, rank=RANK, side="right")
+
+    for _ in range(3):
+        gradient = torch.randn_like(single)
+        single.grad = gradient.clone()
+        one.step()
+        for _ in range(4):
+            accumulated.grad = gradient.clone()
+            many.accumulate()
+        many.step()
+        torch.testing.assert_close(accumulated, single)
+
+
+def test_importance_weights_are_a_weighted_mean_over_micro_batches():
+    """One micro-batch at weight 3 is three micro-batches at weight 1.
+
+    Stated as an equivalence rather than against a recomputed mean, so the test
+    does not reimplement the polar map to check it. The sums normalize, so the
+    weights carry only their ratio.
+    """
+
+    torch.manual_seed(3)
+    weighted = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    repeated = torch.nn.Parameter(weighted.detach().clone())
+    by_weight = UsuiTrack([weighted], lr=0.01, rank=RANK, side="right")
+    by_repeat = UsuiTrack([repeated], lr=0.01, rank=RANK, side="right")
+
+    for _ in range(3):
+        first = torch.randn_like(weighted)
+        second = torch.randn_like(weighted)
+
+        weighted.grad = first.clone()
+        by_weight.accumulate(weight=1.0)
+        weighted.grad = second.clone()
+        by_weight.accumulate(weight=3.0)
+        by_weight.step()
+
+        repeated.grad = first.clone()
+        by_repeat.accumulate()
+        for _ in range(3):
+            repeated.grad = second.clone()
+            by_repeat.accumulate()
+        by_repeat.step()
+
+        torch.testing.assert_close(weighted, repeated)
+
+
+def test_accumulation_moves_neither_the_moment_nor_the_basis():
+    """Both move exactly once per step, which is what keeps the telemetry honest.
+
+    The frame being held is also a correctness requirement and not only a
+    reporting one: every micro-batch's tangent has to live in one tangent space
+    for their sum to be a vector rather than an average over basepoints.
+    """
+
+    torch.manual_seed(4)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    weight.grad = torch.randn_like(weight)
+    optimizer.step()
+
+    basis = optimizer.state[weight]["basis"].clone()
+    moment = optimizer.state[weight]["projected_exp_avg"].clone()
+    for _ in range(4):
+        weight.grad = torch.randn_like(weight)
+        optimizer.accumulate()
+        torch.testing.assert_close(optimizer.state[weight]["basis"], basis, rtol=0, atol=0)
+        torch.testing.assert_close(optimizer.state[weight]["projected_exp_avg"], moment, rtol=0, atol=0)
+
+    optimizer.step()
+    assert not torch.equal(optimizer.state[weight]["basis"], basis)
+    assert not torch.equal(optimizer.state[weight]["projected_exp_avg"], moment)
+
+
+def test_micro_batch_agreement_spans_repeats_to_opposites():
+    """The meter's two analytic fixed points, and its absence at one micro-batch.
+
+    Repeats agree perfectly and opposites disagree perfectly, so 1 and -1 are
+    exact rather than approximate -- the polar map is an odd function of its
+    input, which is what makes the opposite case land on -1 and not merely
+    negative.
+    """
+
+    torch.manual_seed(5)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer.diagnostics = "core"
+    gradient = torch.randn_like(weight)
+
+    weight.grad = gradient.clone()
+    optimizer.step()
+    assert "micro_batch_agreement" not in optimizer.pop_diagnostics()
+
+    for _ in range(3):
+        weight.grad = gradient.clone()
+        optimizer.accumulate()
+    optimizer.step()
+    assert optimizer.pop_diagnostics()["micro_batch_agreement"] == pytest.approx(1.0, abs=1e-3)
+
+    weight.grad = gradient.clone()
+    optimizer.accumulate()
+    weight.grad = -gradient
+    optimizer.accumulate()
+    optimizer.step()
+    assert optimizer.pop_diagnostics()["micro_batch_agreement"] == pytest.approx(-1.0, abs=1e-3)
+
+
+def test_rank_calibrator_geometric_mean_sits_between_mean_and_median():
+    """The estimator matching a power-law quantity, on a deliberately skewed label.
+
+    Live counts follow `live ~ r^alpha`, so their spread is log-normal-ish and
+    the arithmetic mean is pulled by the high tail. The geometric mean is the
+    central estimator of that shape and lands below the arithmetic one.
+    """
+
+    from usuitrack.diagnostics import RankCalibrator
+
+    calibrator = RankCalibrator()
+    params = [object() for _ in range(4)]
+    counts = torch.tensor([2.0, 4.0, 8.0, 64.0])
+    for _ in range(3):
+        calibrator.observe("skewed", 128, params, counts)
+        calibrator.roll()
+
+    row = calibrator.report()["skewed"]
+    assert row["geomean"] == pytest.approx(8.0, rel=1e-5)
+    assert row["geomean"] < row["mean"]
+    # torch.median takes the lower of the two middle values, not their average.
+    assert row["median"] == pytest.approx(4.0)
+
+
+def test_rank_calibrator_geometric_mean_floors_a_dead_frame_at_one_plane():
+    """`log(0)` is not a measurement, and no rank names fewer than one plane.
+
+    The pair is the honest report: the geometric mean says one, the arithmetic
+    mean says zero, and only together do they say the frames were dead.
+    """
+
+    from usuitrack.diagnostics import RankCalibrator
+
+    calibrator = RankCalibrator()
+    params = [object(), object()]
+    for _ in range(3):
+        calibrator.observe("dead", 32, params, torch.zeros(2))
+        calibrator.roll()
+
+    row = calibrator.report()["dead"]
+    assert row["geomean"] == pytest.approx(1.0)
+    assert row["mean"] == pytest.approx(0.0)

@@ -10,70 +10,214 @@ the frozen former PLAN as an investigation log below them. Where a line here say
 
 ---
 
-## P17. The turn controller's divisor is a brake, and nothing chose it
+## P20. Gradient accumulation is built, and it prices its own learning rate
 
-**The agreement read is already magnitude-free where it counts.** `head` is
-orthonormal eigenvectors and the overlap is a pure subspace comparison, which is
-the right shape: after the polar map every live plane turns by `eta * scale`
-regardless of its eigenvalue, so the only thing worth asking of the frame is
-whether its directions repeat.
+`accumulate(weight)` folds one micro-batch into the pending step; `k` calls then
+one `step()` is gradient accumulation. It lives in projected space, so
+`release_matrix_grads` is untouched and the effective batch rises at no VRAM
+cost beyond two accumulator buffers per matrix -- which is what makes it the only
+way Anima gets past bs4 on a 12 GB card.
 
-Two places still carry magnitude. Which `AGREEMENT_PLANES` get compared is an
-eigenvalue ordering, so consecutive windows can hold different planes even when
-the live subspace is identical. And the divisor, `agreement_ceiling =
-tangent_effective_planes / k`, is the magnitude-weighted effective rank
-outright.
+The frame is held across the group and every micro-batch is orthogonalized on its
+own before the average. Both are forced rather than chosen: a held frame is what
+makes the micro-batch tangents vectors in one tangent space, so their arithmetic
+mean is the geometrically correct one and no spherical mean is called for;
+averaging raw projected gradients and orthogonalizing once would hand the step to
+whichever micro-batch was loudest, which is the failure ortho-first exists to
+prevent. `SPEC.md` step 5 carries the result.
 
-**The divisor's premise is false, measured.** It assumes the raw agreement scales
-with the aim's spread -- that a wider spectrum mechanically lowers the top-`k`
-overlap, so dividing by the spread makes "stable" mean the same thing at any
-width. Reconstructing the numerator as `excess = turn_fraction *
-agreement_ceiling` over runs 9 and 10 (steps > 200, `n = 210` each):
+**Measured, and it changes the learning-rate arithmetic.** `||O^{(i)}||` is fixed
+by shape, so the mean of `k` directions is shorter than each of them in
+proportion to their disagreement. On a toy at `lr 1e-3`, rank 32, 40 steps:
 
-| | run 9 | run 10 |
+| k | `update_to_param_ratio` | `micro_batch_agreement` | measured shrink | `sqrt(a + (1-a)/k)` |
+|---:|---:|---:|---:|---:|
+| 1 | 4.650e-5 | -- | 1.000 | 1.000 |
+| 2 | 3.310e-5 | 0.0011 | 0.712 | 0.707 |
+| 4 | 2.365e-5 | 0.0017 | 0.509 | 0.501 |
+| 8 | 1.708e-5 | 0.0011 | 0.367 | 0.355 |
+
+Within 3% across an 8x span. So **under ortho-first the `sqrt`-of-batch-size
+learning-rate rule is already in the mechanism**, and a run that raises `k` to 4
+without raising nominal `lr` by 2x is running at half its predecessor's step, not
+at the same one. This is the reverse of the usual trap: here the anchoring is
+automatic and it is *holding* `lr` fixed that changes the step.
+
+Two things follow for the next Anima run, and they are not free.
+
+1. **Travel.** 576 steps at `k=4` consumes run 12's three epochs exactly, with a
+   quarter of the weight updates. `lr 1e-4` holds the per-step size where run 12
+   had it and accepts a quarter of the travel; matching run 12's *travel* in 576
+   steps would need `8e-4`, which is not a serious proposal. Either the run is
+   read as a mechanism arm at a quarter the displacement, or it buys steps.
+2. **`a` on this lane is unmeasured**, and it is the term that sets the shrink.
+   The toy reads 0.001; real gradients carry step-to-step `tangent_concentration`
+   of 0.68-0.82, so Anima's `a` could be far higher and the shrink far milder. **A
+   calibration run measures it at no cost and it is the number the training run's
+   `lr` should be chosen from**, which is the argument for calibrating first.
+
+**Answered on both counts, by `anima_rankcal_r256_acc4`** -- rank 256, `k=4`,
+bs4/768, `lr 4e-5` holding the k=1 calibration's step, against
+`anima_rankcal_r256_xattn_inner` at the same rank.
+
+**`a` is 0.003 on Anima, so the shrink is the full `1/sqrt(k)`.** Windows read
+0.0027, 0.0040, 0.0024 -- the toy's low-agreement regime, not the milder one
+`tangent_concentration` suggested. Micro-batches of 4 samples agree essentially
+not at all here, so `lr 1e-4` at `k=4` holds run 12's step exactly and there is
+no correction to make.
+
+**Liveness rises, sharply, and the table was under-sized.** At equal rank every
+role reads 2.1-3.6x its k=1 live-plane count and the fleet fraction goes 0.094 ->
+0.235. The flattened-head mechanism is the one that fits: a single batch's noise
+is spiky and sits near the top of the spectrum, averaging flattens it, the
+relative floor falls and planes that were clipped now turn. `live ~ r^0.6` is not
+a noise artifact to be relaxed away -- demand rose rather than fell.
+
+| role | k=1 | k=4 | ratio |
+|---|---:|---:|---:|
+| attn1_k | 53.2 | 109.8 | 2.07 |
+| attn1_q | 36.9 | 78.6 | 2.13 |
+| attn1_out | 25.8 | 78.3 | 3.03 |
+| attn2_k | 19.4 | 56.0 | 2.89 |
+| ff_down | 18.7 | 55.3 | 2.96 |
+| attn2_q | 17.6 | 45.9 | 2.62 |
+| attn2_v | 13.3 | 44.8 | 3.38 |
+| ff_up | 19.3 | 43.7 | 2.27 |
+| attn2_out | 11.3 | 40.3 | 3.57 |
+| attn1_v | 18.0 | 39.4 | 2.19 |
+| time_embed | 1.7 | 1.8 | 1.11 |
+
+`patch_embed` and `proj_out` are censored by their shape caps of 34 and 32 planes
+and read saturated, so their ratios are floors. `time_embed` does not move; its
+aim has been rank-one on every read.
+
+**A rank table cannot be derived by the converging rule from a calibration
+rank.** `r * (target/frac)^-2.5`, fitted over ranks 16-34, puts most roles at 1-4
+planes when fed `frac` measured at 256, and applied to the k=1 data it predicts
+`ff_up` at 0.21 live fraction where run 11 measured 0.94. The exponent does not
+carry across that span. Run 13's table is therefore sized by the rule with an
+anchor -- rank equals the live count at the calibration rank, geometric mean over
+windows -- which is what run 12 used and what delivered a fleet 0.893. Sum 595
+against run 12's 256. **The `live_fraction` target (P13 item 4) is still open and
+this table does not depend on it**; the per-role fractions run 13 reports at these
+ranks are the read that settles it.
+
+**Two costs the accumulation path carries, both paid.** The accumulators are the
+only `[d, r]` buffers resident *across* a group, so they are live alongside each
+backward's activations; at rank 256 they took `k=4` over the 12 GB card and the
+job aborted on three consecutive OOM retries. They now follow the gradient's
+storage dtype, as the moment does, which is bf16 on this lane and halves that
+resident cost, with the write stochastically rounded because increment `i` of `k`
+is about `1/k` of the total and round-to-nearest drops it outright. Separately,
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is what let rank 256 run at
+all, at 15.3 s/step against 7.7 without it.
+
+**Run 13 landed, and displacement beat every prediction made from the shrink
+identity alone.** `anima_usuitrack_13_acc4`: `k=4`, 576 steps, `lr 1e-4`, the
+measured table (sum 595, geometric-mean live counts at rank 256/k=4), `core`
+diagnostics. Whole-model distance from base, same script as run 12:
+
+| | steps | displacement |
 |---|---:|---:|
-| corr(excess, ceiling) -- should be ~ +1 | **-0.164** | **-0.008** |
-| corr(turn, ceiling) | -0.431 | -0.321 |
-| corr(turn, concentration) | +0.357 | +0.238 |
-| corr(turn, live_fraction) | -0.256 | -0.098 |
+| run 12 | 2304 | 2.327e-3 |
+| run 13 | 576 | 2.960e-3 |
 
-The agreement does not carry the spread. So the ceiling divides by a quantity
-absent from its numerator, and the result is not a normalization but a **brake
-that engages with diffusion**: the frame turns further when one direction
-dominates and less when the aim spreads. Not the policy anyone chose, and it is
-the magnitude read re-entering the gate one step after the turn discarded it --
-the same class of error already fixed for `transport_speed`, except there it
-corrupted a meter and here it steers.
+**More travel in a quarter of the steps, not a quarter of the travel.** The
+per-step shrink identity (measured `a=0.0018-0.0021` in situ, matching the
+calibration) predicted the *step size* correctly -- plateau
+`update_to_param_ratio` 3.70e-6 against run 12's 2.33e-6, the ratio the table's
+`sqrt(r)` (1.59x) predicts -- but multiplying that by a quarter of the steps
+underestimates total displacement, because per-step travel does not sum
+linearly against a moving basis the way the arithmetic implied. Not yet
+explained; flag for whoever next reasons about a step-size proxy for total
+travel under accumulation.
 
-*Read the aggregation honestly.* `turn_fraction` is a fleet mean and
-`agreement_ceiling` a fleet median, so `excess` is reconstructed at the fleet
-level rather than per matrix, and `turn` clamps at 1 (fleet mean 0.50, so not
-saturated). That moves a correlation by hundredths, not from +1 to 0.
+**The run's own schedule throttled its last quarter.**
+`warmup_stable_cosine_decay` with `decay_start_ratio: 0.75` starts decaying at
+step 432; growth rate fell 5.4x by the end (3.31e-6/step at 350-450 against
+6.15e-7/step at 550-576). This is the direct answer to "would more steps or a
+higher lr buy more": yes, on both counts -- the run spent its last 144 steps at
+a shrinking step size by schedule, not by mechanism saturation. A rerun that
+holds the plateau lr longer, or extends past 576, has headroom that this run's
+own numbers already show being spent down.
 
-**The gain itself is not what is in question.** Scaling the turn by how well the
-frame repeats, and slowing it as agreement falls, is the right shape: a converged
-basis orbits on batch noise, and a controller that keeps turning at full `eta`
-through that is integrating noise into the frame. What failed is one divisor
-inside it, and the open question is whether the gain can be given a sensor that
-works or whether this lane has to accept that there is no gain sensor and set the
-turn some other way. **Deferred by decision -- discuss before building.**
+**`grad_capture` climbed through the run, not held flat.** 0.650 at step 50 (the
+number the mid-run "insensitive to rank" read was drawn from), rising to a
+0.73-0.75 plateau by step 300 -- above run 12's 0.647 and every prior run.
+Reading it early, before the basis has adapted to the larger table, understated
+it; the mid-run note in HANDOVER is superseded.
 
-**The design the measurement points at.** Measure subspace stability over the
-live set -- the planes that actually move -- and when it is stable, take the full
-`eta`. No magnitude-derived divisor, no magnitude-ordered window.
+**`grad_moment_cosine` averages 0.0056-0.0061, above run 12's 0.00094 and near
+runs 9-11's ~0.0035, with periodic negative excursions** (11 of 115 windows,
+min -0.0046) -- the same crossing-zero behavior run 12 showed. Three
+confounded changes (rank, lr, `k`) moved together here, same as run 12's freeze
+was confounded with two others; still unisolated, see the standing item below.
 
-**What to run before changing anything.** Publish, as diagnostics only, the
-subspace agreement over all live planes beside the current top-`k` one, and the
-raw agreement itself rather than only the quotient. One run, no behaviour change.
-If the live-set agreement is high and flat while the top-`k` one wanders, the
-window is the bug; if both wander together, the frame genuinely is not repeating
-and the brake is doing something real.
+**`tangent_concentration` reads 0.582**, below the 0.68-0.82 range single-batch
+gradients showed and closer to the synthetic-gradient floor's neighborhood
+without approaching it. Candidate mechanism: the same head-flattening that
+raised `tangent_live_fraction` also lowers concentration, since both read the
+same averaged Gram spectrum from opposite ends -- a flatter head is simultaneously
+more planes clearing the floor and less concentration in the top ones. Not
+measured in isolation; do not cite past this session without the calibration
+that pins it down.
 
-**Two things this is not.** It is not a rank question -- a leaner table raises
-live fraction while the effective-plane count barely moves, so the two axes look
-alike in the logs. And the answer is not "the head is too thin": the effective
-rank is a magnitude statistic, and quoting it to size a window that operates
-after the polar map is the discredited read wearing a new hat.
+Not yet tried, recorded so it is not mistaken for settled: **stratified timestep
+sampling across the group**, one micro-batch per quarter of the `t` range instead
+of `k` independent uniform draws. Free, and it cuts the group's `t` variance below
+what independent draws give. Deliberately not bundled into the first accumulation
+run.
+
+---
+
+## P19. There is no sensor for arrival, and the turn is constant until there is
+
+The agreement gain is removed (`ARCHIVE.md`). Every live plane turns by `eta`,
+and nothing scales it. What the gain was for is still real: **a converged frame
+orbits on batch noise, and a controller that keeps turning at full `eta` through
+that is integrating noise into the basis.** Nothing measures it.
+
+**Why the two obvious sensors are already spent.** The top-`k` agreement gain
+needed a level reference, and the only anchor-free form -- the aim's two-lag
+autocorrelation -- is falsified: persistence *shape* is stationary while its level
+falls ~4x, so the ratio holds near `0.81` and anneals nothing. The ceiling that
+replaced the anchor is a magnitude functional gating a magnitude-free step. Do
+not re-derive either; both are written up in `ARCHIVE.md`.
+
+**The hard part was batch size, and accumulation is how we buy our way out.** At bs4 an aim
+spreading toward isotropy is what batch noise alone produces, so "arrived" and
+"drowned in noise" have the same signature in every spread statistic we publish
+(`agreement_ceiling` rose 4.6% over run 11 while `tangent_concentration` fell --
+that pair says nothing about arrival). The gain looked like it worked on LFM at
+bs16 and was close to inert on Anima at bs4, which is consistent with the meter
+needing contrast the batch does not supply. **Anima's batch cannot rise above 4**
+-- 11 of 12 GB, and `release_matrix_grads` is what makes it fit. What the card
+cannot give, `accumulate()` can: the effective batch rises in projected space, at
+the price of a weight update per `k` backwards (P20).
+
+**Gradient accumulation supplies the sensor, and it is built.** The missing
+quantity was a level reference, and `micro_batch_agreement` (P20, `SPEC.md`) is
+one that needs no reference run: the mean pairwise cosine between the
+orthogonalized directions of `k` independently drawn micro-batches estimates the
+aim's signal-to-noise ratio `|s|^2/(|s|^2 + |n|^2)`, and a pure-noise aim reads
+exactly zero because the null is analytic rather than measured. It compares
+independent samples instead of inferring a level from one batch's spectrum, which
+is what every spent sensor here could not do. Costs one norm of a tensor already
+in hand, on device, no sync.
+
+It is published and **wired to nothing, on purpose**. A controller driven off it
+would be the agreement gain again, and the objection to that gain was never the
+sensor's quality -- it was that a magnitude functional has no business gating a
+step whose entire point is that magnitude decides nothing. What is now open is
+the empirical question the gain never reached: does `a` fall over a run on a real
+model, and does it fall in a way that separates arrival from noise. Unmeasured on
+either lane; it needs one accumulated run to say anything.
+
+**Meanwhile `eta` is the only handle**, and scheduling it on the prior that
+aiming gets harder as the loss surface smooths is a knob, not a sensor -- worth
+having as an arm, worth naming as a prior. See P16: `eta` has never been swept
+downward or in the `0.01`-`0.03` interior, and 5x `eta` measured worse loss with
+a better projected grad norm.
 
 ---
 
@@ -141,6 +285,87 @@ relative to the matrices. Three arms, and they are not the same experiment:
 The frozen arm is the interesting one and it is not obviously the safe one. It
 goes on the list as a deliberate arm, not as a default.
 
+**Run 12 was that arm, and the freeze is verified.** `adaln`, the embeddings and
+`time` all read exactly `0.000e+00` displacement from base at every checkpoint,
+so `fallback_lr: 0.0` took. Two results, and the second is the larger one.
+
+**1. UsuiTrack alone moves this model a quarter as far.** Whole-model
+displacement at step 2200: `2.314e-3` against run 10's `8.800e-3`, `0.263x`. So
+roughly three quarters of every previous Anima result's weight motion was AdamW
+walking the fallback class at `5e-6`. Three runs of tuning the tracker were
+tuning the minority of the model's motion, and now we know the fraction.
+
+**2. Nothing we changed moved the matrix roles at all.** Per role at step 2200,
+run 12 over run 10, against `sqrt(r_12/r_10)` -- the step-norm identity, the only
+term the rank table should contribute:
+
+| role | run 10 | run 12 | ratio | `sqrt(r)` | residual |
+|---|---:|---:|---:|---:|---:|
+| patch_embed | 1.315e-2 | 1.254e-2 | 0.954 | 0.961 | 0.993 |
+| proj_out | 1.174e-2 | 1.147e-2 | 0.977 | 0.981 | 0.996 |
+| attn2_k | 4.930e-3 | 4.533e-3 | 0.919 | 0.894 | 1.028 |
+| attn1_k | 4.847e-3 | 4.711e-3 | 0.972 | 0.950 | 1.023 |
+| attn1_q | 4.393e-3 | 4.276e-3 | 0.973 | 0.959 | 1.015 |
+| attn2_v | 4.151e-3 | 3.793e-3 | 0.914 | 0.886 | 1.031 |
+| attn1_out | 3.923e-3 | 3.761e-3 | 0.959 | 0.938 | 1.022 |
+| attn2_q | 3.658e-3 | 3.574e-3 | 0.977 | 0.972 | 1.005 |
+| ff_up | 3.555e-3 | 3.552e-3 | **0.999** | **1.000** | 0.999 |
+| attn1_v | 3.377e-3 | 3.295e-3 | 0.976 | 0.972 | 1.004 |
+| attn2_out | 2.915e-3 | 2.729e-3 | 0.936 | 0.943 | 0.993 |
+| ff_down | 2.455e-3 | 2.357e-3 | 0.960 | 0.943 | 1.018 |
+
+Every residual is within 3% of one, and `ff_up` -- rank unchanged -- lands at
+`0.999`. **Over 2300 steps, matrix displacement is `lr` and `sqrt(r)` and
+nothing else.** Freezing the class that carried three quarters of the model's
+motion did not change it. Doubling the frame's turn rate (the constant turn,
+`transport_speed` `0.00511 -> 0.00931`) did not change it. Neither did tracking
+a differently-conditioned set of planes. Displacement is a budget, not a quality
+read, and it cannot rank a tracker design -- a fact worth as much as the arm it
+came from.
+
+**Run 12's samples are read: progressed, slightly harmed, and the mid-run
+degradation during the anneal is gone.** The freeze did what the instability
+hypothesis predicted. What it also removed is the creative and aesthetic
+advancement earlier runs showed, which is the cost this arm was warned would be
+real. So the class is not optional, and the question becomes what it should
+travel.
+
+**`fallback_lr` is a travel budget, and that makes it derivable.** AdamW's step
+is per-coordinate normalized, so it moves about `lr` per coordinate per step
+wherever the gradient's sign persists, with no dependence on gradient magnitude:
+predicted relative displacement is `lr * steps * mean_schedule / w_rms`. For run
+10 that is `5e-6 * 2304 * 0.879 = 1.0e-2` against a measured `1.559e-2` on a class
+whose weights sit near unit rms -- the same quantity within 1.5x, so the motion is
+ballistic and the model holds.
+
+| `fallback_lr` | predicted displacement, 2304 steps | vs run 12's matrix median `3.8e-3` |
+|---|---:|---:|
+| `5e-6` (runs 9-11) | 1.0e-2 | 2.7x |
+| **`2e-6` (next)** | 4.1e-3 | 1.1x |
+| `1e-6` | 2.0e-3 | 0.53x |
+| `0` (run 12) | 0 | 0 |
+
+`2e-6` matches the class's travel to the matrix fleet, which is the one ratio
+defensible without another sample review, and it is still a 2.5x cut from the
+regime that was unstable. `1e-6` would put the largest natural mover in the model
+below every matrix role.
+
+**Ruled out, so it is not re-derived: the anneal degradation was not a schedule
+artifact.** The suspicion was that the fallback's lr floor did not track the
+matrices', so its share grew through the decay. It does track:
+`warmup_stable_cosine_decay` is a `LambdaLR` with a multiplicative
+`min_lr_ratio`, and the split optimizer exposes both sub-optimizers through one
+`param_groups`, so run 10 held the fallback at exactly 10% of the matrix lr from
+step 100 to the end. Whatever the anneal degradation was, it was not the ratio
+drifting.
+
+**Also live and previously unnoticed:** `accelerator.clip_grad_norm_` runs at
+`max_grad_norm` 1.0 before every step, and under `release_matrix_grads` the matrix
+gradients are already freed, so `None` grads are skipped and the clip applies to
+the fallback class alone. It did nothing in run 12 at `fallback_lr: 0.0`; at
+`2e-6` it is live again, and it is part of why that class has not gone non-finite
+since.
+
 ---
 
 ## P14. The learning rate has a rule now, and it has not been used
@@ -160,25 +385,56 @@ zero is critically damped. Interpolating two reads (`+0.0024` at `2e-4`,
 `-2.0e-3` target and `-4.0e-2` source, 7x and 20x their floors. The first
 Pareto move on this lane that was not bought with distance.
 
-**It does not appear to transfer to Anima.** The meter is flat there. Runs 9 and
-10 differ by 2.5x in lr (`2e-5` -> `5e-5`) and by rank table, side map and a
-frozen time module, and `grad_moment_cosine` reads `+0.00357` and `+0.00347`
-over 2100 steps -- a difference of `1e-4` against a step-to-step range of
-`-0.006..+0.017`. It does not move with the anneal either. A meter that does not
-respond to the knob it is supposed to calibrate cannot calibrate it, so on this
-lane the rule is currently mute rather than wrong: every read is positive, which
-says under-travelling, and no lr yet run has brought it near its crossing.
+**It was flat on Anima through three runs, and run 12 moved it.** Full-run means:
+`+0.00357` (run 9), `+0.00347` (run 10), `+0.00336` (run 11) -- unmoved across a
+5x span in peak lr -- then **`+0.00094`** in run 12, with the 400-step buckets
+crossing zero (`-1e-5` at 1200-1600) and coming back. That is a 3.5x move on a
+meter that had refused to respond to the one knob it is supposed to calibrate,
+and run 12 did not change the lr at all.
 
-This is also why run 11 stops spending runs to protect a clean read of it. The
-window means quoted in earlier notes (`+0.0038` for run 9, `+0.008..0.010` for
-run 10) were window artifacts on a noisy series; the full-run means are the
-numbers above and they are the same.
+So the meter is not dead here; it was reading something the lr could not reach.
+Three candidate causes, confounded in one run: the frozen fallback (a class
+walking at `5e-6` on normalized steps is a systematically moving target the
+matrices keep agreeing with), the constant turn (the frame now follows at 1.8x
+the speed, so it under-travels less), and the leaner table. **The freeze is the
+one with a mechanism that predicts this sign**, and it is the user's standing
+hypothesis -- the fallback injects instability the tracker then chases. Isolating
+it costs one run: run 10's config with the freeze and nothing else, or run 12's
+with the fallback restored.
 
-**Open.** The rule has been confirmed at one point on one model, and has now
-failed to respond on a second. Whether the difference is the model, the batch
-noise (Anima at bs4 is far noisier -- see P17's 1.26 effective planes), or that
-Anima has never been run hot enough to reach the crossing, is unsettled. Until
-then it is a strong coincidence with a mechanism on LFM, not a law.
+If the crossing is real, P14's rule now says `5e-5` with a frozen fallback is
+approximately critically damped on this lane -- the first time the rule has had
+anything to say about Anima.
+
+One caution survives from when it was flat: the window means quoted in earlier
+notes (`+0.0038` for run 9, `+0.008..0.010` for run 10) were window artifacts on
+a noisy series whose step-to-step range is `-0.006..+0.017`. Quote the full-run
+mean or name the window.
+
+**And on this lane it is measuring the wrong failure.** Run 12 read `+0.00094`,
+which by this rule says `5e-5` is near critically damped, while the samples read
+as slightly hot. Both hold, because the cosine measures overshoot of the valley it
+is descending and has nothing to say about forgetting. Noise reaches it only
+through the step -- the wrong motion is undone by the next gradient, a negative
+contribution proportional to noise energy times `lr` times curvature -- so on
+noise-dominated batches the crossing sits *below* the true descent optimum and the
+meter is already the conservative one. The part that harms a finetune is invisible
+to it: motion driven by batch noise is uncorrelated with the gradient, so it moves
+the cosine neither way while erasing whatever the base model held in those
+directions. **The zero crossing is the descent optimum, not the finetune
+optimum**, and an lr cut justified by retention has to be argued as one. This is
+also the sharpest argument for accumulation (P20): noise-driven motion is exactly
+what averaging micro-batches removes.
+
+There is no forgetting instrument on the Anima lane at all. Flow-matching loss
+does not rank checkpoints, displacement is a budget, and the samples are the only
+read. That gap is worth naming as a gap.
+
+**Open.** The rule is confirmed at one point on LFM and has now, on Anima, moved
+for the first time -- but under three simultaneous changes, so what it responds
+to here is unknown. Whether it can pick an lr on this lane is the question the
+isolating run answers -- and the answer may be that it can pick a descent lr and
+never a finetune one.
 
 **Two things any LR comparison must still control for.**
 
@@ -269,9 +525,13 @@ ceiling and the controller absorbed a quarter of the increase itself. The aim
 panel is flat to four decimals, which is the control: `eta` moves the response,
 not the aim.
 
-**`0.05` is worse, so `0.01` stands**, but `eta` has stopped being a constant
-with a stability wall under it and become an ordinary tuning parameter never
-swept downward or in the `0.01`-`0.03` interior. Cheap: bs1, 300 steps, a minute
+**`0.05` is worse on loss, so `0.01` stands** -- though it read a *better*
+`projected_grad_norm`, which is the pair to remember: a hotter frame catches more
+gradient and loses. `eta` has stopped being a constant with a stability wall
+under it and become an ordinary tuning parameter never swept downward or in the
+`0.01`-`0.03` interior. **With the agreement gain gone (P19) it is the only
+handle on frame motion there is**, so this moved up: the turn is `eta` and
+nothing else, and the table above is the whole of what we know about it. Cheap: bs1, 300 steps, a minute
 an arm. **Do not make the aim hot to simulate higher rank** -- better loss from a
 hotter `eta` would not mean a better basis, and the basis is the track, not the
 goal.
@@ -411,25 +671,76 @@ goal.
    thousand that cancel. **Checkpoints against base can, they cost nothing but
    disk reads, and this lane should take that read on every run.**
 
-4. **The sizing rule is off by the rank it was measured at, and run 11 is
-   reading it.** Rank set to the live count measured at `r_cal 256` should put
-   `live_fraction` at ~0.95, and run 10 landed at **0.854**. So the live count is
-   not rank-invariant at the low end: at ranks of 20-51 roughly 15% fewer planes
-   clear the Gram floor than the same roles showed at 256. To sit at 0.95 the
-   rank has to go slightly *below* the measured count, and by how much is
-   unmeasured.
+4. **The sizing rule is measured, per role, and it has no fixed point.** Run 11
+   reported `live_fraction` at its own table ranks over 2100 steps:
 
-   The fleet mean cannot say which roles missed, which is the whole reason this
-   is still open after a full run. `track_live_planes` fixes that: it attaches
-   the `RankCalibrator` at the table's own ranks, with no rank override, so a
-   training run reports `rankcal/<role>_live_fraction` every logging window. The
-   meter never needed the oversized rank -- and read at the rank the table
-   actually uses, `frac` **is** the correction factor. Run 11 carries it, so this
-   closes from a run we were doing anyway rather than from a separate probe.
+   | role | rank | mean live | frac |
+   |---|---:|---:|---:|
+   | attn2_v | 14 | 10.84 | 0.774 |
+   | attn2_k | 20 | 15.67 | 0.783 |
+   | attn2_out | 9 | 7.35 | 0.817 |
+   | attn1_out | 25 | 20.87 | 0.835 |
+   | attn1_k | 51 | 43.82 | 0.859 |
+   | ff_down | 18 | 15.57 | 0.865 |
+   | attn1_q | 37 | 32.19 | 0.870 |
+   | attn1_v | 18 | 15.96 | 0.887 |
+   | attn2_q | 18 | 16.01 | 0.889 |
+   | patch_embed | 26 | 23.27 | 0.895 |
+   | proj_out | 26 | 23.43 | 0.901 |
+   | ff_up | 20 | 18.79 | 0.940 |
 
-   A per-role correction is also the shape the answer probably has: the roles
-   sit between 9 and 51 planes, the floor is `r * eps * lambda_max`, and there is
-   no reason a role at 9 and a role at 51 lose the same fraction.
+   **Liveness is a clip, not slack.** Planes below the Gram floor have their
+   rotation zeroed, so `attn2_v` at 0.774 has a fifth of its frame that never
+   turns -- a basis partly frozen, tracking a subspace it cannot follow. The
+   target is `0.90-0.95`; over-provisioning has measured twice as costly as
+   under-provisioning, so the correction is downward and biased lean.
+
+   **The demand is a function of the rank it is measured at, and run 12
+   measured the exponent.** Run 12 applied `mean / 0.95` per role and every role
+   moved up -- by about half of what a fixed demand predicted:
+
+   | role | r 11 -> 12 | live 11 -> 12 | frac predicted | frac measured |
+   |---|---|---|---:|---:|
+   | attn2_v | 14 -> 11 | 10.84 -> 9.16 | 0.985 | 0.833 |
+   | attn2_k | 20 -> 16 | 15.67 -> 13.42 | 0.979 | 0.839 |
+   | attn2_out | 9 -> 8 | 7.35 -> 6.85 | 0.919 | 0.856 |
+   | attn1_out | 25 -> 22 | 20.87 -> 19.34 | 0.949 | 0.879 |
+   | attn1_k | 51 -> 46 | 43.82 -> 40.92 | 0.953 | 0.890 |
+   | attn1_q | 37 -> 34 | 32.19 -> 30.46 | 0.947 | 0.896 |
+   | ff_down | 18 -> 16 | 15.57 -> 14.61 | 0.973 | 0.913 |
+   | attn1_v | 18 -> 17 | 15.96 -> 15.54 | 0.939 | 0.914 |
+   | attn2_q | 18 -> 17 | 16.01 -> 15.65 | 0.942 | 0.921 |
+   | proj_out | 26 -> 25 | 23.43 -> 23.09 | 0.937 | 0.924 |
+   | patch_embed | 26 -> 24 | 23.27 -> 22.30 | 0.970 | 0.929 |
+   | **ff_up (control)** | 20 -> 20 | 18.79 -> 19.07 | 0.940 | **0.954** |
+
+   **The demand contracts as `live ~ r^0.6`.** Per-role exponents span
+   `0.37-0.70` with a median of `0.596`, and `ff_up` -- the one role whose rank
+   did not change -- moved `+1.5%`, so there is no run-level drift hiding in the
+   others. That fixes the whole shape of the rule:
+
+   - `frac = live / r ~ r^-0.4`. Fraction is bought by cutting rank, and slowly:
+     a 10% rank cut buys 4% of fraction.
+   - **`rank <- live / 0.95` is the wrong rule** at any target above what the
+     current rank already gives; it under-corrects by about 2.5x. The rule that
+     converges in one step is `r_new = r * (target / frac)^(1/(alpha - 1))`,
+     i.e. `(target/frac)^-2.5` at `alpha = 0.6`.
+   - **Fraction costs live planes.** Taking `attn2_v` from 0.833 to 0.95 means
+     rank 11 -> 8 and live 9.2 -> 7.5: a fifth of the directions the tracker
+     actually turns, spent to stop carrying planes it cannot. Across the fleet
+     the 0.95 target costs roughly 8-18% of live planes per role.
+
+   **So the target is now a real decision, not a default.** 0.95 came from LFM,
+   where it was free -- the calibrated table landed at 0.946 with nothing to
+   contract. Here it is a trade: dead planes are clipped and never turn, but
+   buying their removal spends planes that do. What decides it is the evidence
+   that over-provisioning costs about twice what under-provisioning costs; what
+   is missing is whether that still holds when the cut reaches this deep.
+   **Discuss the target before the next table.**
+
+   Note this is also a per-role step change -- the step carries `sqrt(r)`, so
+   `attn2_v` drops 11% and `attn1_v` 3%. Deliberate, but it means run 12 is not
+   a clean read of the freeze alone on any magnitude-sensitive metric.
 
    Free on the same run: `grad_moment_cosine` is core-tier, so P14's overshoot
    meter got its first Anima read. At `r_cal 256`/lr `2e-5` it sits at
