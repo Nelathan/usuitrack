@@ -20,10 +20,14 @@ changes go here.
   Authoritative for algorithm semantics. **Carries no history**: when a rule
   changes, SPEC states the new rule and its guarantee, nothing about what it
   replaced.
-- `docs/PLAN.md` — the open-questions ledger: what we are unsure about, how each
-  would be settled, and what evidence has moved each answer. Also the current
-  direction and the measured numbers behind it. Read before proposing or running
-  an experiment or changing a default.
+- `docs/PLAN.md` — the open-questions ledger, grouped: what we are unsure about,
+  how each would be settled, and what evidence has moved each answer. Questions
+  only; numbers live in FACTS. Read before proposing or running an experiment or
+  changing a default. **Keep it under ~300 lines**: a question that closes leaves
+  PLAN in the same session.
+- `docs/FACTS.md` — measured numbers that are neither a rule nor a question:
+  parameter classes, per-run telemetry, throughput, memory, run ledger. Each with
+  its source and date; replaced, not appended to, when a new read supersedes it.
 - `docs/ARCHIVE.md` — everything closed. Top half: distilled conclusions, newest
   at its end, which is where a new closure goes. Bottom half: the former PLAN
   frozen verbatim as the investigation log — read for evidence, never append.
@@ -35,10 +39,17 @@ changes go here.
 Research, not software engineering; the artifact is the question ledger, not the
 diff. The cardinal sins are forgetting an open question, failing to record a new
 one, and failing to update an answer when evidence arrives. When a question
-closes, distil the conclusion into PLAN and let the chronology fall away — no
-superseded guidance left in present tense; the full write-up moves to
-`docs/ARCHIVE.md`. When a design settles, SPEC gets the result and only the
-result.
+closes, its distilled conclusion moves to the top half of `docs/ARCHIVE.md` and
+leaves PLAN -- no superseded guidance left in present tense, no run narratives
+kept "for context". When a design settles, SPEC gets the result and only the
+result. When a finding contradicts something already written, write the
+correction where the wrong claim lives and list what it withdraws.
+
+**Work one group at a time.** PLAN is grouped so a session can take one set of
+questions that share runs, reads or code, and leave the rest parked. A session
+that touches every open question at once loses the user and loses the thread.
+When a review turns up many issues, propose which group to handle now; park the
+rest in PLAN.
 
 Nothing in these docs is settled because it is written down. When a measurement
 contradicts a rule, the rule moves. A doc this project wrote is not authoritative
@@ -97,6 +108,21 @@ the measurement target match the claim. If any drift, stop and name the mismatch
   not have to read everything. No status-diary, no "I'll now do X" preambles, no
   printing directives back as proof of compliance. He reads slowly and
   deliberately.
+- **Length is a cost measured in the user's hours.** A reply that covers a dozen
+  topics takes an hour to read and answer, and the context cache goes cold while
+  it is read. Answer the group in play; say what else was found in a line each
+  and park it.
+- **Silence is not autonomy.** Before a run of tool calls, say in a sentence what
+  is being checked and why; surface a finding when it lands, not at the end of a
+  long investigation. The user wants to plan together, not to receive a result.
+- **Nothing the user has not seen gets committed or shipped as a choice.** A
+  sizing estimator, a loss weight, a rule, a default: each is a modelling
+  decision, and inventing one and running with it -- however confident -- is how
+  a hurried heuristic ends up sizing a run. Label invented heuristics as
+  unmeasured. When the user hands over a session explicitly, commit in reviewed
+  groups and list in HANDOVER exactly what to review.
+- **Do not bundle.** One commit per coherent change; a design change, an
+  instrument, a doc correction and a run write-up are four commits.
 
 ## Running things
 
@@ -158,10 +184,12 @@ uv run python run.py config/train_full_fine_tune_anima_usuitrack.yaml
 ```
 
 2B Cosmos DiT, full finetune, `optimizer: usuitrack` with `optimizer_params`
-carrying `rank` (or `rank_table`) and `fallback_lr`. It runs on the 12GB card at
-11/12GB, so batch cannot rise above 4 and `release_matrix_grads` is what makes it
-fit — gradient accumulation is incompatible with it. Set the run's `name` in the
-config; that name is the output directory.
+carrying `rank` (or `rank_table`) and `fallback_lr`. Batch cannot rise above 4 on
+the 12GB card; `release_matrix_grads` is what makes it fit, and
+`gradient_accumulation: k` (through `accumulate()`) is how the effective batch
+rises. Run 13 at bs4 x k4 with the sized table sat at 76% allocated, and fp32
+accumulators at rank 256 OOMed: treat the card as full. Set the run's `name` in
+the config; that name is the output directory.
 
 A rank calibration is the same harness with `calibrate_rank` in
 `optimizer_params`: every role runs at one oversized rank and the per-role
@@ -176,10 +204,11 @@ its table actually uses. Default it on: the fleet mean cannot say which roles a
 sizing rule missed.
 
 `scripts/usuitrack_base_distance.py` reads a run's checkpoints against the base
-weights and prints relative displacement per role. It is the only read that
-separates travel from churn at the weight level -- `update_to_param_ratio` is
-per-step and cannot -- and it costs nothing but disk. Run it on every finished
-Anima run.
+weights and prints relative displacement per role. **On this lane it mostly reads
+the bf16 stochastic-rounding walk, not learning** (`docs/FACTS.md`): increments
+between checkpoints are uncorrelated and grow as `sqrt(steps)`. Use it for "how
+far did the weights go", never to rank runs or to infer travel, until a
+walk-aware read exists (`PLAN.md` A2).
 
 **Output goes on `/mnt/luna`, not `/mnt/mars`.** Mars is full. Each Anima
 checkpoint is 3.9 GB plus a 757 MB `optimizer.pt`, so a run keeping five of them
@@ -199,14 +228,15 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
   step suppresses the periodic saves and nothing else, so even a throwaway
   calibration writes a full 3.9 GB checkpoint and a 1.4 GB optimizer state when
   it finishes. Budget the disk for it or delete it afterwards.
-- **Gradient accumulation goes through `accumulate()`, never ai-toolkit's
-  gradient path.** `gradient_accumulation: k` in the config delivers `k` batches
-  per step, and the patched `hook_train_loop` calls `optimizer.accumulate(weight)`
-  after each backward. Its own summation is unscaled -- `Accelerator()` takes no
-  arguments, so `accelerator.backward` divides by nothing -- which would be a
-  silent `k`x learning rate if we read `.grad`. We do not; each matrix gradient is
-  still consumed and freed by the hook. `gradient_accumulation_steps` is the
-  mutually exclusive accelerate-style key and is incompatible with this path.
+- **Gradient accumulation goes through `accumulate()`.** `gradient_accumulation:
+  k` delivers `k` batches per step; the patched `hook_train_loop` scales each
+  micro-batch's loss by its element count relative to the group's first, calls
+  `optimizer.accumulate(weight=elements, final=last)` after each backward, and
+  divides every summed `.grad` into the group mean *before* the clip.
+  `Accelerator()` takes no arguments and divides by nothing, so that division is
+  the only thing standing between the fallback class and a `k`x-summed gradient.
+  `gradient_accumulation_steps` is the accelerate-style key and does not go
+  through this path.
 - **Raising `k` without raising `lr` is a colder run.** The step carries
   `sqrt(a + (1-a)/k)` with `a = micro_batch_agreement`, so `k=4` at low agreement
   halves it. The `sqrt(tokens per step)` rule below is what the mechanism already
