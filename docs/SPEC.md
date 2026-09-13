@@ -287,16 +287,18 @@ projected gradient:
 
 $$M_t=\beta M_{t-1}+(1-\beta)O_t,\qquad \beta=0.9.$$
 
-Under gradient accumulation `O_t` is the importance-weighted mean of the group's
+Under gradient accumulation `O_t` is the weighted mean of the group's
 micro-batch directions, `O_t = sum_i w_i O_t^{(i)} / sum_i w_i`, each
 orthogonalized on its own before the average. The frame is held for the whole
 group, so the tangents average in one tangent space and `Delta_t` is their mean
-by the same weights. `w_i` is the micro-batch's importance weight and never its
-gradient magnitude; the weights normalize, so their scale is free.
+by the same weights. `w_i` is the micro-batch's share of the group's loss -- its
+loss token count, so the average weighs micro-batches as one big batch would --
+and never its gradient magnitude; the weights normalize, so their scale is free.
 
 **Accumulation is self-anchoring in the learning rate, and this is a consequence
-rather than a design.** `||O^{(i)}||` is fixed by shape, so the mean of `k`
-directions is shorter than each of them in proportion to how much they disagree:
+rather than a design.** The `||O^{(i)}||` are nearly equal -- the polar map
+leaves singular values near one -- so the mean of `k` directions is shorter than
+each of them in proportion to how much they disagree:
 measured, the step scales by `sqrt(a + (1-a)/k)` where `a` is
 `micro_batch_agreement`, to within 3% over `k` in 1-8. At `a` near zero that is
 `1/sqrt(k)`, which is exactly the `sqrt`-of-batch-size learning-rate rule
@@ -477,6 +479,17 @@ every step. `U` is never cast to `W`'s dtype on the way in; a single rounding
 happens at the write, with weight decay folded into the same accumulator so it
 is not rounded twice. See `usuitrack/stochastic.py`.
 
+Stochastic rounding keeps the expectation and pays in variance. A coordinate
+whose update `u` is below its ulp moves by a whole ulp with probability
+`|u| / ulp`, so after `N` steps the weights sit a random walk of variance
+`N |u| ulp` per coordinate away from the path the updates describe. The walk
+grows as `sqrt(N)` and the path at most as `N`, but at a small step the walk
+wins for a long time: at Anima's `update_to_param_ratio` of `3.7e-6` it is
+several times the fp32 travel after 350 steps, and ~90% of matrix coordinates do
+not move at all in a 50-step window. **Distance from base weights on a bf16 model is
+therefore a read of the walk, not of learning**, until the update approaches a
+ulp. `docs/FACTS.md` carries the measurement.
+
 ## Two-phase execution
 
 For each matrix, phase one runs exactly once after its full gradient is complete:
@@ -497,21 +510,21 @@ from a `register_post_accumulate_grad_hook` callback to release each full matrix
 gradient as soon as it is consumed (`release_matrix_grads=True` at
 construction).
 
-`accumulate(weight)` closes one micro-batch: it runs the batched polar map over
-whatever phase one has prepared and folds each `O` into this step's weighted
-sums, then clears the pending work so the next backward can reuse it. Called
-once per `backward()`, so one call per step is the ordinary path and `k` calls
-are gradient accumulation. `step()` calls it for anything the caller left
-pending, which is why a loop that never mentions it behaves as it always did.
+`accumulate(weight, final)` closes one micro-batch: it runs the batched polar
+map over whatever phase one has prepared and folds each `O` into this step's
+weighted sums, then clears the pending work so the next backward can reuse it.
+Called once per `backward()`, with `final=True` on the last; `step()` folds
+anything still pending as final, so a loop that never calls it takes the
+single-batch step exactly.
 
 The group's two running sums -- the folded direction and the summed Oja tangent
--- are stored at the projected gradient's own dtype, the rule the moment
-follows. They are the only `[d, r]` buffers resident across a group, so on a
-bf16 model they are live alongside each backward's activations at half the cost
-fp32 would carry. A bf16 sum is written with stochastic rounding: increment `i`
-of `k` lands at about `1/k` of the total, which round-to-nearest drops, and
-stochastic rounding keeps each sum's expectation equal to the fp32 sum. The
-weighted means are formed in fp32 as they leave the accumulator.
+-- are the only `[d, r]` buffers resident across a group, live alongside the
+next backward's activations. Folds that another backward will follow are stored
+at the projected gradient's dtype, the rule the moment follows, which halves
+that cost on a bf16 model; a bf16 fold is stochastically rounded, since
+increment `i` of `k` is about `1/k` of the total and round-to-nearest would drop
+it. The final fold has no backward after it, so it promotes the sums to fp32 and
+adds exactly. The weighted means are formed in fp32.
 
 The split is deliberately not a transaction, and cannot be made one at this
 memory budget. Phase one exists so that `G` can be freed the moment it is
@@ -661,15 +674,16 @@ Mean pairwise cosine between the orthogonalized directions of the micro-batches
 one step averaged. Present only when a step accumulated two or more, and
 recovered from the running sums rather than the directions: with
 `S = sum w_i O^{(i)}`, `Q = sum w_i^2 ||O^{(i)}||^2`, `W = sum w_i` and
-`w_2 = sum w_i^2`, it is `w_2 (||S||^2 - Q) / (Q (W^2 - w_2))`, exact when the
-`||O^{(i)}||` are equal, which the polar map makes them to its convergence error.
+`w_2 = sum w_i^2`, it is `w_2 (||S||^2 - Q) / (Q (W^2 - w_2))`. The numerator is
+exactly the weighted sum of pairwise inner products; the normalization assumes
+equal `||O^{(i)}||`, which the polar map gives only approximately.
 
-It estimates the aim's signal-to-noise ratio `|s|^2/(|s|^2 + |n|^2)` from
-independently drawn batches, so a pure-noise aim reads zero and the reading is an
-absolute level rather than a quantity needing a reference run. It also prices
-accumulation's effect on the step through `sqrt(a + (1-a)/k)`. It is wired to
-nothing: a controller driven off it would be a magnitude functional gating a step
-whose whole purpose is that magnitude decides nothing.
+Independent micro-batches share only signal, so pure noise reads exactly zero
+and the reading is an absolute level. It is the agreement of *polar directions*,
+not the raw-gradient ratio `|s|^2/(|s|^2 + |n|^2)`: the polar map is nonlinear,
+so it is a monotone proxy for that ratio with the same zero. It prices
+accumulation's effect on the step through `sqrt(a + (1-a)/k)`. Rounding in the
+bf16 sums biases it upward by under 1% of its signal. It is wired to nothing.
 
 ## Rank calibration
 
@@ -679,7 +693,7 @@ set, independent of the diagnostics tier, on-device accumulation with a single
 host read per window.
 
 Run the model at a rank deliberately above what any matrix needs.
-`_anneal_tangent` feeds the calibrator one live-plane count per matrix per basis
+`_polar_tangent` feeds the calibrator one live-plane count per matrix per basis
 update -- the same `tangent_live_fraction` numerator, planes clearing the Gram
 noise floor -- tagged with the param group's `calibration_label`. `roll()` closes
 a window: per label, the mean, median and geometric mean of that count over the
@@ -690,18 +704,19 @@ windows after the first (the first is the acquisition transient),
 `live_n` is how many directions the gradient drives. While the basis has headroom
 it barely moves with the basis rank, so this measures what a right-sized run
 would resolve. The table is that count directly -- a basis sized to it runs at
-`tangent_live_fraction` ~0.9-0.95 -- but choosing it (mean or median per role,
-rounding, clamping to `min(m,n)//2`) is a hand step, kept out of the tool.
+`tangent_live_fraction` ~0.8-0.95 -- but choosing it (the per-role mean is the
+simple default; rounding; clamping to `min(m,n)//2`) is a hand step, kept out of
+the tool.
 `frac = mean / rank` is a headroom read: high `frac` means the count is a lower
 bound and the role will be mildly under-provisioned, which is the safe side.
 
-`geomean` is the estimator that matches the quantity's shape: live planes follow
-the rank they were measured at as `live ~ r^alpha`, so the distribution across a
-role's matrices is log-linear and the arithmetic mean is pulled by its high tail.
-It lands between the mean and the median, biased low, which is the direction
-under-provisioning already argues for. Floored at one plane, since no rank names
-fewer and `log(0)` is not a measurement -- a role whose frames are wholly dead
-reads 1 here and 0 on the mean, and the pair is what says so.
+`geomean` is a skew read, not a better estimator. One rank serves every matrix
+in a label, so matrices below it carry dead planes whichever average picked it:
+`geomean / mean` per role predicted the live fraction a training run reached at
+the sized table (correlation 0.92 over ten Anima roles), most skewed lowest. A
+low ratio says the label hides a spread -- depth, say -- that no average fixes.
+Floored at one plane, since no rank names fewer and `log(0)` is not a
+measurement.
 
 A per-role table costs the equal-rank `eigh` batching described under step 4.
 
@@ -731,7 +746,9 @@ These choices define the current design; they are redesignable.
    moment and every consumer is scale-invariant. That retires the clip, and it
    makes `||M||` an agreement read the step size follows. Measured loss-neutral
    against averaging first; it is kept for the invariance and the observability,
-   not for a loss delta.
+   not for a loss delta. Across accumulated micro-batches the same order is
+   applied by the same argument and has not been measured against summing first
+   (`PLAN.md`).
 8. **Balanced polar direction plus a parameter-shape aspect scale:** direction
    belongs to projected geometry; scale remains tied to parameter geometry, with
    the invariant that justified it holding only at full rank (see step 8).

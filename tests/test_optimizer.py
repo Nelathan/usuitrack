@@ -889,6 +889,81 @@ def test_accumulation_moves_neither_the_moment_nor_the_basis():
     assert not torch.equal(optimizer.state[weight]["projected_exp_avg"], moment)
 
 
+def test_only_the_final_fold_keeps_full_precision_on_a_bf16_model():
+    """The running sums are bf16 only while another backward will follow.
+
+    Folds between backwards are stored at the gradient's dtype, because they
+    coexist with the next backward's activations. The last fold has nothing
+    after it, so it promotes the sums to fp32 and adds exactly -- and ``step()``
+    folds a lone micro-batch that way, so the un-accumulated step never rounds.
+    """
+
+    torch.manual_seed(6)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS, dtype=torch.bfloat16))
+    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    weight.grad = torch.randn_like(weight)
+    optimizer.step()
+
+    weight.grad = torch.randn_like(weight)
+    optimizer.accumulate()
+    entry = optimizer._accumulated[weight]
+    assert entry.direction.dtype == torch.bfloat16
+    assert entry.oja_tangent.dtype == torch.bfloat16
+
+    weight.grad = torch.randn_like(weight)
+    optimizer.accumulate(final=True)
+    assert entry.direction.dtype == torch.float32
+    assert entry.oja_tangent.dtype == torch.float32
+    optimizer.step()
+
+    folded = []
+    resolve = optimizer._resolve_accumulated
+
+    def capture(entries):
+        folded.extend((e.direction.dtype, e.micro_batches) for e in entries)
+        return resolve(entries)
+
+    optimizer._resolve_accumulated = capture
+    weight.grad = torch.randn_like(weight)
+    optimizer.step()
+    assert folded == [(torch.float32, 1)]
+
+
+def test_bf16_accumulation_of_repeats_hands_the_weight_write_the_single_step():
+    """`k` copies of one gradient on a bf16 model, through the rounded sums.
+
+    Compared on the update handed to the weight write, not on the weights: at
+    this size the stochastically rounded bf16 write itself walks the weights
+    several times further than the update moves them, so a weight comparison
+    measures that walk and nothing about accumulation. The gradients are fixed
+    inputs, so the frame sees the same tangents in both optimizers and only the
+    accumulators' rounding separates the two updates.
+    """
+
+    def updates(k):
+        torch.manual_seed(7)
+        weight = torch.nn.Parameter(torch.randn(ROWS, COLS).bfloat16())
+        gradients = [torch.randn(ROWS, COLS).bfloat16() for _ in range(3)]
+        optimizer = UsuiTrack([weight], lr=0.05, rank=RANK, side="right")
+        taken = []
+        apply = optimizer._apply_matrix_update
+
+        def capture(entry, update_hat, group):
+            taken.append(entry.projector.project_back(update_hat).float())
+            return apply(entry, update_hat, group)
+
+        optimizer._apply_matrix_update = capture
+        for gradient in gradients:
+            for index in range(k):
+                weight.grad = gradient.clone()
+                optimizer.accumulate(final=index == k - 1)
+            optimizer.step()
+        return taken
+
+    for single, accumulated in zip(updates(1), updates(4), strict=True):
+        assert (accumulated - single).norm() < 0.02 * single.norm()
+
+
 def test_micro_batch_agreement_spans_repeats_to_opposites():
     """The meter's two analytic fixed points, and its absence at one micro-batch.
 
@@ -922,13 +997,10 @@ def test_micro_batch_agreement_spans_repeats_to_opposites():
     assert optimizer.pop_diagnostics()["micro_batch_agreement"] == pytest.approx(-1.0, abs=1e-3)
 
 
-def test_rank_calibrator_geometric_mean_sits_between_mean_and_median():
-    """The estimator matching a power-law quantity, on a deliberately skewed label.
-
-    Live counts follow `live ~ r^alpha`, so their spread is log-normal-ish and
-    the arithmetic mean is pulled by the high tail. The geometric mean is the
-    central estimator of that shape and lands below the arithmetic one.
-    """
+def test_rank_calibrator_geometric_mean_reads_a_skewed_label():
+    """Geometric mean on a deliberately skewed label: below the mean, and here
+    above the median. It is not bounded by either; the ratio to the mean is the
+    skew read."""
 
     from usuitrack.diagnostics import RankCalibrator
 

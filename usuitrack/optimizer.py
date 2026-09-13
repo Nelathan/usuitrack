@@ -85,7 +85,8 @@ class MatrixUpdate:
     param: Tensor
     projector: SubspaceProjector
     original_shape: tuple[int, ...]
-    # Sum of `w_i * polar(projected grad_i)`, fp32. The polar map runs per
+    # Sum of `w_i * polar(projected grad_i)`, at the gradient's dtype until the
+    # final fold promotes it to fp32 -- see `_fold_into`. The polar map runs per
     # micro-batch, ahead of this average -- see `_orthogonalized_directions`.
     direction: Tensor
     weight: float | Tensor
@@ -585,23 +586,28 @@ class UsuiTrack(Optimizer):
                     raise RuntimeError("UsuiTrack does not support sparse gradients")
 
     @torch.no_grad()
-    def accumulate(self, weight: float | Tensor = 1.0) -> None:
+    def accumulate(self, weight: float | Tensor = 1.0, final: bool = False) -> None:
         """Fold one micro-batch into the step `step()` will apply.
 
-        Call it after every ``backward()``, then ``step()`` once. One call per
-        step is what ``step()`` does on its own, so nothing changes; `k` calls
-        are gradient accumulation. The accumulation lives in projected space --
-        `[d, r]` per matrix against `[m, n]` for a gradient -- so a
+        Call it after every ``backward()``, then ``step()`` once. A loop that
+        never calls it gets the single-batch step, folded by ``step()`` itself;
+        `k` calls are gradient accumulation. The accumulation lives in projected
+        space -- `[d, r]` per matrix against `[m, n]` for a gradient -- so a
         ``release_matrix_grads`` run still consumes and frees one full matrix
-        gradient at a time and the effective batch rises for free.
+        gradient at a time.
 
-        ``weight`` is the micro-batch's **importance weight, not its gradient
-        magnitude**. Magnitude is discarded on purpose, and that discards the
-        between-micro-batch part of any per-sample loss weighting with it -- on
-        a flow-matching lane the timestep weight, whose mean over four samples
-        moves about +-13%. Passing it here restores exactly that. The weights
-        normalize by their own sum, so their scale is free and 1.0 everywhere
-        is the unweighted mean.
+        ``weight`` is the micro-batch's **share of the group's loss, not its
+        gradient magnitude**: its loss token count, so the average weighs each
+        micro-batch as one big batch would have. The weights normalize by their
+        own sum, so their scale is free and 1.0 everywhere is the unweighted
+        mean.
+
+        ``final`` marks the last micro-batch of the step. The running sums are
+        stored at the gradient's dtype only because they stay resident through
+        the *next* backward; nothing follows the last one, so its fold is kept
+        at full precision. ``step()`` folds whatever is still pending as final,
+        which is what makes the un-accumulated step exactly the single-batch
+        path, with no rounding in it.
 
         Three things hold across the group of micro-batches, and each is
         load-bearing.
@@ -636,7 +642,8 @@ class UsuiTrack(Optimizer):
                 continue
             directions = self._orthogonalized_directions(prepared)
             for entry, direction in zip(prepared, directions, strict=True):
-                self._fold_micro_batch(entry, direction, weight)
+                storage = torch.float32 if final else entry.projected_grad.dtype
+                self._fold_micro_batch(entry, direction, weight, storage)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -652,7 +659,7 @@ class UsuiTrack(Optimizer):
         # Whatever the caller did not fold in itself. A no-op when every
         # micro-batch already went through `accumulate()`, and the whole of the
         # un-accumulated path when none did.
-        self.accumulate()
+        self.accumulate(final=True)
         self._step_update_norm_sq = None
 
         for group in self.param_groups:
@@ -691,14 +698,11 @@ class UsuiTrack(Optimizer):
 
     @torch.no_grad()
     def _fold_micro_batch(
-        self, prepared: PreparedGrad, direction: Tensor, weight: float | Tensor
+        self, prepared: PreparedGrad, direction: Tensor, weight: float | Tensor, storage: torch.dtype
     ) -> None:
         """Add one orthogonalized micro-batch into this step's weighted sums."""
 
         direction = direction.float() * weight
-        # The sums that outlive a single micro-batch are stored at the
-        # gradient's width; see `_fold_into`.
-        accumulator_dtype = prepared.projected_grad.dtype
         # `w_i^2 ||d_i||^2`, the weighted-sum form the agreement read needs.
         square = direction.square().sum()
         projected_norm = prepared.projected_grad.float().norm() * weight
@@ -717,12 +721,12 @@ class UsuiTrack(Optimizer):
                 param=prepared.param,
                 projector=prepared.projector,
                 original_shape=prepared.original_shape,
-                direction=self._fold_into(None, direction, accumulator_dtype),
+                direction=self._fold_into(None, direction, storage),
                 weight=weight,
                 projected_grad_norm=projected_norm,
                 micro_batches=1,
                 oja_tangent=(
-                    None if tangent is None else self._fold_into(None, tangent, accumulator_dtype)
+                    None if tangent is None else self._fold_into(None, tangent, storage)
                 ),
                 raw_grad_norm=raw_norm,
                 direction_square_sum=square,
@@ -733,12 +737,12 @@ class UsuiTrack(Optimizer):
         # The projector is rebuilt per prepare over the same basis tensor; the
         # latest one is the object `_apply_basis_updates` will write through.
         entry.projector = prepared.projector
-        self._fold_into(entry.direction, direction, accumulator_dtype)
+        entry.direction = self._fold_into(entry.direction, direction, storage)
         entry.weight = entry.weight + weight
         entry.projected_grad_norm = entry.projected_grad_norm + projected_norm
         entry.micro_batches += 1
         if tangent is not None:
-            entry.oja_tangent = self._fold_into(entry.oja_tangent, tangent, accumulator_dtype)
+            entry.oja_tangent = self._fold_into(entry.oja_tangent, tangent, storage)
         if raw_norm is not None:
             entry.raw_grad_norm = raw_norm if entry.raw_grad_norm is None else entry.raw_grad_norm + raw_norm
         entry.direction_square_sum = entry.direction_square_sum + square
@@ -750,29 +754,26 @@ class UsuiTrack(Optimizer):
         """Add one fp32 increment into a running sum stored in `dtype`.
 
         The folded direction and the summed Oja tangent are the only `[d, r]`
-        buffers that stay resident *across* a micro-batch group, so unlike every
-        other temporary here they are live at the same time as each backward's
-        activations. They follow the gradient's storage dtype for the same
-        reason the moment does -- on a bf16 model that halves what coexists with
-        the backward, which is the difference between fitting and not at an
-        oversized rank on a 12 GB card, and on an fp32 model the sum stays
-        exact.
+        buffers that stay resident *across* a micro-batch group, so they are
+        live alongside the next backward's activations. Stored at the gradient's
+        dtype -- the rule the moment follows -- they halve that cost on a bf16
+        model, which is what let a rank-256 `k=4` calibration fit a 12 GB card.
+        A final fold asks for fp32 and promotes the sum, so the last increment
+        is added exactly.
 
-        In bf16 the write is stochastically rounded, and that is not optional:
-        increment `i` of `k` is about `1/k` of the total it lands on, and
-        round-to-nearest drops a quarter-ulp change outright -- the same sub-ulp
-        loss `copy_stochastic_` exists to fix for weights. Rounded this way each
-        sum keeps its expectation equal to the fp32 sum.
-
-        The agreement read survives it. It recovers `a` from `||S||^2 - Q`, a
-        difference that is `(k-1) a` of `Q` -- under a percent at the agreement
-        this lane shows -- but the rounding error is per-element and unbiased, so
-        in the norm it shrinks as `1 / sqrt(d r)` and lands orders of magnitude
-        below that signal.
+        A bf16 write is stochastically rounded: increment `i` of `k` is about
+        `1/k` of the total, and round-to-nearest would drop it. Each sum keeps
+        its expectation. What it does not keep is the square: the agreement read
+        takes `||S||^2`, and unbiased rounding error `e` adds `E||e||^2` to it.
+        With per-element error below `ulp / 2` and `ulp` at most `|x| / 128`
+        that is under `2e-5 ||S||^2` per rounded fold -- about 0.5% of the
+        `(k-1) a Q` signal at `k = 4`, `a = 0.003`.
         """
 
         if total is None:
             total = torch.zeros(increment.shape, dtype=dtype, device=increment.device)
+        elif total.dtype != dtype:
+            total = total.to(dtype)
         if wants_stochastic_rounding(total):
             copy_stochastic_(total, total.float().add_(increment))
         else:
@@ -805,25 +806,20 @@ class UsuiTrack(Optimizer):
     ) -> None:
         """Mean pairwise cosine between the micro-batch directions this step averaged.
 
-        The anchor-free level reference the aim has never had. Two
-        independently-sampled batch gradients agree in expectation by
-        ``|s|^2 / (|s|^2 + |n|^2)``, the aim's signal-to-noise ratio, and a pure
-        noise aim reads exactly zero -- so this is a distance above a floor
-        without needing a synthetic pure-noise run to establish the floor.
-        Agreement *between samples* is what the deleted top-`k` gain was
-        reaching for and could never measure from one batch's spectrum.
+        Independent micro-batches share only the signal, so pure noise reads
+        exactly zero -- an absolute level, not one needing a reference run. For
+        raw gradients the expectation would be ``|s|^2 / (|s|^2 + |n|^2)``; the
+        polar map is nonlinear, so here it is a monotone proxy for that ratio
+        with the same zero, not the formula. Published and wired to nothing.
 
-        Published, and deliberately wired to nothing. A controller driven off
-        this would be the agreement gain again, and the objection to that was
-        never the sensor's quality: a magnitude functional has no business
-        gating a step whose whole purpose is that magnitude decides nothing.
-
-        Recovered from the sums rather than the directions, which is why the
-        directions need not be kept. With `S = sum w_i d_i`, `Q = sum w_i^2
-        ||d_i||^2` and equal `||d_i||` -- the polar factor's Frobenius norm is
-        fixed by shape, so they are equal to Newton-Schulz's convergence error
-        -- the mean pairwise cosine is `w2 (||S||^2 - Q) / (Q (W^2 - w2))`.
-        Costs one norm of a tensor already in hand, on device, no sync.
+        Recovered from the sums, so the directions need not be kept. With
+        `S = sum w_i d_i` and `Q = sum w_i^2 ||d_i||^2`, the numerator
+        `||S||^2 - Q` is exactly the weighted sum of pairwise inner products.
+        Dividing by `Q (W^2 - w2) / w2` turns it into a cosine by assuming the
+        `||d_i||` are equal; the Newton-Schulz schedule leaves singular values
+        near but not at one, so that normalization is approximate while the
+        sign and the zero are exact. One norm of a tensor already in hand, no
+        sync.
         """
 
         if diagnostics is None or entry.micro_batches < 2 or entry.direction_square_sum is None:

@@ -55,12 +55,13 @@ class RankCalibrator:
     step, kept outside this tool. ``frac`` (mean live count over the rank the run
     used) is a headroom read.
 
-    ``geomean`` is there because the quantity is log-linear rather than linear:
-    live planes follow the rank they were measured at as ``live ~ r^alpha``, so
-    the geometric mean is the central estimator of a power law and the arithmetic
-    one is not. It lands between the mean and the median and is biased low, which
-    is the direction the hand rule already reaches for -- over-provisioning has
-    measured about twice as costly as under-provisioning.
+    ``geomean`` is published as a skew read, not as a better estimator. One rank
+    serves every matrix in a label, so the matrices below it carry dead planes
+    whichever central value picked it; on Anima, ``geomean / mean`` per role
+    predicted the live fraction a training run reached at the sized table
+    (correlation 0.92 over ten roles), with the most skewed roles landing lowest.
+    A low ratio says the label is hiding a spread -- by depth, say -- that no
+    choice of average fixes.
     """
 
     def __init__(self) -> None:
