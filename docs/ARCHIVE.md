@@ -538,6 +538,127 @@ statement that no magnitude survives into the frame's motion.
 frame orbits on batch noise and should stop turning -- and there is no sensor for
 it.
 
+**Kept on evidence, not only on principle** (2026-09-14). Run 13, on the
+constant turn, read the lowest `tangent_concentration` (0.573), the highest
+`tangent_live_fraction` (0.906) and the best `grad_capture` (0.748) of any Anima
+run. Confounded with `k=4` and a larger table (`PLAN.md` B1), but the constant
+turn is at least not in the way. The arrival question is parked (`PLAN.md` E4).
+
+---
+
+## CLOSED -- Anima's rank table, runs 9 to 12
+
+Full working notes: `PLAN.md` at commit `e533bdf`, P13.
+
+- **Cross-attention K/V track the attention inner side.** Same structure, fewer
+  planes, half the window `std`, and per-1000-dimension density falls from the
+  top of the model (20.9, 14.2) into the ordinary range (10.0, 6.6). Free: basis
+  plus moment is `3072 r` either way.
+- **Role structure transfers to a DiT, not LFM's shape.** Attention carries the
+  rank and self-attention K wants ~2.7x V; feed-forward sits near 20 despite
+  being the largest weights; `time_embed` is ~1.7 planes, so the time module is
+  frozen.
+- **Rank is the measured live count, unrounded.** Run 9 rounded up to multiples
+  of 8 and ran at `live_fraction` 0.79.
+- **Demand contracts with rank as `live ~ r^0.6`** between runs 11 and 12 (per
+  role 0.37-0.70, `ff_up` the unchanged control at +1.5%), so `rank <- live /
+  target` under-corrects about 2.5x near the table. The converging rule
+  `r * (target/frac)^-2.5` does not extrapolate from a calibration rank: fed
+  rank-256 fractions it puts most roles at 1-4 planes.
+
+## CLOSED -- freezing the fallback class, run 12
+
+Full notes: `PLAN.md` at `e533bdf`, P18.
+
+`fallback_lr: 0` took (every fallback role exactly `0` displacement). Samples:
+progressed, slightly harmed, one steady trajectory, the mid-run degradation
+during the anneal gone -- and the creative and aesthetic advance of earlier runs
+gone with it. The class is not optional; what it should travel stays open
+(`PLAN.md` D2, D3).
+
+Ruled out on the way: the anneal degradation was not the fallback's lr ratio
+drifting. `warmup_stable_cosine_decay` holds both sub-optimizers at one
+multiplicative `min_lr_ratio`.
+
+Withdrawn: the derivation that set the next run's `fallback_lr` to `2e-6`
+("AdamW moves `lr` per coordinate per step, so relative displacement is
+`lr * steps / w_rms`, with `w_rms` near one"). The class's rms is 0.026-0.041,
+not one, so the formula was off ~30x, and its apparent 1.5x match on run 10 was
+two errors cancelling on walk-dominated displacement.
+
+## CLOSED -- gradient accumulation is built and validated end to end
+
+Full notes: `PLAN.md` at `e533bdf`, P20.
+
+**Design.** `accumulate(weight, final)` folds a micro-batch in projected space;
+`release_matrix_grads` stays intact. The frame is held across the group, so the
+Oja tangents are vectors in one tangent space and their arithmetic mean is
+correct. Each micro-batch is orthogonalized before the average. The moment and
+frame move once per step.
+
+**The step prices its own lr.** The mean of `k` polar directions shrinks by
+`sqrt(a + (1-a)/k)`; on a toy within 3% over `k` in 1-8. On Anima `a` is
+0.002-0.003, so `k=4` halves the step and `lr 1e-4` at `k=4` holds `5e-5`'s step.
+
+**Liveness rises under averaging.** At equal rank 256, `k=4` live counts were
+2.1-3.6x `k=1`'s (fleet fraction 0.094 -> 0.235). Not a rounding artifact
+(`FACTS.md`). What drove it is open (`PLAN.md` B1).
+
+**Memory.** fp32 running sums OOMed a rank-256 `k=4` calibration; bf16 sums fit.
+The final fold is unrounded because nothing follows it (added 2026-09-14; run 13
+itself rounded every fold, including the last).
+
+**Weights.** Micro-batches are weighted token-exactly -- each loss scaled by its
+element count relative to the group's first, fallback grads divided into the
+group mean before the clip -- in the ai-toolkit trainer (2026-09-14). This
+replaced a per-micro-batch timestep weight that was invented without a
+measurement and is gone. Run 13 ran with the timestep weight and with the
+fallback clip reading the *sum* of four micro-batch gradients.
+
+**Run 13** (`k=4`, 576 steps, table sum 595, `lr 1e-4`, `fallback_lr 2e-6`):
+clean, samples good and undertrained. Reads in `FACTS.md`.
+
+**Retired from "already tried":** tangent accumulation -- averaging `n` Oja
+tangents in a held frame while the weights kept stepping between them -- cost
+target loss at bs16 and was inert at bs4. Its verdict does not carry to
+accumulation, where nothing moves inside the group, and run 13 is the evidence.
+
+## CORRECTION -- distance from base reads the rounding walk
+
+2026-09-14. Anima weights are bf16 with stochastically rounded writes, and at
+this lane's step size the walk dominates checkpoint displacement (`FACTS.md`).
+What that withdraws or weakens:
+
+- **P20's "run 13 travelled further than run 12 in a quarter of the steps,
+  unexplained."** Wrong twice: every matrix role moved *less* in run 13, and the
+  whole-model excess was the fallback class, frozen in run 12. Both columns are
+  mostly walk.
+- **"Matrices travel nearly straight"** (stated in session 2026-09-13, from
+  displacement ~ steps x `update_to_param_ratio`). The increments are
+  uncorrelated; that match was the walk's magnitude.
+- **P18's "the fallback class is the largest mover" and its run 9/10 table.** It
+  does move most -- by `lr / rms`, not by lr -- but the magnitudes are walk.
+- **P18's run 12/run 10 per-role residuals within 3% of `sqrt(r)`.** A pure walk
+  predicts `r^(1/4)`; the residuals sit between, over 2300 steps where coherent
+  travel has had longer to grow. Not a clean confirmation of either.
+- **P13's run-10 "the anneal did not drag the model home; displacement rises
+  monotonically."** A walk rises monotonically whatever the learning did, so it
+  cannot rule dragging-home in or out.
+
+Still true: displacement is a budget, not a quality read. It is now also mostly
+not a learning read.
+
+## CLOSED -- the polar map's dtype is worth nothing end to end
+
+bf16 Newton-Schulz is 2.5-3.5x faster per kernel and 1.5-2.0x through
+`_balanced_polar_direction`, and a 1k-step LFM arm took 854 s against fp32's
+847 s with losses inside twice their floors in opposite directions. Forward and
+backward dominate. This also retires the iteration count as a speed lever. Our
+coefficients are HeavyBall's Muon-lineage quintic, not Polar Express; the
+projector's retraction does use Polar Express's `(1.875, -1.25, 0.375)`.
+
+---
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that
