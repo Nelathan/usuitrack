@@ -59,8 +59,20 @@ Run 13 checkpoints (plateau ends at step 432), per role, 2026-09-14:
 | patch_embed / proj_out | 0.437 / 0.404 | -0.062 / -0.016 | 84% / 53% |
 
 A random walk predicts `sqrt(50/350) = 0.378` and cosine 0; coherent travel
-predicts ~0.14 and a positive cosine. Toy on a real `attn1.to_q` (2048x2048),
-rank-78 update stream at relative `3.7e-6` per step, `beta 0.9`:
+predicts ~0.14 and a positive cosine.
+
+Run 12 over a longer horizon (1400 -> 1600, plateau until 1728; k=1, step
+`2.3e-6`): every matrix role reads ratio 0.369-0.383 against the walk's 0.378,
+cosine 0.000-0.005, 80-93% of coordinates unchanged in 200 steps. For a
+straight coherent component carrying fraction `f` of the displacement norm the
+cosine is `f^2 * (t2-t1)/t1 / ratio`, so cosine <= 0.002 bounds `f` at ~7%.
+The toy's fp32 *incoherent* stream (gradient noise through the moment) reads
+cosine 0.045 on its own; the real 0.001 is below even that, so rounding noise
+buries the moment's short-range correlation too. Read with
+`scripts/usuitrack_walk_read.py` (ai-toolkit).
+
+Toy on a real `attn1.to_q` (2048x2048), rank-78 update stream at relative
+`3.7e-6` per step, `beta 0.9`:
 
 | update stream | fp32 `|net|` at 350 | bf16+SR `|net|` | bf16 ratio / cos / unchanged |
 |---|---:|---:|---|
@@ -106,9 +118,27 @@ Bucket means over each run (steps are optimizer steps):
 | `tangent_live_fraction` | 0.884 -> 0.902 | 0.857 -> 0.906 |
 | `tangent_concentration` | 0.85 flat | 0.613 -> 0.573 |
 
-Run 13 changed `k`, lr, rank table (sum 595 vs 256) and `fallback_lr` together,
-so no row isolates `k`. Run 14 (`k=1`, same table and lr-equivalent step) is the
-contrast.
+Run 13 changed `k`, lr, rank table (sum 595 vs 256) and `fallback_lr` together.
+
+### Run 14: `k` against the table
+
+`anima_usuitrack_14_k1_contrast` is run 13 with `k=1` and `lr 5e-5`, 576 steps.
+Bucket means by optimizer step (runs 12 and 13 at the same step indices):
+
+| read, steps 200-431 | run 12 (k=1, table 256) | run 14 (k=1, table 595) | run 13 (k=4, table 595) |
+|---|---:|---:|---:|
+| `update_to_param_ratio` | 2.34e-6 | 3.64e-6 | 3.71e-6 |
+| `grad_capture` | 0.625 | 0.701 | 0.738 |
+| `tangent_live_fraction` | 0.889 | 0.552 | 0.891 |
+| `tangent_concentration` | 0.847 | 0.849 | 0.577 |
+| `moment_persistence` | 6.3e-4 | 6.1e-4 | 1.16e-3 |
+| `grad_moment_cosine` | 2.6e-3 | 2.4e-3 | 4.5e-3 |
+
+Per-role live fraction, steps >= 200, run 14 against run 13: attn1 k/q/v/out
+0.552/0.569/0.636/0.493 (run 13 0.890/0.908/0.918/0.871); attn2 k/q/v/out
+0.500/0.504/0.467/0.508 (0.818/0.920/0.821/0.812); ff up/down 0.659/0.557
+(0.955/0.898); patch_embed/proj_out 0.797/0.840 (0.988/0.999). The k=4/k=1
+ratio at table rank is 1.4-1.8 per role, against 2.1-3.6 at calibration rank 256.
 
 ### Rank calibration at `k=4`, and what the sized table reached
 
@@ -182,4 +212,4 @@ real work there.
 | 11 `lr1e4_cosine` | `1e-4`, cosine from warmup | cooler for longer |
 | 12 `freeze_fallback` | fallback frozen, resized table, constant turn, `5e-5` | stable, slightly harmed, bland: no creative/aesthetic advance |
 | 13 `acc4` | k=4, table from k=4 calibration (sum 595), `1e-4`, fallback `2e-6` | samples good, wants more; undertrained |
-| 14 `k1_contrast` | run 13 with k=1 and `5e-5` | running 2026-09-14 |
+| 14 `k1_contrast` | run 13 with k=1 and `5e-5` | clean; half the table dead at k=1; samples not reviewed |

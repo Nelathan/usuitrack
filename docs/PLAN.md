@@ -61,22 +61,25 @@ per-micro-batch polar map, moment once per step, `sqrt(a + (1-a)/k)` step shrink
 bf16 running sums with an unrounded final fold, token-exact weights in the
 ai-toolkit trainer, fallback grads divided into the group mean before the clip.
 
-### B1. What did `k=4` do, as opposed to the bigger table?
+### B1. Are the planes `k=4` makes live signal, or span?
 
-Run 13 read the best `grad_capture` (0.748), highest `tangent_live_fraction`
-(0.906) and lowest `tangent_concentration` (0.573) of any Anima run, and
-`moment_persistence` ~3x run 12. It also changed the rank table (sum 595 vs 256),
-lr, and `fallback_lr`. The user's reading: liveness rose because averaging lets
-signal clear the noise floor, which the polar map then turns. The competing
-reading: the sum of `k` independent tangents simply spans more planes. Rising
-`grad_capture` -- how much of each *fresh* micro-batch the frame holds -- favours
-the first.
+**Answered: `k`, not the table, moved the spectrum** (run 14 against run 13, same
+table and matched step, `FACTS.md`). At `k=1` the k=4-sized table runs at
+`tangent_live_fraction` 0.55 against 0.90, `tangent_concentration` 0.85 (run 12's
+value) against 0.57, and `moment_persistence` about half. `grad_capture` is
+mostly the table: 0.640 (run 12) -> 0.716 (big table, `k=1`) -> 0.747 (`k=4`).
+A rank table is sized for the `k` it runs at; run 14 carried nearly half its
+planes dead.
 
-**Settling run:** `anima_usuitrack_14_k1_contrast`, run 13 with `k=1` and `lr 5e-5`
-(same step), 576 steps, launched 2026-09-14. Overlay per optimizer step:
-`grad_capture`, `tangent_live_fraction`, `tangent_concentration`,
-`moment_persistence`. If they match run 13, the table did it; if they sit at run
-12's values, `k` did.
+**Still open: what the extra live planes are.** The user's reading: averaging
+lets signal clear the noise floor, and the polar tangent turns it. The competing
+reading: the mean of `k` independent tangents spans more directions. Capture
+does not separate them cleanly -- an `r`-plane frame catches `sqrt(r/d)` of
+isotropic noise too -- though capture rose far less than that noise baseline
+would. A discriminating read: at `k=4`, project each *held-out* micro-batch's
+gradient onto the planes that are live at `k=4` but not at `k=1`, against random
+planes of the same count in the frame's complement. Signal planes catch more
+than random; span planes do not.
 
 ### B2. Orthogonalize each micro-batch, or sum and orthogonalize once?
 
@@ -125,14 +128,21 @@ still magnitude-weighted, so the loudest samples and patches own the direction
 before the polar map ever sees it. Flow-matching loss magnitude varies strongly
 with timestep. The user's proposal: normalize every image patch's error to unit
 norm before summing -- numerically cleaner, and plausibly less dead tail at low
-batch size. For MSE the per-element gradient is `2 e`, so the unit-norm version
-is each patch's loss divided by its detached `sqrt`. Timestep weighting would go
-with it (magnitude is what it sets).
+batch size. Timestep weighting goes with it (magnitude is what it sets).
+
+**Built as an arm, choices made overnight and open to revision:** ai-toolkit
+`loss_type: patch_equalized_mse` weights each 2x2 latent patch (the DiT's
+patchify) by `mean(n) / n_p`, `n_p` its detached error norm across channels, so
+every patch's gradient has the same norm and the micro-batch keeps MSE's summed
+patch-gradient norm. That is "equal norm" rather than literally unit norm, so the
+fallback and the clip still see MSE-sized gradients. Masks are not counted.
+`timestep_type: linear` samples timesteps exactly as `weighted` does and drops
+the loss weight.
 
 **Prediction:** flatter tangent spectrum -- higher `tangent_live_fraction`, lower
-`tangent_concentration` -- at fixed `k` and table. Arm: run 13's config (on the
-current code) with the normalized loss. Design choices still open: the unit
-(latent pixel, 2x2 patch, or per sample) and whether masks count.
+`tangent_concentration` -- at fixed `k` and table. **Runs:** 16
+(`patch_equalized300`) against 15 (`rebaseline300`, run 13's config on current
+code), both 300 steps at `k=4`.
 
 Token-exact weighting across micro-batches is built (`ARCHIVE.md`); C1 is the
 within-micro-batch half of the same concern.
