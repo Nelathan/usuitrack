@@ -659,6 +659,19 @@ projector's retraction does use Polar Express's `(1.875, -1.25, 0.375)`.
 
 ---
 
+## CLOSED -- `k`, not the rank table, sets the tangent spectrum
+
+2026-09-14, run 14 (run 13 at `k=1`, `lr 5e-5`) against run 13, same table,
+matched step (3.64e-6 vs 3.71e-6). At `k=1` the table runs at
+`tangent_live_fraction` 0.55 against 0.90, `tangent_concentration` 0.85 (run 12's
+value on a table half the size) against 0.57, and about half the
+`moment_persistence`. `grad_capture` is mostly the table: 0.640 (run 12) -> 0.716
+(big table, `k=1`) -> 0.747 (`k=4`). Consequences: a rank table is sized at the
+`k` it will run at -- run 14 carried nearly half its planes dead -- and what the
+extra live planes are stays open (`PLAN.md` B1). Numbers in `FACTS.md`.
+
+---
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that

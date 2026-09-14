@@ -90,6 +90,26 @@ monotone rise, the P18 fallback tables, the run 12/13 comparison below -- is
 dominated by the walk. It remains the right read for "how far did the weights
 go"; it is not a read of how far learning went.
 
+### Walk-only control: what the walk does to samples
+
+`anima_walk_only_control`: base weights plus a simulated walk
+(`scripts/usuitrack_walk_only_model.py`) matched per role to run 13 @550 (whole
+model 2.943e-3 against run 13's 2.944e-3), sampled at 1024 px, 30 steps, seed 42,
+run 13's five prompts. Pixel RMS on [0,1] RGB against base (base samples are
+bit-identical across runs, checked):
+
+| prompt | walk-only | run 13 @50 | run 13 @550 |
+|---|---:|---:|---:|
+| 0 whale landscape | 0.018 | 0.078 | 0.128 |
+| 1 armored warrior | 0.146 | 0.222 | 0.175 |
+| 2 gown | 0.041 | 0.148 | 0.211 |
+| 3 creature and bird | 0.036 | 0.138 | 0.181 |
+| 4 ethereal figure | 0.018 | 0.050 | 0.116 |
+
+Pixel RMS is crude and composition-sensitive; the images were also looked at
+(agent's read, not the user's): the walk shifts composition on prompt 1, is near
+identical to base on prompt 2, and carries none of run 13's style shift.
+
 ### Distance from base, run 12 @2200 vs run 13 @550
 
 | role | run 12 | run 13 |
@@ -196,6 +216,10 @@ plane. No fp32 `k=4` calibration exists to compare -- that attempt OOMed at step
 | run 12 | bs4, k=1, table 256 | 4.67 | 1.17 | -- |
 | run 13 | bs4, k=4, table 595 | 17.76 | 1.11 | wandb: 76% of 12.3 GB allocated |
 | run 14 | bs4, k=1, table 595 | ~3.2-3.7 (progress bar) | | |
+| run 15 | bs4, k=4, table 595, median interval | 14.78 | 0.92 | |
+| run 12 | bs4, k=1, table 256, median interval | 3.93 | 0.98 | |
+| probe | bs1, k=16, checkpointing, median of 2 intervals | 15.46 | 0.97 | |
+| probe | bs1, k=16, no gradient checkpointing | | | OOM (3 retries) |
 | rankcal r256 k=4, fp32 accumulators | | | | OOM at step 3 |
 | rankcal r256 k=4, bf16 accumulators | | 13.9-15.3 | | needed `expandable_segments` |
 

@@ -29,10 +29,18 @@ long runs "drowned in noise", and run 12 went stable but bland. Unbiased roundin
 also means the expected path is intact, so the harm could be zero.
 
 **How to settle.**
-- *Walk-only control* (built 2026-09-14): base weights plus a simulated walk
-  matched per role to run 13 @550, sampled with run 13's prompts and seed. If its
-  samples move away from base as far as run 13's did, the samples' change is
-  mostly walk. Cheap; verdict is the user's eye.
+- *Walk-only control* -- **run 2026-09-14.** Base weights plus a simulated walk
+  matched per role to run 13 @550, sampled with run 13's prompts and seed. The
+  walk alone moves samples 0.018-0.041 pixel RMS from base on four prompts
+  against run 13 @550's 0.116-0.211; on the armored-warrior prompt 0.146 against
+  0.175. Looked at: it shifts composition on sensitive prompts, keeps base's style,
+  shows no visible degradation; run 13's style and lighting shift is not in it.
+  **So at run 13's scale the visible learning is not the walk**, and the walk is
+  a composition perturbation rather than obvious damage. Not ruled out: harm that
+  accumulates over longer runs (walk grows `sqrt(N)`), or subtler quality loss
+  the user's eye would catch. Samples:
+  `/mnt/luna/ai/output/anima_walk_only_control/samples` (step 0) against
+  `anima_usuitrack_13_acc4/samples` steps 0 and 550.
 - *Walk-free arm*: run 13 again with the walk removed. Options, none built:
   fp32 master weights on the CPU (the 2B model is 8 GB in fp32 against 31 GB
   RAM; the update is already formed in fp32 on the GPU, so per step it costs an
@@ -64,13 +72,8 @@ ai-toolkit trainer, fallback grads divided into the group mean before the clip.
 
 ### B1. Are the planes `k=4` makes live signal, or span?
 
-**Answered: `k`, not the table, moved the spectrum** (run 14 against run 13, same
-table and matched step, `FACTS.md`). At `k=1` the k=4-sized table runs at
-`tangent_live_fraction` 0.55 against 0.90, `tangent_concentration` 0.85 (run 12's
-value) against 0.57, and `moment_persistence` about half. `grad_capture` is
-mostly the table: 0.640 (run 12) -> 0.716 (big table, `k=1`) -> 0.747 (`k=4`).
-A rank table is sized for the `k` it runs at; run 14 carried nearly half its
-planes dead.
+`k`, not the table, sets liveness, concentration and persistence (closed in
+`ARCHIVE.md`, run 14). Size a table at the `k` it runs at.
 
 **Still open: what the extra live planes are.** The user's reading: averaging
 lets signal clear the noise floor, and the polar tangent turns it. The competing
@@ -101,8 +104,14 @@ plus 16 polar maps per step. Gradient checkpointing might turn off at bs1 and bu
 time back. The opposite end -- a real bs16 batch through weight streaming or
 activation offload -- is sum-then-polar over 16 samples, and pays PCIe transfers
 of the 4 GB model per pass. B3 is therefore B2's question at the sample level
-first and a speed question second. Measure bs1 s/sample with 20 steps before
-proposing a run.
+first and a speed question second.
+
+**Throughput measured (2026-09-14): bs1 x k16 costs ~5% per sample** -- 0.97
+s/sample against bs4 x k4's 0.92 (median step intervals, sampling excluded; the
+bs1 figure rests on two logged intervals). Gradient checkpointing cannot come
+off: bs1 without it OOMs. So per-sample polar-first is affordable; what it would
+test is B2's question, and a table for it would need calibrating at bs1 x k16,
+since liveness depends on `k` (B1).
 
 ### B4. `micro_batch_agreement` falls with the learning rate
 
