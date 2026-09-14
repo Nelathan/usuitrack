@@ -140,6 +140,29 @@ Per-role live fraction, steps >= 200, run 14 against run 13: attn1 k/q/v/out
 (0.955/0.898); patch_embed/proj_out 0.797/0.840 (0.988/0.999). The k=4/k=1
 ratio at table rank is 1.4-1.8 per role, against 2.1-3.6 at calibration rank 256.
 
+### Runs 15 and 16: current code, and patch-equalized loss
+
+Both run 13's config for 300 steps (decay from 225), `k=4`. Run 15 on the
+2026-09-14 trainer (token-exact weights, final fold unrounded, fallback divided
+before the clip); run 16 adds `loss_type: patch_equalized_mse` and
+`timestep_type: linear`. Bucket means by optimizer step:
+
+| read, steps 150-224 | run 13 | run 15 | run 16 |
+|---|---:|---:|---:|
+| `update_to_param_ratio` | 3.71e-6 | 3.69e-6 | 3.70e-6 |
+| `grad_capture` | 0.717 | 0.719 | 0.723 |
+| `tangent_live_fraction` | 0.883 | 0.885 | 0.888 |
+| `tangent_concentration` | 0.585 | 0.578 | 0.572 |
+| `moment_persistence` | 1.33e-3 | 1.71e-3 | 1.81e-3 |
+| `grad_moment_cosine` | 5.3e-3 | 7.1e-3 | 6.7e-3 |
+| `micro_batch_agreement` | 2.70e-3 | 2.88e-3 | 2.48e-3 |
+| `micro_batch_agreement`, steps 0-49 | 1.93e-3 | 1.87e-3 | 3.28e-3 |
+
+Run 15 tracks run 13 on capture, liveness and concentration. Its persistence and
+overshoot cosine read higher; no noise floor exists for those reads on this lane,
+so that is unresolved, not an effect of the code change. Wall clock 17.4 (run 15)
+and 17.7 s/step (run 16), both including sampling.
+
 ### Rank calibration at `k=4`, and what the sized table reached
 
 `anima_rankcal_r256_acc4` (rank 256, bs4 x k4, `lr 4e-5`, bf16 accumulators, 9
@@ -175,6 +198,9 @@ plane. No fp32 `k=4` calibration exists to compare -- that attempt OOMed at step
 | run 14 | bs4, k=1, table 595 | ~3.2-3.7 (progress bar) | | |
 | rankcal r256 k=4, fp32 accumulators | | | | OOM at step 3 |
 | rankcal r256 k=4, bf16 accumulators | | 13.9-15.3 | | needed `expandable_segments` |
+
+Pinned PCIe on this box: 12.2 GB/s host-to-device, 12.6 GB/s device-to-host;
+a CPU fp32 add runs ~0.06 s/GB (2026-09-14, measured beside a training run).
 
 Accumulation costs nothing per sample; it costs optimizer steps per hour. The
 card is at its limit at bs4 x k4 with the sized table -- an earlier "6.6 GB
@@ -213,3 +239,5 @@ real work there.
 | 12 `freeze_fallback` | fallback frozen, resized table, constant turn, `5e-5` | stable, slightly harmed, bland: no creative/aesthetic advance |
 | 13 `acc4` | k=4, table from k=4 calibration (sum 595), `1e-4`, fallback `2e-6` | samples good, wants more; undertrained |
 | 14 `k1_contrast` | run 13 with k=1 and `5e-5` | clean; half the table dead at k=1; samples not reviewed |
+| 15 `rebaseline300` | run 13's config on 2026-09-14 code, 300 steps | tracks run 13; samples not reviewed |
+| 16 `patch_equalized300` | run 15 + patch-equalized loss, no timestep weight | spectrum unchanged vs 15; samples not reviewed |

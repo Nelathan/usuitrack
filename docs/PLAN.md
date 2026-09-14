@@ -34,9 +34,10 @@ also means the expected path is intact, so the harm could be zero.
   samples move away from base as far as run 13's did, the samples' change is
   mostly walk. Cheap; verdict is the user's eye.
 - *Walk-free arm*: run 13 again with the walk removed. Options, none built:
-  fp32 master weights on the CPU (the 2B model fits in 31 GB RAM; the update is
-  already formed in fp32 on the GPU, so the cost is a transfer and a copy per
-  step); an error-feedback residual (a bf16 residual is +4 GB and does not fit
+  fp32 master weights on the CPU (the 2B model is 8 GB in fp32 against 31 GB
+  RAM; the update is already formed in fp32 on the GPU, so per step it costs an
+  8 GB download, a CPU add and a 4 GB bf16 upload -- ~1.5 s at the measured
+  12 GB/s pinned PCIe and ~0.06 s/GB CPU add, +8% at `k=4`, no VRAM); an error-feedback residual (a bf16 residual is +4 GB and does not fit
   at bs4 x k4, an int8 one is +2 GB and might); or simply a larger step, since
   walk grows as `sqrt(lr)` and travel as `lr`.
 
@@ -139,10 +140,21 @@ fallback and the clip still see MSE-sized gradients. Masks are not counted.
 `timestep_type: linear` samples timesteps exactly as `weighted` does and drops
 the loss weight.
 
-**Prediction:** flatter tangent spectrum -- higher `tangent_live_fraction`, lower
-`tangent_concentration` -- at fixed `k` and table. **Runs:** 16
-(`patch_equalized300`) against 15 (`rebaseline300`, run 13's config on current
-code), both 300 steps at `k=4`.
+**Prediction was: flatter tangent spectrum. Measured: no spectrum change.** Run 16
+(`patch_equalized300`) against run 15 (`rebaseline300`), both `k=4`, 300 steps,
+matched step (`FACTS.md`). After step 50, `tangent_live_fraction`,
+`tangent_concentration` and every per-role live fraction are indistinguishable.
+Within the first 50 steps the equalized run is slightly flatter. Also moved:
+`grad_capture` a little higher (+0.017 -> +0.003, shrinking), and
+`micro_batch_agreement` higher early (3.3e-3 vs 1.9e-3), converging by step 225
+-- equal-voice patches agree more across micro-batches while the model is near
+base. No speed cost.
+
+So within-micro-batch magnitude is not what sets liveness at `k=4`; `k` is (B1).
+**Open: the samples**, run 16 against run 15 at matched steps -- the one read
+that can still separate the arms. If they match too, the loss stays MSE for
+simplicity; per-sample equalization at bs1 (B3) is the other form of the same
+idea.
 
 Token-exact weighting across micro-batches is built (`ARCHIVE.md`); C1 is the
 within-micro-batch half of the same concern.
