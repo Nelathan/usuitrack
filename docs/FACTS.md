@@ -262,6 +262,13 @@ real work there.
 | 11 `lr1e4_cosine` | `1e-4`, cosine from warmup | cooler for longer |
 | 12 `freeze_fallback` | fallback frozen, resized table, constant turn, `5e-5` | stable, slightly harmed, bland: no creative/aesthetic advance |
 | 13 `acc4` | k=4, table from k=4 calibration (sum 595), `1e-4`, fallback `2e-6` | samples good, wants more; undertrained |
-| 14 `k1_contrast` | run 13 with k=1 and `5e-5` | clean; half the table dead at k=1; samples not reviewed |
-| 15 `rebaseline300` | run 13's config on 2026-09-14 code, 300 steps | tracks run 13; samples not reviewed |
-| 16 `patch_equalized300` | run 15 + patch-equalized loss, no timestep weight | spectrum unchanged vs 15; samples not reviewed |
+| 14 `k1_contrast` | run 13 with k=1 and `5e-5` | half the table dead at k=1; worst smoothed loss of 13-16; warrior slightly broken |
+| 15 `rebaseline300` | run 13's config on 2026-09-14 code, 300 steps | tracks run 13; best bird; at step ~300 it moved warrior and bird where run 13 @300 barely had |
+| 16 `patch_equalized300` | run 15 + patch-equalized loss, no timestep weight | spectrum unchanged vs 15; samples moved less than 15 (C1 closed) |
+
+Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
+at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
+432, so run 15 moved more *at a lower lr*. Whether the 2026-09-14 trainer
+(token-exact weights, unrounded final fold, fallback divided before the clip)
+or something else did that is not separated. Whale, gown and ethereal barely
+moved in any run.

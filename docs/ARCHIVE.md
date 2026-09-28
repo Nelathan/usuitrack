@@ -672,6 +672,30 @@ extra live planes are stays open (`PLAN.md` B1). Numbers in `FACTS.md`.
 
 ---
 
+## CLOSED -- the error distribution has to reach the gradient
+
+2026-09-28, closes C1 (patch-equalized loss). The premise: the polar map discards
+magnitude after the sum anyway, so giving every 2x2 latent patch the same error
+norm before the sum should hand the optimizer a healthier spectrum at small
+batch, where the loudest patches otherwise own the direction.
+
+Run 16 (`patch_equalized_mse`, no timestep weight) against run 15 (MSE, weighted
+timesteps), both `k=4`, 300 steps. The spectrum did not move after step 50. What
+did move was early coherence: `micro_batch_agreement` 3.3e-3 against 1.9e-3 over
+steps 0-49, with early peaks in `moment_persistence` and `grad_moment_cosine`,
+all converged onto run 15 by ~225. The samples (user's read, matched steps)
+decide it: run 16 moved *less* from base than run 15 on the warrior, bird and
+ethereal prompts, and matched it where neither moved.
+
+**Answer: where the error is must stay in the gradient.** The per-patch
+magnitude is not noise the polar map would have discarded anyway -- it sets the
+direction of the sum the polar map is then applied to. Equalizing gives a full
+vote to low-error patches, which agree with each other and teach little, so
+agreement rose while learning content fell. The two reads came apart, which is
+also a caution for reading agreement as quality. (That mechanism is the agent's
+reading of the result, not measured separately.) Loss stays MSE with weighted
+timesteps; `patch_equalized_mse` is removed from ai-toolkit.
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that

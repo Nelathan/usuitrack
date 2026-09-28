@@ -129,47 +129,6 @@ the `t` range): free, cuts the group's `t` variance.
 
 ---
 
-## Group C. What the loss hands the optimizer
-
-### C1. Discard per-token loss magnitude before the sum
-
-The polar map discards magnitude after the sum; inside a micro-batch the sum is
-still magnitude-weighted, so the loudest samples and patches own the direction
-before the polar map ever sees it. Flow-matching loss magnitude varies strongly
-with timestep. The user's proposal: normalize every image patch's error to unit
-norm before summing -- numerically cleaner, and plausibly less dead tail at low
-batch size. Timestep weighting goes with it (magnitude is what it sets).
-
-**Built as an arm, choices made overnight and open to revision:** ai-toolkit
-`loss_type: patch_equalized_mse` weights each 2x2 latent patch (the DiT's
-patchify) by `mean(n) / n_p`, `n_p` its detached error norm across channels, so
-every patch's gradient has the same norm and the micro-batch keeps MSE's summed
-patch-gradient norm. That is "equal norm" rather than literally unit norm, so the
-fallback and the clip still see MSE-sized gradients. Masks are not counted.
-`timestep_type: linear` samples timesteps exactly as `weighted` does and drops
-the loss weight.
-
-**Prediction was: flatter tangent spectrum. Measured: no spectrum change.** Run 16
-(`patch_equalized300`) against run 15 (`rebaseline300`), both `k=4`, 300 steps,
-matched step (`FACTS.md`). After step 50, `tangent_live_fraction`,
-`tangent_concentration` and every per-role live fraction are indistinguishable.
-Within the first 50 steps the equalized run is slightly flatter. Also moved:
-`grad_capture` a little higher (+0.017 -> +0.003, shrinking), and
-`micro_batch_agreement` higher early (3.3e-3 vs 1.9e-3), converging by step 225
--- equal-voice patches agree more across micro-batches while the model is near
-base. No speed cost.
-
-So within-micro-batch magnitude is not what sets liveness at `k=4`; `k` is (B1).
-**Open: the samples**, run 16 against run 15 at matched steps -- the one read
-that can still separate the arms. If they match too, the loss stays MSE for
-simplicity; per-sample equalization at bs1 (B3) is the other form of the same
-idea.
-
-Token-exact weighting across micro-batches is built (`ARCHIVE.md`); C1 is the
-within-micro-batch half of the same concern.
-
----
-
 ## Group D. The step budget: learning rate, fallback, beta
 
 ### D1. The matrix learning rate is probably low
