@@ -399,6 +399,7 @@ wandb), 2026-09-28.
 | 15 `rebaseline300` | run 13's config on 2026-09-14 code, 300 steps | tracks run 13; best bird; at step ~300 it moved warrior and bird where run 13 @300 barely had |
 | 16 `patch_equalized300` | run 15 + patch-equalized loss, no timestep weight | spectrum unchanged vs 15; samples moved less than 15 (C1 closed) |
 | 17 `eta040_300` | run 15 at `eta 0.04` | much faster first 100 steps, then level with 15; slightly rougher early samples that recover |
+| 18 `bs16_rf010` | real bs16, `rank_fraction` 0.1, AdaLN under UsuiTrack, no accumulation, `1e-4`, 960 steps = 5 epochs | first full success: stable, better step by step to the end; wants more lr, maybe more epochs |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
@@ -406,3 +407,14 @@ at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
 (token-exact weights, unrounded final fold, fallback divided before the clip)
 or something else did that is not separated. Whale, gown and ethereal barely
 moved in any run.
+
+Run 18's step is 3.3x run 17's at the same `1e-4`: `update_to_param_ratio`
+`1.20e-5` flat through the stable phase against `3.69e-6`, inside the 2-6x
+derived from losing the accumulation shrink and the larger rank. Capture rose
+from `.86` to `.91` over the run (run 17 `.75`). `tangent_live_fraction` is
+`0.11` throughout against run 17's `0.90`: at 0.1 the aim resolves about one plane in
+nine, fleet-wide. That is the E7 question's first number, not its answer --
+liveness is not a sizing target (above), and the read is fleet-wide, so
+which roles are dead is not known. The card is at its edge: 14 of 960 batches were
+skipped on OOM, 3.75 h wall. Telemetry `loss_log.db`, sample read the user's,
+2026-09-29.
