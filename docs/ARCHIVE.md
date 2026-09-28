@@ -787,6 +787,28 @@ its subject left the fallback. Open, in E7: at `rank_fraction 0.1` these
 matrices track 72 and 125 planes against a per-step gradient of rank at most the
 batch.
 
+## CLOSED -- accumulation is removed; a real batch replaces it
+
+2026-09-28, closes Group B. Offloaded checkpointing fits a real bs16 on the
+12 GB card (`FACTS.md`), so `accumulate()`, its held-frame folds and bf16
+running sums, and the ai-toolkit token-exact hook are deleted. The step is
+sum-then-polar over the whole batch, the estimator autograd gives; weights and
+state match the old un-accumulated path bitwise. A real batch also aims better
+than accumulated micro-batches in the write roles (`FACTS.md`, subspace read).
+
+Closed without an answer, because the estimator they asked about is gone: B1
+(are `k=4`'s extra live planes signal or span), B3 (per-sample polar), B4
+(`micro_batch_agreement` falling with lr; the meter is deleted). B2 -- polar per
+micro-batch against sum first -- was never measured; the design now takes sum
+first by construction. What would reopen it: a bs16 run reading worse than run
+13 (bs4 x k4, polar first) at a matched per-module step, with `eta` raised
+with the batch.
+
+Withdrawn: the SPEC accumulation contract and `micro_batch_agreement`; the
+`sqrt(a + (1-a)/k)` step shrink as a live rule. Consequence, derived and not
+measured: a real batch has no such shrink, so bs16 at run 13's `lr` steps
+about twice as far (`a` ~0.003, `k=4`). The step's unit is D5's question.
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)

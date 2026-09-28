@@ -175,11 +175,10 @@ uv run python run.py config/train_full_fine_tune_anima_usuitrack.yaml
 ```
 
 2B Cosmos DiT, full finetune, `optimizer: usuitrack` with `optimizer_params`
-carrying `rank_fraction` and `fallback_lr`. Batch cannot rise above 4 on
-the 12GB card; `release_matrix_grads` is what makes it fit, and
-`gradient_accumulation: k` (through `accumulate()`) is how the effective batch
-rises. Run 13 at bs4 x k4 with the sized table sat at 76% allocated, and fp32
-accumulators at rank 256 OOMed: treat the card as full. Set the run's `name` in
+carrying `rank_fraction` and `fallback_lr`. bs16 fits the 12GB card only with
+`release_matrix_grads`, `gradient_checkpointing` plus `activation_offloading`,
+and `block_compile` (`docs/FACTS.md`); treat the card as full.
+`gradient_accumulation` must stay 1 under `release_matrix_grads`. Set the run's `name` in
 the config; that name is the output directory.
 
 `scripts/usuitrack_base_distance.py` reads a run's checkpoints against the base
@@ -207,20 +206,6 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
   step suppresses the periodic saves and nothing else, so even a throwaway
   run writes a full 3.9 GB checkpoint and a 1.4 GB optimizer state when
   it finishes. Budget the disk for it or delete it afterwards.
-- **Gradient accumulation goes through `accumulate()`.** `gradient_accumulation:
-  k` delivers `k` batches per step; the patched `hook_train_loop` scales each
-  micro-batch's loss by its element count relative to the group's first, calls
-  `optimizer.accumulate(weight=elements, final=last)` after each backward, and
-  divides every summed `.grad` into the group mean *before* the clip.
-  `Accelerator()` takes no arguments and divides by nothing, so that division is
-  the only thing standing between the fallback class and a `k`x-summed gradient.
-  `gradient_accumulation_steps` is the accelerate-style key and does not go
-  through this path.
-- **Raising `k` without raising `lr` is a colder run.** The step carries
-  `sqrt(a + (1-a)/k)` with `a = micro_batch_agreement`, so `k=4` at low agreement
-  halves it. The `sqrt(tokens per step)` rule below is what the mechanism already
-  does; do not apply it twice, and do not assume `lr` unchanged means step
-  unchanged.
 - **Poll a long run every 25 minutes**, not 50. Longer gaps measured worse in
   practice for keeping the session's context cache warm.
 - **A `nohup` wrapper's completion is not the run's completion.** The tool
