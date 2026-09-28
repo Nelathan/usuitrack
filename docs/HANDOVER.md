@@ -54,6 +54,17 @@ bs16 and AdaLN (your go-ahead: "you own it end to end"; committed on /rc):
   Evidence is 19 finite steps -- the samples of a real run are still owed.
 - usuitrack `9e6a93d` FACTS: the bs16 memory and throughput read.
 
+Accumulation removed (your call: "we dont accumulate, simplify our code"):
+
+- usuitrack `fdfe41d` code + SPEC: `accumulate()`, its two-stage state and
+  `micro_batch_agreement` gone; `step()` is sum-then-polar over the real batch,
+  bitwise equal to the old un-accumulated path (44 tests).
+- usuitrack `c8b4506` docs: **Group B closed** (ARCHIVE); B5 moved to PLAN F4;
+  AGENTS drops the two accumulation traps. With `release_matrix_grads`,
+  `gradient_accumulation > 1` now raises at the second `prepare()`.
+- ai-toolkit `e2dc0ba`: the SDTrainer hook restored to upstream,
+  `SplitOptimizer.accumulate` deleted.
+
 ## Environment changes
 
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`; no torchaudio
@@ -69,10 +80,21 @@ calibration are gone from the release, the lab harness (`--rank-fraction`) and
 ai-toolkit (`rank_fraction` in `optimizer_params`). Anima configs that still
 name `rank`, `rank_table`, `calibrate_rank` or `track_live_planes` no longer run.
 
+Running (launched 2026-09-28 ~19:10 via scratchpad `chain.sh`, LFM then Anima):
+
+- LFM `lfm_1k_bs16_rf010_noaccum`: 1000 steps, standard arm, ~15 min.
+- Anima `anima_usuitrack_18_bs16_rf010` (gitignored config): real bs16,
+  `rank_fraction` 0.1, AdaLN under UsuiTrack, 960 steps = 5 epochs of 3072
+  samples, a save per epoch, ~3.5 h. Output `/mnt/luna/ai/output/`; read
+  `loss_log.db`. **lr is run 17's 1e-4 unchanged**, so the per-module step is
+  not matched: derived ~2x from losing the accumulation shrink, times 1.4-3x
+  from the larger rank. A worse sample set says "step too big" before it says
+  anything about bs16 or rank.
+
 ## Next
 
-- Accumulation goes: bs16 fits (offloading, above), so delete `accumulate()`
-  and its two-stage state, the trainer hook, and close Group B.
+- D5's per-role relative-change instrument first: without it, E7 and any
+  bs16-vs-run-13 read compare unmatched steps.
 - E7: Anima at `rank_fraction` 0.1 against a lower one, lr matched to run 17's
   per-module step.
 - D5: one relative unit for the step, instrument first. Axes await the user.
