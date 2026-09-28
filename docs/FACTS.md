@@ -385,6 +385,32 @@ edge. `tangent_live_fraction` stays as a read of how much of the turn lands on
 planes that carry signal. Runs `grid_*`, `shape_c0*`, `shape_c100_1k_s1` (lab
 wandb), 2026-09-28.
 
+### Where the step lands, per role
+
+`relative_step/<role>` (`SPEC.md`, telemetry) on the standard arm at 1k
+(`rank_fraction` 0.1, `lr 2e-4`, last logging window):
+
+| role | `relative_step` |
+|---|---:|
+| `feed_forward.w3` | 5.6e-5 |
+| `self_attn.k_proj` | 5.4e-5 |
+| `self_attn.q_proj` | 4.3e-5 |
+| `feed_forward.w1` | 4.2e-5 |
+| `self_attn.v_proj` | 3.8e-5 |
+| `self_attn.out_proj` | 3.4e-5 |
+| `conv.in_proj` | 3.3e-5 |
+| `conv.out_proj` | 2.9e-5 |
+| `feed_forward.w2` | 2.7e-5 |
+
+Fleet `update_to_param_ratio` `4.1e-5`. One `lr` spreads 2.1x across roles, and
+the three write projections into the residual stream take the three smallest
+relative steps. Whether that is the aspect factor, rank, or weight norm is not
+separated. The same run is a third noise point for this arm: target 1.674156 against
+1.674075 and 1.674264, source 3.024513 against 3.025343 and 3.026280 -- the
+instrument does not move the trajectory, and accumulation's removal
+(`lfm_1k_bs16_rf010_noaccum`) sits inside the spread. Runs `lfm_1k_d5_relstep`,
+`lfm_1k_bs16_rf010_noaccum`, `shape_c100_1k_s1`, 2026-09-29.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

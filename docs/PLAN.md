@@ -119,8 +119,9 @@ below 1. Axes to settle before any arm:
 - a relative step compounds on a growing weight, a finetune's weights barely
   grow, so this is likely moot here and not in pretraining.
 Moonlight's `0.2 sqrt(max(m,n))` is a different distribution again (w2 x2.1
-against today's). **Instrument first:** per-role-class relative change per step,
-on both lanes, so the current distribution is seen before a law replaces it.
+against today's). The instrument exists (`relative_step/<role>`): on LFM one
+`lr` spreads 2.1x across roles, write projections smallest (`FACTS.md`). Anima's
+distribution comes with its next run; the law waits on both.
 
 ---
 
