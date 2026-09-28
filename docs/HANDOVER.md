@@ -38,6 +38,22 @@ Rank as a fraction of shape (your decision; committed while you were on /rc):
   sessions' uncommitted changes plus today's; the harness test module does not
   import, so the functions were checked by direct calls.
 
+bs16 and AdaLN (your go-ahead: "you own it end to end"; committed on /rc):
+
+- ai-toolkit `1f19ead` **block compile in place** (`nn.Module.compile`): the
+  swapped-in wrappers saved every block key under `_orig_mod.`, so a
+  block-compiled checkpoint did not load. Now 0 of 567 keys; diffusers loads it
+  with nothing missing. Touches the shared compile section, all models.
+- ai-toolkit `a620ebb` Anima's wrapper exposes `transformer_blocks`, so
+  block_compile finds them (it had silently fallen back to whole-model).
+- ai-toolkit `edf4380` `activation_offloading: true`: checkpointed block inputs
+  in pinned host memory, attn1/attn2 checkpointed again inside the block. bs16
+  fits at 0.718 s/sample against 0.621 for plain bs4.
+- ai-toolkit `f9bcd12` + usuitrack `7e855dc` **D3 closed**: AdaLN pairs under
+  UsuiTrack at the matrices' lr; SPEC/README drop the gates family; D2 closed.
+  Evidence is 19 finite steps -- the samples of a real run are still owed.
+- usuitrack `9e6a93d` FACTS: the bs16 memory and throughput read.
+
 ## Environment changes
 
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`; no torchaudio
@@ -55,10 +71,9 @@ name `rank`, `rank_table`, `calibrate_rank` or `track_live_planes` no longer run
 
 ## Next
 
-- Accumulation goes: activation offloading for a real bs16 on Anima (verify it
-  fits at 768 first), then delete `accumulate()` and its two-stage state, the
-  trainer hook, and close Group B.
+- Accumulation goes: bs16 fits (offloading, above), so delete `accumulate()`
+  and its two-stage state, the trainer hook, and close Group B.
 - E7: Anima at `rank_fraction` 0.1 against a lower one, lr matched to run 17's
   per-module step.
 - D5: one relative unit for the step, instrument first. Axes await the user.
-- D4 `beta` at eta 0.04; D3 AdaLN under UsuiTrack.
+- D4 `beta` at eta 0.04.
