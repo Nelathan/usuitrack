@@ -426,6 +426,32 @@ def test_core_diagnostics_read_sane_values():
     assert diagnostics["nonfinite_grads"] == 0.0
 
 
+def test_relative_step_reads_each_role_s_weight_change():
+    """In fp32 the parameter moves by exactly `lr U`, so the read must equal the
+    realised change of each class against its own norm -- and a class of two
+    matrices is their joint Frobenius ratio, not a mean of the two."""
+
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    lone = torch.nn.Parameter(torch.randn(ROWS, COLS) * 3)
+    # Its own lr: large enough that `param - old` resolves the change in fp32.
+    optimizer.add_param_group({"params": [lone], "lr": 1e-1})
+    all_params = [*params, lone]
+    _run(all_params, optimizer, 2)
+    optimizer.diagnostic_roles = {params[0]: "pair", params[1]: "pair", lone: "lone"}
+    optimizer.diagnostics = "core"
+
+    before = [param.detach().clone() for param in all_params]
+    _run(all_params, optimizer, 1)
+    change = [(param.detach() - old).norm() for param, old in zip(all_params, before, strict=True)]
+    norm = [param.detach().norm() for param in all_params]
+
+    diagnostics = optimizer.pop_diagnostics()
+    pair = (change[0] ** 2 + change[1] ** 2).sqrt() / (norm[0] ** 2 + norm[1] ** 2).sqrt()
+    assert diagnostics["relative_step/pair"] == pytest.approx(float(pair), rel=1e-4)
+    assert diagnostics["relative_step/lone"] == pytest.approx(float(change[2] / norm[2]), rel=1e-4)
+
+
 def test_pop_diagnostics_clears_the_window():
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()

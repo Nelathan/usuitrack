@@ -165,6 +165,11 @@ class UsuiTrack(Optimizer):
         self._lag_sampled: set[Tensor] | None = None
         self._diagnostics: DiagnosticsAccumulator | None = None
         self._step_update_norm_sq: Tensor | None = None
+        # Role class of each matrix, for `relative_step/<role>`. The caller sets
+        # it, since only the caller knows names; a matrix without a role counts
+        # toward `update_to_param_ratio` only.
+        self.diagnostic_roles: dict[Tensor, str] = {}
+        self._step_role_update_sq: dict[str, Tensor] = {}
         self._matrix_grad_hook_handles = []
         self._matrix_param_groups: dict[Tensor, dict] = {}
         self.release_matrix_grads = release_matrix_grads
@@ -358,6 +363,14 @@ class UsuiTrack(Optimizer):
             Mean per-step weight motion against current weight norm. Flat
             through healthy training; mostly useful for finding a sane learning
             rate on an unfamiliar model.
+        ``relative_step/<role>``
+            The same read per role class, for the matrices ``diagnostic_roles``
+            labels: the class's per-step ``||lr U||_F``, summed in squares over
+            its matrices, against the class's current ``||W||_F``. This is the
+            step before rounding -- the stochastic-rounding walk is not in it --
+            so it is the step the optimizer chose, which is what a step-size law
+            is about. Within a class of equal shapes it is a norm-weighted mean
+            of the per-matrix ratios.
         ``grad_moment_cosine``
             Agreement between this batch's projected gradient and the moment as
             it stood before this step -- does the batch confirm accumulated
@@ -392,6 +405,15 @@ class UsuiTrack(Optimizer):
         if update_norm is not None:
             param_norm = self._matrix_param_norm()
             result["update_to_param_ratio"] = update_norm / param_norm if param_norm > 0 else float("nan")
+        role_update_norms = {
+            key.removeprefix("role_update_norm/"): result.pop(key)
+            for key in [key for key in result if key.startswith("role_update_norm/")]
+        }
+        if role_update_norms:
+            role_param_norms = self._role_param_norms()
+            for role, role_update_norm in role_update_norms.items():
+                param_norm = role_param_norms[role]
+                result[f"relative_step/{role}"] = role_update_norm / param_norm if param_norm > 0 else float("nan")
         return result
 
     @torch.no_grad()
@@ -410,6 +432,19 @@ class UsuiTrack(Optimizer):
         if not squares:
             return 0.0
         return float(torch.stack(squares).sum().sqrt())
+
+    @torch.no_grad()
+    def _role_param_norms(self) -> dict[str, float]:
+        """Norm of each role class's matrices, measured at read time like
+        ``_matrix_param_norm`` and moved to the host in one transfer."""
+
+        squares: dict[str, Tensor] = {}
+        for param, role in self.diagnostic_roles.items():
+            square = param.detach().float().pow(2).sum()
+            squares[role] = square if role not in squares else squares[role] + square
+        roles = sorted(squares)
+        norms = torch.stack([squares[role] for role in roles]).sqrt().cpu().tolist()
+        return dict(zip(roles, norms, strict=True))
 
     @torch.no_grad()
     def prepare(self, param: Tensor) -> None:
@@ -523,7 +558,10 @@ class UsuiTrack(Optimizer):
         diagnostics = self._diagnostics_sink()
         if diagnostics is not None and self._step_update_norm_sq is not None:
             diagnostics.add("update_norm", self._step_update_norm_sq.sqrt())
+            for role, update_sq in self._step_role_update_sq.items():
+                diagnostics.add(f"role_update_norm/{role}", update_sq.sqrt())
         self._step_update_norm_sq = None
+        self._step_role_update_sq = {}
 
         self._pending_matrix_updates.clear()
         return loss
@@ -1240,7 +1278,7 @@ class UsuiTrack(Optimizer):
 
         if not stochastic:
             update = entry.projector.project_back(update_hat).to(dtype=param.dtype)
-            self._record_update_norm(update, group["lr"])
+            self._record_update_norm(param, update, group["lr"])
             if decay is not None:
                 param.mul_(decay)
             param.add_(update, alpha=-group["lr"])
@@ -1255,11 +1293,11 @@ class UsuiTrack(Optimizer):
         if decay is not None:
             work.mul_(decay)
         update = entry.projector.project_back(update_hat.float())
-        self._record_update_norm(update, group["lr"])
+        self._record_update_norm(param, update, group["lr"])
         work.add_(update, alpha=-group["lr"])
         copy_stochastic_(param, work)
 
-    def _record_update_norm(self, update: Tensor, lr: float) -> None:
+    def _record_update_norm(self, param: Tensor, update: Tensor, lr: float) -> None:
         """Accumulate this matrix's contribution to the step's total motion.
 
         Kept as a running square across the step and rooted once in `step()`, so
@@ -1273,6 +1311,10 @@ class UsuiTrack(Optimizer):
         self._step_update_norm_sq = (
             contribution if self._step_update_norm_sq is None else self._step_update_norm_sq + contribution
         )
+        role = self.diagnostic_roles.get(param)
+        if role is not None:
+            role_sq = self._step_role_update_sq.get(role)
+            self._step_role_update_sq[role] = contribution if role_sq is None else role_sq + contribution
 
     def _initialize_projector(
         self,
