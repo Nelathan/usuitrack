@@ -267,6 +267,40 @@ win was the size of the turn, not the decay. Source loss does not move.
 `--seed` seeds only the rounding draws (data order is fixed), and the seed pair
 differs by `1.6e-4`. Runs `e3_*`, lab wandb, 2026-09-28.
 
+### The energy aim is the right target; the write roles lack rank
+
+At fixed weights, 1024 bs1 samples, 27 matrices: the mean gradient's subspace
+(`M`, pair-estimated) against the top-`r` eigenspace of what the aim targets at
+batch `B`, each scored on how much of the *held-out* half's mean-gradient
+energy it captures.
+
+- **The signal collapses as the model trains.** At base the mean gradient is
+  3.5-10% of a sample's energy; after 300 steps it is 0.1-0.4%, and its
+  subspace no longer replicates between two halves of 512 samples (overlap
+  ~0.2-0.3).
+- **So no signal-only target is estimable, and the energy aim beats one.** The
+  mean gradient lives inside the directions where per-sample energy lives, so
+  the Cov-dominated aim is a low-variance estimate of it. At the trained state
+  the energy frame captures more held-out signal than the estimated signal
+  frame in eight of nine roles, and the gap widens with rank, because the signal
+  frame saturates at its estimation noise (0.75-0.93) while the energy frame
+  keeps climbing.
+- **Rank splits by what a role does to the residual stream.** Roles that read it
+  (conv.in_proj, w1, w3, q, k, v) saturate by rank 64-128 at 0.94-0.99 capture.
+  Roles that write it (conv.out_proj, w2, out_proj) keep climbing through 256:
+  0.71 -> 0.89, 0.77 -> 0.86, 0.75 -> 0.89 from table rank to 256. The
+  liveness-sized table gives exactly these roles the smallest ranks (20, 110,
+  42). Liveness reads the steepness of the tangent spectrum, not the breadth of
+  the signal.
+- **A real batch aims better than accumulated micro-batches, in the write roles.**
+  The per-micro-batch aim's target keeps the micro-batch's noise weight
+  (`Cov/4` at bs4); one bs16 batch's target has `Cov/16`. At table rank that is
+  0.71 against 0.77 on w2, and within a point on the read roles.
+
+Caveats that remain: these score ideal top-`r` eigenspaces of the targets, not
+the tracked `Q`; the trained state is one 300-step run at `eta 0.01`.
+Scratchpad `subspace_read.py`, 2026-09-28.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

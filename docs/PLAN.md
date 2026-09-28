@@ -89,7 +89,9 @@ Mechanism to keep in view: the step's tangent is the *mean of the per-micro-batc
 quadratic tangents*, so its expectation is `(G_bar^T G_bar + Cov) Q` at the
 micro-batch's own noise level whatever `k` is. `k` cuts the aim's variance, not
 its bias toward the noise covariance; the extra live planes may be the aim
-settling onto Cov's stable structure rather than onto signal.
+settling onto Cov's stable structure rather than onto signal. That split is
+false: the signal lives inside Cov's leading directions (`ARCHIVE.md`, "the energy
+aim is the right target"), so Cov structure and signal are one target.
 
 Run 14's samples (user, 2026-09-28) side with `k=4`: the warrior is slightly
 broken and nothing reads better than run 13; run 14 also has the worst loss after
@@ -237,6 +239,18 @@ is not proven better by maths or data. What would move the fraction is splitting
 skewed roles (attn2 k/v/out) by depth band -- depth-dependent rank has been
 observed before. Read first: per-matrix live counts by block index from a
 calibration, to see whether the spread is depth.
+
+**Liveness is the wrong sizing signal for the roles that write the stream
+(2026-09-28, FACTS "The energy aim is the right target").** Liveness reads how
+steep the tangent spectrum is. How much of the mean gradient a frame of rank `r`
+captures reads how broad the signal is, and on trained LFM the two disagree:
+read roles saturate by 64-128, while conv.out_proj, w2 and out_proj -- the
+table's three smallest -- still gain 10-18 points of capture from table rank to
+256. The table ranked 1.667 against r128's 1.669 at 1k steps, so the starvation
+has not shown in loss yet. Arm: the table with the write roles raised to 128-256
+and the read roles cut to 128, at about the same plane count, 1k steps, against
+the current table. If it wins, a table is sized from one fixed-weight capture
+read at a trained checkpoint instead of a live-plane calibration run.
 
 ### E3. `eta`, the only handle on frame motion: does `0.04` transfer to Anima?
 

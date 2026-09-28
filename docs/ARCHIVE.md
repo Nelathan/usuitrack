@@ -696,6 +696,27 @@ also a caution for reading agreement as quality. (That mechanism is the agent's
 reading of the result, not measured separately.) Loss stays MSE with weighted
 timesteps; `patch_equalized_mse` is removed from ai-toolkit.
 
+---
+
+## CLOSED -- the energy aim is the right target
+
+2026-09-28, closes E6 ("is there a better target than magnitude capture?").
+
+The aim's expectation is `(G_bar^T G_bar + Cov) Q`, nearly all Cov once a model
+trains, and the worry was that it tracks batch noise instead of signal. It does
+not, in the sense that matters: the mean gradient lives inside the directions
+where per-sample energy lives, and after 300 LFM steps its own subspace cannot
+be estimated from 512 samples at all (signal 0.1-0.4% of a sample's energy,
+split-half overlap ~0.2-0.3). Scored on held-out mean-gradient energy, the
+energy frame beats the estimated signal frame in eight of nine roles, and its
+lead widens with rank. The cross-covariance aim, which targets `G_bar^T G_bar`
+alone, would chase exactly the unestimable part; it stays closed (lead 1 below).
+
+What the read showed instead is a rank problem: roles that write the residual
+stream need far more rank than liveness gave them (PLAN E2). Numbers in FACTS,
+"The energy aim is the right target; the write roles lack rank". Not settled:
+the read scores ideal eigenspaces, not the tracked `Q`.
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that
