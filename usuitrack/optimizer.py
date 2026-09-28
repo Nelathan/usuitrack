@@ -711,12 +711,6 @@ class UsuiTrack(Optimizer):
 
         entry = self._accumulated.get(prepared.param)
         if entry is None:
-            state = self.state[prepared.param]
-            if state.get("projected_exp_avg") is None:
-                # Allocated here, from the projected gradient, so the moment
-                # keeps the gradient's storage dtype rather than the fp32 the
-                # accumulator works in.
-                state["projected_exp_avg"] = torch.zeros_like(prepared.projected_grad)
             self._accumulated[prepared.param] = MatrixUpdate(
                 param=prepared.param,
                 projector=prepared.projector,
@@ -1105,7 +1099,17 @@ class UsuiTrack(Optimizer):
         for entry in entries:
             state = self.state[entry.param]
             state["step"] = state.get("step", 0) + 1
-            stored = state["projected_exp_avg"]
+            stored = state.get("projected_exp_avg")
+            if stored is None:
+                # Allocated at the first step's end, not at its first fold: its
+                # existence is what tells `_prepare_matrix_update` the frame is
+                # past the step that fitted it, and micro-batches 2..k of that
+                # step must still see the frame as just fitted, or they aim and
+                # turn it where a single batch would not. The parameter's dtype
+                # is the gradient's, so the moment keeps its storage dtype.
+                stored = state["projected_exp_avg"] = torch.zeros(
+                    entry.direction.shape, dtype=entry.param.dtype, device=entry.direction.device
+                )
             # fp32 from here through the frame rotation to a single rounded
             # commit in `_commit_moments`. `copy=True` because `.float()` on
             # an already-fp32 moment aliases the stored tensor, and this must

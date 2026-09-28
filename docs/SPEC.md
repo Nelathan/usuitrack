@@ -515,7 +515,9 @@ map over whatever phase one has prepared and folds each `O` into this step's
 weighted sums, then clears the pending work so the next backward can reuse it.
 Called once per `backward()`, with `final=True` on the last; `step()` folds
 anything still pending as final, so a loop that never calls it takes the
-single-batch step exactly.
+single-batch step exactly. Every micro-batch of a group sees the frame in one
+state: on the step that fits it, micro-batches `2..k` project through the fitted
+frame and aim nothing, so the frame first turns on step two either way.
 
 The group's two running sums -- the folded direction and the summed Oja tangent
 -- are the only `[d, r]` buffers resident across a group, live alongside the
