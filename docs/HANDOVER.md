@@ -65,6 +65,28 @@ Accumulation removed (your call: "we dont accumulate, simplify our code"):
 - ai-toolkit `e2dc0ba`: the SDTrainer hook restored to upstream,
   `SplitOptimizer.accumulate` deleted.
 
+D5 instrument and run 18 (your ask 2026-09-29: "build D5, then a 1k LFM, then
+commit and push"; you were asleep for all of it):
+
+- usuitrack `4e8eec0` **`relative_step/<role>`**: the caller sets
+  `diagnostic_roles` (`{param: role}`); per class, the pre-rounding
+  `||lr U||_F` against the class's `||W||_F` at read time. The release gains
+  that one attribute. 45 tests, including one checking the read against the realised fp32
+  change.
+- lab `518f523`, ai-toolkit `a75c44e`: roles are the name minus the first
+  numeric segment (the layer/block index), so AdaLN's `.1`/`.2` and
+  `ff.net.0`/`.2` stay apart. ai-toolkit checked on a toy module through
+  `build_usuitrack_optimizer`, not on Anima.
+- usuitrack `da7918b` FACTS: run 18 in the ledger with your read, its step
+  measured at 3.3x run 17's, live fraction 0.11 against 0.90, 14 OOM-skipped
+  batches.
+- usuitrack `35e4375` FACTS/PLAN D5: LFM's per-role distribution (2.1x spread,
+  write projections smallest) and a third noise point for the 1k arm.
+
+Pushed: usuitrack `constant-basis-step` only. ai-toolkit's only remote is
+`ostris/ai-toolkit` and there is no Nelathan fork, so it was not pushed; the lab
+was not named, so it was not pushed either.
+
 ## Environment changes
 
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`; no torchaudio
@@ -80,22 +102,17 @@ calibration are gone from the release, the lab harness (`--rank-fraction`) and
 ai-toolkit (`rank_fraction` in `optimizer_params`). Anima configs that still
 name `rank`, `rank_table`, `calibrate_rank` or `track_live_planes` no longer run.
 
-Running (launched 2026-09-28 ~19:10 via scratchpad `chain.sh`, LFM then Anima):
-
-- LFM `lfm_1k_bs16_rf010_noaccum`: 1000 steps, standard arm, ~15 min.
-- Anima `anima_usuitrack_18_bs16_rf010` (gitignored config): real bs16,
-  `rank_fraction` 0.1, AdaLN under UsuiTrack, 960 steps = 5 epochs of 3072
-  samples, a save per epoch, ~3.5 h. Output `/mnt/luna/ai/output/`; read
-  `loss_log.db`. **lr is run 17's 1e-4 unchanged**, so the per-module step is
-  not matched: derived ~2x from losing the accumulation shrink, times 1.4-3x
-  from the larger rank. A worse sample set says "step too big" before it says
-  anything about bs16 or rank.
+Nothing is running. Run 18 finished (960 steps, 3.75 h, five epoch checkpoints on
+`/mnt/luna/ai/output/anima_usuitrack_18_bs16_rf010`). Run 18 had no
+`relative_step`: its config predates the instrument.
 
 ## Next
 
-- D5's per-role relative-change instrument first: without it, E7 and any
-  bs16-vs-run-13 read compare unmatched steps.
-- E7: Anima at `rank_fraction` 0.1 against a lower one, lr matched to run 17's
-  per-module step.
-- D5: one relative unit for the step, instrument first. Axes await the user.
+- Run 19: run 18 at higher lr (your lean), maybe more epochs. It will be the
+  first Anima run with `relative_step/<role>` in `loss_log.db` -- read it for D5
+  before judging the step. Mind the card: run 18 skipped 14 batches on OOM.
+- E7: live fraction 0.11 at `rank_fraction` 0.1 on Anima against 0.81 on LFM.
+  The rank question is now open with a number on it; lr matching can use
+  `relative_step` instead of a derivation.
+- D5: the law's axes still await you; the instrument now reads both lanes.
 - D4 `beta` at eta 0.04.
