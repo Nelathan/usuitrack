@@ -38,13 +38,10 @@ REORTHOGONALIZE_MOMENT = False
 
 @dataclass
 class PreparedGrad:
-    """One micro-batch's matrix gradient, projected in the frame the step holds.
+    """One matrix gradient, projected in the frame the step holds.
 
-    Produced once per `backward()` per matrix. Under gradient accumulation there
-    are `k` of these per optimizer step and `accumulate()` folds them into the
-    `MatrixUpdate` below one at a time, so this type never holds more than one
-    micro-batch's tensors and the full matrix gradient is still freed as soon as
-    it has been projected.
+    Produced once per `backward()` per matrix, so the full matrix gradient is
+    freed as soon as it has been projected.
     """
 
     param: Tensor
@@ -57,33 +54,16 @@ class PreparedGrad:
 
 @dataclass
 class MatrixUpdate:
-    """One optimizer step's accumulated update for one matrix.
-
-    Every field summed over micro-batches carries that micro-batch's importance
-    weight, and `_resolve_accumulated` divides by `weight` before anything reads
-    them, so the moment and the geodesic see a weighted *mean* and not a total.
-    Without accumulation there is one micro-batch at weight 1.0 and this is the
-    single step it always was.
-    """
+    """One optimizer step's update for one matrix, in fp32."""
 
     param: Tensor
     projector: SubspaceProjector
     original_shape: tuple[int, ...]
-    # Sum of `w_i * polar(projected grad_i)`, at the gradient's dtype until the
-    # final fold promotes it to fp32 -- see `_fold_into`. The polar map runs per
-    # micro-batch, ahead of this average -- see `_orthogonalized_directions`.
+    # `polar(projected grad)` -- see `_orthogonalized_directions`.
     direction: Tensor
-    weight: float | Tensor
     projected_grad_norm: Tensor
-    micro_batches: int = 0
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
-    # `sum w_i^2 ||d_i||^2` and `sum w_i^2`. Together with `direction` and
-    # `weight` these recover the mean pairwise cosine between the micro-batch
-    # directions without keeping the directions -- see
-    # `_record_micro_batch_agreement`.
-    direction_square_sum: Tensor | None = None
-    weight_square_sum: float | Tensor = 0.0
     # Filled by `_integrate_step`, which is where the averaged direction enters
     # the moment; `_commit_moments` rounds it into state.
     projected_exp_avg: Tensor | None = None
@@ -164,13 +144,9 @@ class UsuiTrack(Optimizer):
             if compile_tensor_kernels
             else None
         )
-        # Two stages, and the split is what makes gradient accumulation cheap.
-        # `_pending_matrix_updates` holds at most one micro-batch, cleared by
-        # every `accumulate()`; `_accumulated` holds the weighted sums that
-        # `step()` applies. Neither enters a checkpoint: they are alive only
-        # between a backward and the step that consumes it.
+        # Alive only between a backward and the step that consumes it, so it
+        # never enters a checkpoint.
         self._pending_matrix_updates: dict[Tensor, PreparedGrad] = {}
-        self._accumulated: dict[Tensor, MatrixUpdate] = {}
         # "off", "core" or "full". The line between the two live tiers is state
         # and flops, not usefulness: `core` is everything derivable from tensors
         # the step already formed, so it can be left on for a whole training run
@@ -230,11 +206,11 @@ class UsuiTrack(Optimizer):
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         # A caller (an OOM-retry path, say) may need to bail out after prepare()
-        # or accumulate() has consumed gradients but before step() applied them.
-        # Neither writes the moment or the frame -- both happen in step() -- so
-        # what is lost is the gradients themselves, plus a basis fitted on a
-        # first step. Not worth killing a run over, so warn and drop the work.
-        outstanding = len(self._pending_matrix_updates) + len(self._accumulated)
+        # has consumed gradients but before step() applied them. prepare() does
+        # not write the moment or the frame -- both happen in step() -- so what
+        # is lost is the gradients themselves, plus a basis fitted on a first
+        # step. Not worth killing a run over, so warn and drop the work.
+        outstanding = len(self._pending_matrix_updates)
         if outstanding:
             warnings.warn(
                 f"UsuiTrack: zero_grad() discarded prepared updates for "
@@ -243,7 +219,6 @@ class UsuiTrack(Optimizer):
                 stacklevel=2,
             )
         self._pending_matrix_updates.clear()
-        self._accumulated.clear()
         super().zero_grad(set_to_none=set_to_none)
 
     DIAGNOSTIC_TIERS = ("off", "core", "full")
@@ -391,18 +366,6 @@ class UsuiTrack(Optimizer):
             Read it beside ``tangent_concentration``: disagreement with a
             concentrated spectrum is structured drift, disagreement with a flat
             one is noise.
-        ``micro_batch_agreement``
-            Only present when a step accumulated two or more micro-batches. The
-            mean pairwise cosine between their orthogonalized directions, which
-            is the aim's signal-to-noise ratio ``|s|^2 / (|s|^2 + |n|^2)``: a
-            pure-noise aim reads zero, so this is an absolute level and not a
-            quantity needing a reference run. It is the only read here that
-            compares independently-sampled batches rather than one batch against
-            history, so it is the one that can say whether a frame has arrived or
-            is orbiting on noise. It also prices accumulation's effect on the
-            step: the mean of `k` disagreeing directions is shorter than each of
-            them, so a low reading means a smaller step at the same ``lr``, which
-            ``update_to_param_ratio`` will show.
         ``transport_lag``
             Only present at ``diagnostics = "full"``. The net distance each
             sampled frame covered over the last ``diagnostics_lag_interval``
@@ -468,10 +431,7 @@ class UsuiTrack(Optimizer):
         require_full_grad: bool = False,
     ) -> PreparedGrad:
         if param in self._pending_matrix_updates:
-            raise RuntimeError(
-                "matrix parameter is already prepared; call accumulate() between backward passes "
-                "to fold each micro-batch into the pending step"
-            )
+            raise RuntimeError("matrix parameter is already prepared; call step() between backward passes")
         grad = param.grad
         if require_full_grad and grad is None:
             raise RuntimeError("prepare() requires a live full matrix gradient")
@@ -489,13 +449,7 @@ class UsuiTrack(Optimizer):
         return update
 
     def released_matrix_grad_norms(self) -> tuple[Tensor, ...]:
-        """Raw full-gradient norms retained for telemetry after matrix grads are released.
-
-        Reads whichever stage holds the current step's work: the pending
-        micro-batch before `accumulate()`, and the accumulated weighted mean
-        after it, so a caller that reads this between the last backward and
-        `step()` sees the same quantity with or without accumulation.
-        """
+        """Raw full-gradient norms retained for telemetry after matrix grads are released."""
 
         norms = []
         for group in self.param_groups:
@@ -503,10 +457,6 @@ class UsuiTrack(Optimizer):
                 pending = self._pending_matrix_updates.get(param)
                 if pending is not None and pending.raw_grad_norm is not None:
                     norms.append(pending.raw_grad_norm)
-                    continue
-                entry = self._accumulated.get(param)
-                if entry is not None and entry.raw_grad_norm is not None:
-                    norms.append(entry.raw_grad_norm / entry.weight)
         return tuple(norms)
 
     def _matrix_group(self, param: Tensor) -> dict | None:
@@ -537,92 +487,24 @@ class UsuiTrack(Optimizer):
                     raise RuntimeError("UsuiTrack does not support sparse gradients")
 
     @torch.no_grad()
-    def accumulate(self, weight: float | Tensor = 1.0, final: bool = False) -> None:
-        """Fold one micro-batch into the step `step()` will apply.
-
-        Call it after every ``backward()``, then ``step()`` once. A loop that
-        never calls it gets the single-batch step, folded by ``step()`` itself;
-        `k` calls are gradient accumulation. The accumulation lives in projected
-        space -- `[d, r]` per matrix against `[m, n]` for a gradient -- so a
-        ``release_matrix_grads`` run still consumes and frees one full matrix
-        gradient at a time.
-
-        ``weight`` is the micro-batch's **share of the group's loss, not its
-        gradient magnitude**: its loss token count, so the average weighs each
-        micro-batch as one big batch would have. The weights normalize by their
-        own sum, so their scale is free and 1.0 everywhere is the unweighted
-        mean.
-
-        ``final`` marks the last micro-batch of the step. The running sums are
-        stored at the gradient's dtype only because they stay resident through
-        the *next* backward; nothing follows the last one, so its fold is kept
-        at full precision. ``step()`` folds whatever is still pending as final,
-        which is what makes the un-accumulated step exactly the single-batch
-        path, with no rounding in it.
-
-        Three things hold across the group of micro-batches, and each is
-        load-bearing.
-
-        **The basis does not move.** Every micro-batch projects in one frame, so
-        the sum of their Oja tangents is a sum of vectors in a single tangent
-        space rather than an average over basepoints, which is what makes the
-        arithmetic mean the geometrically correct one and needs no spherical
-        machinery.
-
-        **The polar map runs per micro-batch, ahead of the average.** Averaging
-        raw projected gradients and orthogonalizing once would hand the step to
-        whichever micro-batch was loudest -- the same failure the moment's own
-        ordering exists to prevent.
-
-        **The moment is not touched until `step()`.** It costs one accumulator
-        per matrix and it buys honest telemetry: ``grad_moment_cosine`` and
-        ``moment_persistence`` read the step that was applied, never a partial
-        one.
-        """
-
-        self._validate_step_inputs()
-        for group in self.param_groups:
-            prepared: list[PreparedGrad] = []
-            for p in group["params"]:
-                if p not in self._pending_matrix_updates:
-                    if p.grad is None:
-                        continue
-                    self._prepare_matrix_param(p)
-                prepared.append(self._pending_matrix_updates.pop(p))
-            if not prepared:
-                continue
-            directions = self._orthogonalized_directions(prepared)
-            for entry, direction in zip(prepared, directions, strict=True):
-                storage = torch.float32 if final else entry.projected_grad.dtype
-                self._fold_micro_batch(entry, direction, weight, storage)
-
-    @torch.no_grad()
     def step(self, closure=None):
-        if closure is not None and (
-            self.release_matrix_grads or self._pending_matrix_updates or self._accumulated
-        ):
+        if closure is not None and (self.release_matrix_grads or self._pending_matrix_updates):
             raise RuntimeError("optimizer closures cannot run while matrix updates are pending")
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
-        # Whatever the caller did not fold in itself. A no-op when every
-        # micro-batch already went through `accumulate()`, and the whole of the
-        # un-accumulated path when none did.
-        self.accumulate(final=True)
+        self._validate_step_inputs()
         self._step_update_norm_sq = None
 
         for group in self.param_groups:
-            matrix_updates = [
-                self._accumulated[p] for p in group["params"] if p in self._accumulated
-            ]
+            matrix_updates = self._matrix_updates(group)
             if matrix_updates:
                 basis_update_due = self._basis_update_due(group)
                 group["matrix_step"] += 1
                 if basis_update_due:
                     group["basis_update_step"] += 1
-            self._resolve_accumulated(matrix_updates)
             # Weights first, frame second. Everything in this step -- the
             # held-frame projection, the Oja tangent, and the lift back -- must
             # see the same frame `Q_t`. Moving the frame first meant the update
@@ -644,136 +526,39 @@ class UsuiTrack(Optimizer):
         self._step_update_norm_sq = None
 
         self._pending_matrix_updates.clear()
-        self._accumulated.clear()
         return loss
 
     @torch.no_grad()
-    def _fold_micro_batch(
-        self, prepared: PreparedGrad, direction: Tensor, weight: float | Tensor, storage: torch.dtype
-    ) -> None:
-        """Add one orthogonalized micro-batch into this step's weighted sums."""
+    def _matrix_updates(self, group: dict) -> list[MatrixUpdate]:
+        """This group's prepared gradients, orthogonalized as one batch.
 
-        direction = direction.float() * weight
-        # `w_i^2 ||d_i||^2`, the weighted-sum form the agreement read needs.
-        square = direction.square().sum()
-        projected_norm = prepared.projected_grad.float().norm() * weight
-        tangent = None if prepared.oja_tangent is None else prepared.oja_tangent.float() * weight
-        raw_norm = None if prepared.raw_grad_norm is None else prepared.raw_grad_norm.float() * weight
+        Gradients the backward hooks did not already consume are prepared here.
+        Everything downstream reads fp32: the projected tensors carry the
+        gradient's dtype only as far as the polar map.
+        """
 
-        entry = self._accumulated.get(prepared.param)
-        if entry is None:
-            self._accumulated[prepared.param] = MatrixUpdate(
-                param=prepared.param,
-                projector=prepared.projector,
-                original_shape=prepared.original_shape,
-                direction=self._fold_into(None, direction, storage),
-                weight=weight,
-                projected_grad_norm=projected_norm,
-                micro_batches=1,
-                oja_tangent=(
-                    None if tangent is None else self._fold_into(None, tangent, storage)
-                ),
-                raw_grad_norm=raw_norm,
-                direction_square_sum=square,
-                weight_square_sum=weight * weight,
+        prepared: list[PreparedGrad] = []
+        for p in group["params"]:
+            if p not in self._pending_matrix_updates:
+                if p.grad is None:
+                    continue
+                self._prepare_matrix_param(p)
+            prepared.append(self._pending_matrix_updates.pop(p))
+        if not prepared:
+            return []
+        directions = self._orthogonalized_directions(prepared)
+        return [
+            MatrixUpdate(
+                param=entry.param,
+                projector=entry.projector,
+                original_shape=entry.original_shape,
+                direction=direction.float(),
+                projected_grad_norm=entry.projected_grad.float().norm(),
+                oja_tangent=None if entry.oja_tangent is None else entry.oja_tangent.float(),
+                raw_grad_norm=None if entry.raw_grad_norm is None else entry.raw_grad_norm.float(),
             )
-            return
-
-        # The projector is rebuilt per prepare over the same basis tensor; the
-        # latest one is the object `_apply_basis_updates` will write through.
-        entry.projector = prepared.projector
-        entry.direction = self._fold_into(entry.direction, direction, storage)
-        entry.weight = entry.weight + weight
-        entry.projected_grad_norm = entry.projected_grad_norm + projected_norm
-        entry.micro_batches += 1
-        if tangent is not None:
-            entry.oja_tangent = self._fold_into(entry.oja_tangent, tangent, storage)
-        if raw_norm is not None:
-            entry.raw_grad_norm = raw_norm if entry.raw_grad_norm is None else entry.raw_grad_norm + raw_norm
-        entry.direction_square_sum = entry.direction_square_sum + square
-        entry.weight_square_sum = entry.weight_square_sum + weight * weight
-
-    @staticmethod
-    @torch.no_grad()
-    def _fold_into(total: Tensor | None, increment: Tensor, dtype: torch.dtype) -> Tensor:
-        """Add one fp32 increment into a running sum stored in `dtype`.
-
-        The folded direction and the summed Oja tangent are the only `[d, r]`
-        buffers that stay resident *across* a micro-batch group, so they are
-        live alongside the next backward's activations. Stored at the gradient's
-        dtype -- the rule the moment follows -- they halve that cost on a bf16
-        model, which is what let a rank-256 `k=4` calibration fit a 12 GB card.
-        A final fold asks for fp32 and promotes the sum, so the last increment
-        is added exactly.
-
-        A bf16 write is stochastically rounded: increment `i` of `k` is about
-        `1/k` of the total, and round-to-nearest would drop it. Each sum keeps
-        its expectation. What it does not keep is the square: the agreement read
-        takes `||S||^2`, and unbiased rounding error `e` adds `E||e||^2` to it.
-        With per-element error below `ulp / 2` and `ulp` at most `|x| / 128`
-        that is under `2e-5 ||S||^2` per rounded fold -- about 0.5% of the
-        `(k-1) a Q` signal at `k = 4`, `a = 0.003`.
-        """
-
-        if total is None:
-            total = torch.zeros(increment.shape, dtype=dtype, device=increment.device)
-        elif total.dtype != dtype:
-            total = total.to(dtype)
-        if wants_stochastic_rounding(total):
-            copy_stochastic_(total, total.float().add_(increment))
-        else:
-            total.add_(increment.to(total.dtype))
-        return total
-
-    @torch.no_grad()
-    def _resolve_accumulated(self, entries: list[MatrixUpdate]) -> None:
-        """Turn the weighted sums into weighted means, once, before anything reads them.
-
-        Also the last point at which the micro-batches can still be told apart,
-        so the agreement read happens here.
-        """
-
-        diagnostics = self._diagnostics_sink()
-        for entry in entries:
-            self._record_micro_batch_agreement(diagnostics, entry)
-            # Back to fp32 as the means leave the accumulator: bf16 is the
-            # storage that had to be small, not the arithmetic downstream.
-            entry.direction = entry.direction.float() / entry.weight
-            entry.projected_grad_norm = entry.projected_grad_norm / entry.weight
-            if entry.oja_tangent is not None:
-                entry.oja_tangent = entry.oja_tangent.float() / entry.weight
-            if entry.raw_grad_norm is not None:
-                entry.raw_grad_norm = entry.raw_grad_norm / entry.weight
-
-    @staticmethod
-    def _record_micro_batch_agreement(
-        diagnostics: DiagnosticsAccumulator | None, entry: MatrixUpdate
-    ) -> None:
-        """Mean pairwise cosine between the micro-batch directions this step averaged.
-
-        Independent micro-batches share only the signal, so pure noise reads
-        exactly zero -- an absolute level, not one needing a reference run. For
-        raw gradients the expectation would be ``|s|^2 / (|s|^2 + |n|^2)``; the
-        polar map is nonlinear, so here it is a monotone proxy for that ratio
-        with the same zero, not the formula. Published and wired to nothing.
-
-        Recovered from the sums, so the directions need not be kept. With
-        `S = sum w_i d_i` and `Q = sum w_i^2 ||d_i||^2`, the numerator
-        `||S||^2 - Q` is exactly the weighted sum of pairwise inner products.
-        Dividing by `Q (W^2 - w2) / w2` turns it into a cosine by assuming the
-        `||d_i||` are equal; the Newton-Schulz schedule leaves singular values
-        near but not at one, so that normalization is approximate while the
-        sign and the zero are exact. One norm of a tensor already in hand, no
-        sync.
-        """
-
-        if diagnostics is None or entry.micro_batches < 2 or entry.direction_square_sum is None:
-            return
-        square_sum = entry.direction_square_sum
-        pairs = entry.weight * entry.weight - entry.weight_square_sum
-        denominator = square_sum * pairs / entry.weight_square_sum
-        agreement = (entry.direction.float().square().sum() - square_sum) / denominator
-        diagnostics.add("micro_batch_agreement", agreement)
+            for entry, direction in zip(prepared, directions, strict=True)
+        ]
 
     def _prepare_matrix_update(self, p: Tensor, grad: Tensor, group: dict) -> PreparedGrad:
         state = self.state[p]
@@ -877,9 +662,6 @@ class UsuiTrack(Optimizer):
             return
         direction = entry.direction
         raw_grad_norm = entry.raw_grad_norm
-        # Already the micro-batch mean: `_resolve_accumulated` divided both the
-        # norm and the direction by the weight they were summed with, so every
-        # read below describes the step that is about to be applied.
         projected_norm = entry.projected_grad_norm
         diagnostics.add("projected_grad_norm", projected_norm)
         if raw_grad_norm is not None:
@@ -904,11 +686,6 @@ class UsuiTrack(Optimizer):
         # to the mean's share of the direction's energy: 0 is a white stream, 1 a
         # direction held throughout, and negative is anti-correlated, which is
         # what the raw gradient stream reads before the polar map.
-        #
-        # Under accumulation the floor is approximate rather than exact: it
-        # assumes a constant-norm stream, and the mean of `k` micro-batch
-        # directions has a norm that falls with how much they disagree. Read
-        # `micro_batch_agreement` beside it, which measures exactly that.
         #
         # It bounds the mean's *energy*, not its worth. A mean far too small to
         # move this read still decides where a thousand accumulated steps land,
@@ -989,11 +766,10 @@ class UsuiTrack(Optimizer):
         return grad, grad.float().norm().detach()
 
     def _orthogonalized_directions(self, prepared: list[PreparedGrad]) -> list[Tensor]:
-        """The polar map over one micro-batch's projected gradients.
+        """The polar map over one step's projected gradients.
 
-        **The polar map runs before the average, not after** -- before the
-        moment's average, and under accumulation before the micro-batches'
-        average too. Every contribution enters with a flat spectrum, so one
+        **The polar map runs before the moment's average, not after.** Every
+        contribution enters with a flat spectrum, so one
         batch's dominant plane cannot own the memory by being large, the same
         reordering that fixed the aim where a directional burst used to own the
         turn. What the averages keep is magnitude as agreement: planes that
@@ -1052,12 +828,9 @@ class UsuiTrack(Optimizer):
             state["step"] = state.get("step", 0) + 1
             stored = state.get("projected_exp_avg")
             if stored is None:
-                # Allocated at the first step's end, not at its first fold: its
-                # existence is what tells `_prepare_matrix_update` the frame is
-                # past the step that fitted it, and micro-batches 2..k of that
-                # step must still see the frame as just fitted, or they aim and
-                # turn it where a single batch would not. The parameter's dtype
-                # is the gradient's, so the moment keeps its storage dtype.
+                # Its existence is what tells `_prepare_matrix_update` the frame
+                # is past the step that fitted it. The parameter's dtype is the
+                # gradient's, so the moment keeps its storage dtype.
                 stored = state["projected_exp_avg"] = torch.zeros(
                     entry.direction.shape, dtype=entry.param.dtype, device=entry.direction.device
                 )

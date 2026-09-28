@@ -109,7 +109,6 @@ raw gradient G
   -> Aurora leverage balance (normalization)
   -> Newton-Schulz polar map (orthogonalization)
   -> Muon aspect scale, read from the parameter shape
-  -> under accumulation: weighted mean over the group's micro-batches
   -> projected EMA M of the orthogonalized direction
   -> lift through the held frame Q
   -> parameter update
@@ -288,25 +287,6 @@ The moment integrates the *orthogonalized* direction `O_t` of step 7, not the
 projected gradient:
 
 $$M_t=\beta M_{t-1}+(1-\beta)O_t,\qquad \beta=0.9.$$
-
-Under gradient accumulation `O_t` is the weighted mean of the group's
-micro-batch directions, `O_t = sum_i w_i O_t^{(i)} / sum_i w_i`, each
-orthogonalized on its own before the average. The frame is held for the whole
-group, so the tangents average in one tangent space and `Delta_t` is their mean
-by the same weights. `w_i` is the micro-batch's share of the group's loss -- its
-loss token count, so the average weighs micro-batches as one big batch would --
-and never its gradient magnitude; the weights normalize, so their scale is free.
-
-**Accumulation is self-anchoring in the learning rate, and this is a consequence
-rather than a design.** The `||O^{(i)}||` are nearly equal -- the polar map
-leaves singular values near one -- so the mean of `k` directions is shorter than
-each of them in proportion to how much they disagree:
-measured, the step scales by `sqrt(a + (1-a)/k)` where `a` is
-`micro_batch_agreement`, to within 3% over `k` in 1-8. At `a` near zero that is
-`1/sqrt(k)`, which is exactly the `sqrt`-of-batch-size learning-rate rule
-arriving through the mechanism instead of through a config. Holding the step size
-fixed across a change in `k` therefore means raising the nominal `lr` by
-`sqrt(k)`, and a run that does not do so is running colder than its predecessor.
 
 There is no EMA bias correction, so the moment is undersized for roughly
 `1/(1-beta)` steps at the start of a run.
@@ -511,24 +491,6 @@ from a `register_post_accumulate_grad_hook` callback to release each full matrix
 gradient as soon as it is consumed (`release_matrix_grads=True` at
 construction).
 
-`accumulate(weight, final)` closes one micro-batch: it runs the batched polar
-map over whatever phase one has prepared and folds each `O` into this step's
-weighted sums, then clears the pending work so the next backward can reuse it.
-Called once per `backward()`, with `final=True` on the last; `step()` folds
-anything still pending as final, so a loop that never calls it takes the
-single-batch step exactly. Every micro-batch of a group sees the frame in one
-state: on the step that fits it, micro-batches `2..k` project through the fitted
-frame and aim nothing, so the frame first turns on step two either way.
-
-The group's two running sums -- the folded direction and the summed Oja tangent
--- are the only `[d, r]` buffers resident across a group, live alongside the
-next backward's activations. Folds that another backward will follow are stored
-at the projected gradient's dtype, the rule the moment follows, which halves
-that cost on a bf16 model; a bf16 fold is stochastically rounded, since
-increment `i` of `k` is about `1/k` of the total and round-to-nearest would drop
-it. The final fold has no backward after it, so it promotes the sums to fp32 and
-adds exactly. The weighted means are formed in fp32.
-
 The split is deliberately not a transaction, and cannot be made one at this
 memory budget. Phase one exists so that `G` can be freed the moment it is
 consumed; deferring the moment update to `step()` would mean
@@ -543,8 +505,8 @@ call. Nothing needs rolling back: neither the moment nor the
 frame moves before `step()`, so what is dropped is the gradients themselves,
 plus a frame fitted on a first step. It clears the retained tangent so the next
 `prepare()`/`step()` starts clean. Repeated preparation of the same parameter
-without an `accumulate()` between, and optimizer closures with pending work,
-remain unsupported.
+without a `step()` between, and optimizer closures with pending work, remain
+unsupported.
 
 ## Parameter eligibility
 
@@ -669,23 +631,6 @@ keeps its try-then-jitter fallback -- different matrix, once per parameter rathe
 than once per step.
 
 
-### micro_batch_agreement
-
-Mean pairwise cosine between the orthogonalized directions of the micro-batches
-one step averaged. Present only when a step accumulated two or more, and
-recovered from the running sums rather than the directions: with
-`S = sum w_i O^{(i)}`, `Q = sum w_i^2 ||O^{(i)}||^2`, `W = sum w_i` and
-`w_2 = sum w_i^2`, it is `w_2 (||S||^2 - Q) / (Q (W^2 - w_2))`. The numerator is
-exactly the weighted sum of pairwise inner products; the normalization assumes
-equal `||O^{(i)}||`, which the polar map gives only approximately.
-
-Independent micro-batches share only signal, so pure noise reads exactly zero
-and the reading is an absolute level. It is the agreement of *polar directions*,
-not the raw-gradient ratio `|s|^2/(|s|^2 + |n|^2)`: the polar map is nonlinear,
-so it is a monotone proxy for that ratio with the same zero. It prices
-accumulation's effect on the step through `sqrt(a + (1-a)/k)`. Rounding in the
-bf16 sums biases it upward by under 1% of its signal. It is wired to nothing.
-
 ## Decisions and reasons
 
 These choices define the current design; they are redesignable.
@@ -711,9 +656,7 @@ These choices define the current design; they are redesignable.
    moment and every consumer is scale-invariant. That retires the clip, and it
    makes `||M||` an agreement read the step size follows. Measured loss-neutral
    against averaging first; it is kept for the invariance and the observability,
-   not for a loss delta. Across accumulated micro-batches the same order is
-   applied by the same argument and has not been measured against summing first
-   (`PLAN.md`).
+   not for a loss delta.
 8. **Balanced polar direction plus a parameter-shape aspect scale:** direction
    belongs to projected geometry; scale remains tied to parameter geometry, with
    the invariant that justified it holding only at full rank (see step 8).
