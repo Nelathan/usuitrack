@@ -26,6 +26,18 @@ Each commit's tree passes the suite on its own (52 tests).
 ai-toolkit, branch `main`: `c35ffe1` removes `patch_equalized_mse`. Run 16's
 gitignored config still names it and would no longer run.
 
+Rank as a fraction of shape (your decision; committed while you were on /rc):
+
+- usuitrack `a10275a` code: `rank_fraction` replaces `rank`, RankCalibrator gone
+  (50 tests). `a8dd60e` docs: closes E1/E2, opens E7 and D5, AGENTS commands.
+- ai-toolkit `ee54d3d`: rank table, calibration and `rankcal/*` removed;
+  `rank_fraction` through `optimizer_params`. Checked on a toy model only.
+- lab `3c85ec6`: the fork's SUPERSEDED note (path fixed to `~/Projects`) and
+  CLAUDE.md. `eda8687`: the harness follows the release -- side from `d_model`,
+  clip only a reporting threshold, `--rank-fraction`. These were earlier
+  sessions' uncommitted changes plus today's; the harness test module does not
+  import, so the functions were checked by direct calls.
+
 ## Environment changes
 
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`; no torchaudio
@@ -36,11 +48,17 @@ gitignored config still names it and would no longer run.
 
 ## In flight
 
-Nothing. E3 closed: the turn matters only while the aim moves (ARCHIVE).
+Rank is `rank_fraction` (default 0.1, `c sqrt(mn)`); the table and the live-plane
+calibration are gone from the release, the lab harness (`--rank-fraction`) and
+ai-toolkit (`rank_fraction` in `optimizer_params`). Anima configs that still
+name `rank`, `rank_table`, `calibrate_rank` or `track_live_planes` no longer run.
 
 ## Next
 
-- E2 rebalanced table (write roles up, read roles to 128, equal planes).
-- `beta` 0.95-0.97 at eta 0.04 on LFM (D4).
-- D3: AdaLN under UsuiTrack. Its exclusion predates dead-plane masking.
-- B2: a real bs16 via activation offloading, against k=4.
+- Accumulation goes: activation offloading for a real bs16 on Anima (verify it
+  fits at 768 first), then delete `accumulate()` and its two-stage state, the
+  trainer hook, and close Group B.
+- E7: Anima at `rank_fraction` 0.1 against a lower one, lr matched to run 17's
+  per-module step.
+- D5: one relative unit for the step, instrument first. Axes await the user.
+- D4 `beta` at eta 0.04; D3 AdaLN under UsuiTrack.
