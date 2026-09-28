@@ -22,26 +22,10 @@ NEWTON_SCHULZ_COEFFICIENTS = (
     (2.8769, -3.1427, 1.2046),
     (2.8366, -3.0525, 1.2012),
 )
-# Fixed step size for the Grassmann geodesic. Constant, not scheduled.
-#
-# There used to be a `max(0.01, 1/t)` anneal here, and its justification was a
-# moving aim: while Adafactor's row/column variances warmed up, the conditioned
-# Gram whose eigenspace the tracker targets was itself shifting, so the frame was
-# chasing a target rather than fitting one. A hot start is the right answer to
-# that. The schedule reached this value at basis update 100 and Adafactor's
-# variance memory was 1/(1 - 0.99) = 100 steps; the agreement is not a
-# coincidence. With the conditioning gone the aim is the leading eigenspace of
-# `G^T G` from the first step and moves only as the model does, so the
-# compensation has nothing left to compensate for.
-#
-# Removing it also makes the tracker observable. `sigma` is already
-# self-annealing, so a decaying schedule on top of it made frame motion the
-# product of two annealing terms, and no reading could separate "the tracker
-# settled" from "the clock ran out". Constant step, so what `transport_speed`
-# reports is the tracker's own residual and not a schedule -- though the speed is
-# now read from the frames rather than from `sigma`, which is what keeps that
-# true under any experiment that transforms the tangent between the two.
-GEODESIC_STEPSIZE = 0.01
+# Fixed step size for the Grassmann geodesic. Constant, not scheduled: it sets
+# the frame's memory, ~1/eta basis updates, against how fast the aim moves.
+# SPEC.md, "The turn is constant".
+GEODESIC_STEPSIZE = 0.04
 
 # Control arm for the ortho-first integration: put the second polar map back, so
 # the moment contributes direction only and the step is restored to full size

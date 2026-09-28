@@ -238,12 +238,23 @@ skewed roles (attn2 k/v/out) by depth band -- depth-dependent rank has been
 observed before. Read first: per-matrix live counts by block index from a
 calibration, to see whether the spread is depth.
 
-### E3. `eta` is unswept and the only handle on frame motion
+### E3. `eta`, the only handle on frame motion: does `0.04` transfer to Anima?
 
-`0.05` ran clean at bs1 where `0.02` once diverged; it read worse loss with a
-better projected grad norm on LFM. Never swept downward or in `0.01-0.03` since
-the gain was removed. Cheap on LFM: bs1, 300 steps, a minute an arm. Do not make
-the aim hot to simulate higher rank.
+**Settled on LFM: constant `0.04`, no schedule (2026-09-28, FACTS "The frame's
+turn trades lag against noise").** The old harmonic lead was the larger turn, not
+the decay. Open: whether the optimum transfers to Anima. At `k=4` its per-step
+noise is 1-2x LFM's, so the prediction is the same optimum; run 17 (run 15 at
+`0.04`) reads it on live fraction, capture and the samples.
+
+**The step toward the aim should scale with trust in it.** A larger batch cut lag
+but read worse, at an `eta` never raised with it (user, 2026-09-28): a quieter
+aim can take a larger turn, so every batch-size comparison so far confounds the
+two. Also open: whether a *settled* frame still wants `0.04`. The 1k gap to
+`0.01` narrowed, which fits both `0.01` catching up as the aim slows and `0.04`
+paying jitter once it orbits. Arm, to see how the frame reacts, not to adopt a
+schedule: LFM bs16 1k steps, `0.04` dropped to `0.01` at step 200, and at 500,
+against constant `0.04`. Jitter cost reads as capture rising and target
+falling within ~100 steps of the drop; a trustworthy aim, as no change.
 
 **And `eta` is the frame's time integration.** `k=1` with `eta/4` and a `beta`
 whose memory is `k` times longer (0.975 for 0.9 at `k=4`) is the time analog of

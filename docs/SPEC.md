@@ -223,17 +223,18 @@ update and because a full turn at an `eta` chosen for a scale near 0.05 failed
 `eigh`; masking dead planes removed that failure, whose cause was rounding
 artifacts promoted to unit-norm directions by `1/sigma`, not step size.
 
-$$\eta=0.01,$$
+$$\eta=0.04,$$
 
-not scheduled. A `max(0.01, 1/t)` anneal previously sat here, answering a problem
-that no longer exists: while an upstream factored second moment warmed up, the
-Gram whose eigenspace the tracker targets was itself shifting, so the frame
-chased a moving target and a hot start was the correct compensation. The target
-is now the leading eigenspace of `G^T G` from the first step and moves only
-as the model does. Removing the schedule also makes the tracker observable: with
-a constant step and a measured `transport_speed`, frame motion is one annealing
-term rather than the product of two, so "the tracker settled" is separable from
-"the clock ran out". EIGH initialization already places the frame on the first
+not scheduled. The frame is in effect an average of its aims over the last
+`~1/eta` basis updates, and the aim -- the leading eigenspace of `G^T G` --
+moves as the model does, fastest early. `eta` sets the trade between lag (a long
+memory holds where the gradient was) and noise (a short one follows each
+batch). The energy aim is a low-variance target, so lag dominates at small
+`eta`: on LFM capture and loss improve steadily from `0.005` to `0.04` and are
+flat to `0.08`, and the gain holds at 1k steps (`FACTS.md`). A harmonic start
+matches the right constant and adds a term, so there is none: with a constant
+step, frame motion is one quantity that `transport_speed` reads directly, and
+"the tracker settled" is separable from "the clock ran out". EIGH initialization already places the frame on the first
 gradient's leading eigenspace rather than at random, so the geodesic maintains a
 fit rather than searching for one. With `basis_update_interval=k`, phase one
 still runs for every matrix gradient while geodesics occur only on matrix steps
@@ -735,7 +736,7 @@ These choices define the current design; they are redesignable.
    has explicit fp32, finite-input, symmetrization, and jitter behavior.
 4. **One-state full-gradient basis tracking:** the live frame follows the Oja
    covariance action on its configured cadence, with a constant geodesic step
-   `eta = 0.01` and no second basis.
+   `eta = 0.04` and no second basis.
 5. **Moving-frame momentum:** identity coordinates preserve the projected
    moment's spectrum through the chosen frame rotation.
 6. **No second moment on the full gradient:** the tangent and the moment both

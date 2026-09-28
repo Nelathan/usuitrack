@@ -6,6 +6,7 @@ import torch
 from torch import Tensor
 
 from usuitrack import SubspaceProjector, UsuiTrack
+from usuitrack.optimizer import GEODESIC_STEPSIZE
 
 
 # A representative transformer-ish weight. Small toy shapes like (8, 4) put
@@ -649,7 +650,7 @@ def test_every_live_plane_turns_by_exactly_eta():
     # Chordal distance per plane, the same unit `transport_speed` reports.
     residual = after.mT - before.mT @ (before @ after.mT)
     moved = float(residual.norm() / math.sqrt(RANK))
-    assert moved == pytest.approx(math.sin(0.01), rel=2e-3), moved
+    assert moved == pytest.approx(math.sin(GEODESIC_STEPSIZE), rel=2e-3), moved
 
 
 def test_diagnostics_tier_rejects_a_typo_instead_of_silently_downgrading():
