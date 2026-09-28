@@ -231,8 +231,9 @@ moves as the model does, fastest early. `eta` sets the trade between lag (a long
 memory holds where the gradient was) and noise (a short one follows each
 batch). The energy aim is a low-variance target, so lag dominates at small
 `eta`: on LFM capture and loss improve steadily from `0.005` to `0.04` and are
-flat to `0.08`, and the gain holds at 1k steps (`FACTS.md`). A harmonic start
-matches the right constant and adds a term, so there is none: with a constant
+flat to `0.08`, and the gain holds at 1k steps (`FACTS.md`). Once the aim
+settles the turn stops mattering -- a smaller late turn buys nothing -- so a
+schedule would add a term and no gain, and there is none: with a constant
 step, frame motion is one quantity that `transport_speed` reads directly, and
 "the tracker settled" is separable from "the clock ran out". EIGH initialization already places the frame on the first
 gradient's leading eigenspace rather than at random, so the geodesic maintains a

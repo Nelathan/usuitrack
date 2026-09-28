@@ -99,7 +99,7 @@ heavy smoothing, and the lowest liveness, capture and overshoot cosine from the
 start. At `k=1` the frame holds fewer planes, catches less, and what it steps
 along carries less into the next batch. That is the frame's side of
 accumulation, which a higher `beta` cannot reach -- the frame has no `beta`; its
-time analog is a smaller `eta` (E3).
+time analog is a smaller `eta` (B2).
 
 ### B2. Orthogonalize each micro-batch, or sum and orthogonalize once?
 
@@ -119,6 +119,14 @@ bs16 on the 12 GB card is reachable without accumulation. It buys no throughput
 (bs1 is already within 5% of bs4 per sample, B3); what it changes is the
 estimator: sum-then-polar over the whole batch. If that matches polar-first
 across micro-batches, accumulation can go.
+
+**Any batch comparison must move `eta` with the batch.** A larger batch cut lag
+but read worse at an `eta` never raised with it (user, 2026-09-28): the turn a
+frame can take is set by how far its aim can be trusted and how fast the model
+moves (`ARCHIVE.md`, "the turn matters only while the aim moves"). The time
+analog runs the other way: `k=1` with `eta/4` and a `beta` whose memory is `k`
+times longer (0.975 for 0.9 at `k=4`) should match `k=4` if accumulation is only
+a throughput choice for the frame as well as the update.
 
 ### B3. The limit of B2: per-sample polar map, and what it costs
 
@@ -252,35 +260,13 @@ and the read roles cut to 128, at about the same plane count, 1k steps, against
 the current table. If it wins, a table is sized from one fixed-weight capture
 read at a trained checkpoint instead of a live-plane calibration run.
 
-### E3. `eta`, the only handle on frame motion: does `0.04` transfer to Anima?
-
-**Settled on LFM: constant `0.04`, no schedule (2026-09-28, FACTS "The frame's
-turn trades lag against noise").** The old harmonic lead was the larger turn, not
-the decay. Open: whether the optimum transfers to Anima. At `k=4` its per-step
-noise is 1-2x LFM's, so the prediction is the same optimum; run 17 (run 15 at
-`0.04`) reads it on live fraction, capture and the samples.
-
-**The step toward the aim should scale with trust in it.** A larger batch cut lag
-but read worse, at an `eta` never raised with it (user, 2026-09-28): a quieter
-aim can take a larger turn, so every batch-size comparison so far confounds the
-two. Also open: whether a *settled* frame still wants `0.04`. The 1k gap to
-`0.01` narrowed, which fits both `0.01` catching up as the aim slows and `0.04`
-paying jitter once it orbits. Arm, to see how the frame reacts, not to adopt a
-schedule: LFM bs16 1k steps, `0.04` dropped to `0.01` at step 200, and at 500,
-against constant `0.04`. Jitter cost reads as capture rising and target
-falling within ~100 steps of the drop; a trustworthy aim, as no change.
-
-**And `eta` is the frame's time integration.** `k=1` with `eta/4` and a `beta`
-whose memory is `k` times longer (0.975 for 0.9 at `k=4`) is the time analog of
-`k=4`; if it matches on mechanism reads, accumulation is a throughput choice for
-the frame as well as for the update (on the update, `beta` and `k` trade roughly
-one for one: an EMA's running sum is its input's running sum).
-
 ### E4. Parked: an arrival sensor
 
 A converged frame orbits on batch noise and a constant turn keeps integrating it.
 No sensor exists; `micro_batch_agreement` is published, wired to nothing, and
 tracks lr (B4). The user judges this not worth pursuing on this lane now.
+Its premise that orbiting costs found no cost on LFM at `0.04` (`ARCHIVE.md`,
+"the turn matters only while the aim moves").
 
 ### E5. Calibration cannot probe past the `min(m,n)/2` cap
 
@@ -294,7 +280,7 @@ its cap.
 - **F1. Per-matrix lr from the overshoot meter** (was P15). Decide by first
   logging `grad_moment_cosine` spread across matrices by role; if flat, it is a
   global schedule in costume. Family prior is poor (closed P2).
-- **F2. Magic numbers** (was P5). `eta` (E3); rank cap (E5); `beta`/`eps` (D4);
+- **F2. Magic numbers** (was P5). Rank cap (E5); `beta`/`eps` (D4);
   `AURORA_PP_*` inherited and cheap; Newton-Schulz coefficients (5 steps, the
   largest cost, invisible end to end); `1e-12` floors never audited against
   their dtype -- the lesson of the `1e-6 sigma_max` floor that never fired.

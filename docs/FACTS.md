@@ -252,20 +252,31 @@ bs16 x seq1024, seed 1, 1k steps, broad-no-embeddings. Noise floors: target
 (`beta 0`) target loss is far worse: the moment's temporal cancellation is doing
 real work there.
 
-### The frame's turn trades lag against noise, and lag dominated at `0.01`
+### The turn matters while the aim moves, and not once it has settled
 
-The frame is in effect an average of its aims over the last `~1/eta` updates.
-The aim moves as the model learns -- fastest early -- so a long memory holds
-where the gradient used to be. The energy aim is a low-variance target, so the
-noise a short memory admits costs little until `eta ~0.08`. On LFM (bs16, r128,
-`lr 2e-4`, `beta 0.9`, seed 1) capture and target loss improve steadily from
-`0.005` to `0.04` and are flat to `0.08`; target at 300 steps is 1.7468 at
-`0.005`, 1.7448 at `0.01`, 1.7426 at `0.04` and `0.08`. The gain narrows with run
-length but holds: 1.0e-3 at 1k steps, 3x the floor. The harmonic start
-`max(0.01, 1/t)` gains early and lands between `0.02` and `0.04` at 300: its old
-win was the size of the turn, not the decay. Source loss does not move.
-`--seed` seeds only the rounding draws (data order is fixed), and the seed pair
-differs by `1.6e-4`. Runs `e3_*`, lab wandb, 2026-09-28.
+The frame is in effect an average of its aims over the last `~1/eta` updates, so
+the turn it can take is set by two things only: how far its aim can be trusted
+and how fast the model moves the aim. Early, the aim moves fast and lag
+dominates: on LFM (bs16, r128, `lr 2e-4`, `beta 0.9`, seed 1) capture and target
+loss improve steadily from `0.005` to `0.04` and are flat to `0.08` (target at
+300 steps 1.7468 at `0.005`, 1.7448 at `0.01`, 1.7426 at `0.04` and `0.08`).
+The harmonic start `max(0.01, 1/t)` lands between `0.02` and `0.04`: its old win
+was the size of the turn, not the decay.
+
+Once the aim settles, the turn stops mattering. Dropping `0.04` to `0.01` at
+step 200 or 500 never beats constant `0.04` at 1k (1.68330 and 1.68301 against
+1.68288; `0.01` throughout 1.68391), and capture does not rise after the drop.
+The switch at 200 keeps ~60% of `0.04`'s lead, all of it banked before the
+switch. A settled frame orbits -- net travel over 10 updates is ~30% of its path
+at both `eta` -- and the energy aim is steady enough that the wider orbit at
+`0.04` costs no measurable capture. Every late gap is at or below the `3e-4`
+floor; one seed per arm.
+
+On Anima (run 17 against run 15, `k=4`) the same shape: capture +0.057 and live
+fraction +0.016 over the first 100 steps, gaps nearly gone by 200, and neither
+loss nor samples separate the runs at 300. `--seed` seeds only the rounding
+draws; the LFM seed pair differs by `1.6e-4`. Runs `e3_*` (lab wandb) and
+`anima_usuitrack_17_eta040_300`, 2026-09-28.
 
 ### The energy aim is the right target; the write roles lack rank
 
@@ -314,6 +325,7 @@ Scratchpad `subspace_read.py`, 2026-09-28.
 | 14 `k1_contrast` | run 13 with k=1 and `5e-5` | half the table dead at k=1; worst smoothed loss of 13-16; warrior slightly broken |
 | 15 `rebaseline300` | run 13's config on 2026-09-14 code, 300 steps | tracks run 13; best bird; at step ~300 it moved warrior and bird where run 13 @300 barely had |
 | 16 `patch_equalized300` | run 15 + patch-equalized loss, no timestep weight | spectrum unchanged vs 15; samples moved less than 15 (C1 closed) |
+| 17 `eta040_300` | run 15 at `eta 0.04` | much faster first 100 steps, then level with 15; slightly rougher early samples that recover |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from

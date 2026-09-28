@@ -717,6 +717,24 @@ stream need far more rank than liveness gave them (PLAN E2). Numbers in FACTS,
 "The energy aim is the right target; the write roles lack rank". Not settled:
 the read scores ideal eigenspaces, not the tracked `Q`.
 
+---
+
+## CLOSED -- the turn matters only while the aim moves
+
+2026-09-28, closes E3 (`eta`, and whether it should be scheduled).
+
+The frame's turn trades lag against noise, and at the old `0.01` lag dominated:
+the energy aim is a low-variance target, so a larger turn follows the moving
+aim without admitting much batch noise. `0.04` wins early on both lanes and is
+flat to `0.08` on LFM. Once the aim settles, dropping the turn does nothing: a
+settled frame orbits its aim at either `eta`, and the energy aim is steady
+enough that the wider orbit costs no measurable capture. So the step depends
+only on how far the aim can be trusted and how fast the model moves it; a
+schedule would buy nothing a constant does not. `eta = 0.04`, constant (SPEC).
+Not measured: whether fast early turns leave noise the later steps cannot fully
+undo -- run 17's rougher early samples would fit it, and no loss read shows it.
+Numbers in FACTS, "The turn matters while the aim moves".
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that
