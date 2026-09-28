@@ -73,7 +73,7 @@ ai-toolkit trainer, fallback grads divided into the group mean before the clip.
 ### B1. Are the planes `k=4` makes live signal, or span?
 
 `k`, not the table, sets liveness, concentration and persistence (closed in
-`ARCHIVE.md`, run 14). Size a table at the `k` it runs at.
+`ARCHIVE.md`, run 14).
 
 **Still open: what the extra live planes are.** The user's reading: averaging
 lets signal clear the noise floor, and the polar tangent turns it. The competing
@@ -143,8 +143,7 @@ first and a speed question second.
 s/sample against bs4 x k4's 0.92 (median step intervals, sampling excluded; the
 bs1 figure rests on two logged intervals). Gradient checkpointing cannot come
 off: bs1 without it OOMs. So per-sample polar-first is affordable; what it would
-test is B2's question, and a table for it would need calibrating at bs1 x k16,
-since liveness depends on `k` (B1).
+test is B2's question.
 
 ### B4. `micro_batch_agreement` falls with the learning rate
 
@@ -212,7 +211,7 @@ one went non-finite one step into training (`SPEC.md`, parameter eligibility).
 That failure predates dead-plane masking, the constant turn, and ortho-first. The
 user's samples say the class matters: frozen (run 12) was stable and bland;
 trained at `5e-6` (runs 9-11) moved most and came with instability. Arm: put the
-gates under UsuiTrack with their own rank and a reduced lr, watch
+gates under UsuiTrack with a reduced lr (D5), watch
 `nonfinite_grads` from step one.
 
 ### D4. Beta, and whether the moment damps too much
@@ -226,39 +225,49 @@ LFM and was left out for flops. Arms: higher `beta` at matched
 `update_to_param_ratio` (a beta change is an lr change); `REORTHOGONALIZE_MOMENT`
 on Anima.
 
+### D5. One unit for the step
+
+The step a module takes is today an accident of four factors nobody chose
+together: `lr`, the Muon aspect factor (fan-in and fan-out), the rank (with the
+aspect factor, `||U||_F = sqrt(m) sqrt(r / min(m,n))`, so a rank change is an lr
+change -- which also confounds every rank comparison), and the agreement shrink
+after the polar map (the moment averages unit-norm directions, so disagreement
+between steps shrinks the step and forces lr to be re-fixed). The fallback runs
+in a fifth unit (AdamW's per-coordinate `lr`), and under it AdaLN moved further
+than any matrix (D2). `update_to_param_ratio` is one fleet scalar: it cannot say
+which module class took the change.
+
+**Candidate law (user's direction, 2026-09-28, not yet chosen):** `lr` is the
+relative change per step, `||dW|| / ||W|| = lr` per module (LAMB's trust ratio in
+spirit), and the fallback is the minimum that lets the rest of the model follow
+the matrices' change -- `fallback_ratio x lr` in the same relative unit, far
+below 1. Axes to settle before any arm:
+- agreement inside the step (a sensor of how far to go) or out of it (direction
+  only; the moment's norm discarded);
+- reference norm: Frobenius (total energy) or spectral (largest gain);
+- fallback form: AdamW with a relative cap, or normalized momentum;
+- zero-initialized and near-zero tensors need a floor on `||W||`;
+- a relative step compounds on a growing weight, a finetune's weights barely
+  grow, so this is likely moot here and not in pretraining.
+Moonlight's `0.2 sqrt(max(m,n))` is a different distribution again (w2 x2.1
+against today's). **Instrument first:** per-role-class relative change per step,
+on both lanes, so the current distribution is seen before a law replaces it.
+
 ---
 
 ## Group E. Rank and the frame
 
-### E1. The `live_fraction` target
+### E7. Anima's `rank_fraction`
 
-Run 13 settled at 0.90-0.91 fleet with the most skewed roles at 0.81-0.82. Buying
-fraction costs live planes (`live ~ r^0.6` measured between runs 11 and 12, which
-does not extrapolate from a calibration rank). What decides it is the evidence
-that over-provisioning costs about twice under-provisioning; what is missing is
-whether that holds this deep. Needs the user's call before the next table.
-
-### E2. The sizing estimator is second order; the within-role spread is first
-
-Per-role mean is the simple default. `geomean / mean` from the calibration
-predicted run 13's per-role live fraction (correlation 0.92): one rank per role
-leaves low-demand matrices with dead planes whatever average picked it. Geomean
-is not proven better by maths or data. What would move the fraction is splitting
-skewed roles (attn2 k/v/out) by depth band -- depth-dependent rank has been
-observed before. Read first: per-matrix live counts by block index from a
-calibration, to see whether the spread is depth.
-
-**Liveness is the wrong sizing signal for the roles that write the stream
-(2026-09-28, FACTS "The energy aim is the right target").** Liveness reads how
-steep the tangent spectrum is. How much of the mean gradient a frame of rank `r`
-captures reads how broad the signal is, and on trained LFM the two disagree:
-read roles saturate by 64-128, while conv.out_proj, w2 and out_proj -- the
-table's three smallest -- still gain 10-18 points of capture from table rank to
-256. The table ranked 1.667 against r128's 1.669 at 1k steps, so the starvation
-has not shown in loss yet. Arm: the table with the write roles raised to 128-256
-and the read roles cut to 128, at about the same plane count, 1k steps, against
-the current table. If it wins, a table is sized from one fixed-weight capture
-read at a trained checkpoint instead of a live-plane calibration run.
+`rank_fraction 0.1` is the LFM measurement (`ARCHIVE.md`, "rank is a fraction of
+the matrix's size"); Anima has never run it. At 0.1 its roles get ranks 205
+(2048²), 145 (2048x1024), 410 (the ff pair), 34 and 32 (the thin AdaLN and
+patch projections), and the per-step update rises 1.4-3x over run 17's table at
+the same lr, because rank sets the step (SPEC). Arm: 0.1 against a lower
+fraction under a real bs16 (B2), against run 17, with lr lowered to match run
+17's per-module step so the comparison reads the subspace and not the step. The
+verdict is samples. Frame and moment in bf16 grow from 0.11 to 0.47 GiB at 0.1;
+the eigh and polar transients at rank 410 are unmeasured.
 
 ### E4. Parked: an arrival sensor
 
@@ -268,10 +277,11 @@ tracks lr (B4). The user judges this not worth pursuing on this lane now.
 Its premise that orbiting costs found no cost on LFM at `0.04` (`ARCHIVE.md`,
 "the turn matters only while the aim moves").
 
-### E5. Calibration cannot probe past the `min(m,n)/2` cap
+### E5. The `min(m,n)/2` cap
 
-Capped roles read as lower bounds. Nothing acts on it until a role starves at
-its cap.
+Binds only on matrices whose short side is under `4 c^2` of their long side
+(1/25 at `rank_fraction 0.1`; Anima's patch_embed asks 37 and runs at 34).
+Nothing acts on it until a capped matrix starves.
 
 ---
 

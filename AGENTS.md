@@ -139,21 +139,12 @@ the stale fork beside it. Standard arm:
 ```bash
 uv run python experiments/llm_synth_smoke.py \
   --max-steps 300 --batch-size 16 --eval-every 150 --wandb-log-every 25 \
-  --seed 1 --rank 128 --usuitrack-lr 2e-4 --beta 0.9 \
+  --seed 1 --usuitrack-lr 2e-4 --beta 0.9 \
   --basis-lag-diagnostic --basis-lag-interval 10 --no-final-sample \
   --wandb-run <name>
 ```
 
-Rank calibration (per-label live-plane stats, no eval):
-
-```bash
-uv run python experiments/llm_synth_smoke.py \
-  --max-steps 500 --batch-size 16 --eval-every 0 --wandb-log-every 20 \
-  --seed 1 --usuitrack-lr 2e-4 --beta 0.9 \
-  --calibrate-rank 512 --no-final-sample --wandb-run <name>
-```
-
-`--per-role-rank` uses `LFM_RANK_TABLE` in the harness. Roughly 0.8 s/step at
+`--rank-fraction` sets the optimizer's `rank_fraction` (default 0.1). Roughly 0.8 s/step at
 bs16 and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
 are the `usuitrack_final_val_loss` (target) and
 `usuitrack_final_retention_val_loss` (source) lines at the end of the log, plus
@@ -184,24 +175,12 @@ uv run python run.py config/train_full_fine_tune_anima_usuitrack.yaml
 ```
 
 2B Cosmos DiT, full finetune, `optimizer: usuitrack` with `optimizer_params`
-carrying `rank` (or `rank_table`) and `fallback_lr`. Batch cannot rise above 4 on
+carrying `rank_fraction` and `fallback_lr`. Batch cannot rise above 4 on
 the 12GB card; `release_matrix_grads` is what makes it fit, and
 `gradient_accumulation: k` (through `accumulate()`) is how the effective batch
 rises. Run 13 at bs4 x k4 with the sized table sat at 76% allocated, and fp32
 accumulators at rank 256 OOMed: treat the card as full. Set the run's `name` in
 the config; that name is the output directory.
-
-A rank calibration is the same harness with `calibrate_rank` in
-`optimizer_params`: every role runs at one oversized rank and the per-role
-live-plane report drains on the logging cadence, to the log and to
-`loss_log.db` under `rankcal/*` -- its own group, flat inside it as
-`rankcal/<role>_<stat>`, because a logger that renders one level of grouping
-renders two as nothing. `r_cal 256` fits at bs4/768.
-
-`track_live_planes: true` attaches the same reporter without overriding the
-rank, so a *training* run publishes `rankcal/<role>_live_fraction` at the ranks
-its table actually uses. Default it on: the fleet mean cannot say which roles a
-sizing rule missed.
 
 `scripts/usuitrack_base_distance.py` reads a run's checkpoints against the base
 weights and prints relative displacement per role. **On this lane it mostly reads
@@ -226,7 +205,7 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
 
 - **ai-toolkit always saves at the end of a job.** `save_every` past the last
   step suppresses the periodic saves and nothing else, so even a throwaway
-  calibration writes a full 3.9 GB checkpoint and a 1.4 GB optimizer state when
+  run writes a full 3.9 GB checkpoint and a 1.4 GB optimizer state when
   it finishes. Budget the disk for it or delete it afterwards.
 - **Gradient accumulation goes through `accumulate()`.** `gradient_accumulation:
   k` delivers `k` batches per step; the patched `hook_train_loop` scales each

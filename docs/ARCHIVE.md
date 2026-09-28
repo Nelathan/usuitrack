@@ -735,6 +735,36 @@ Not measured: whether fast early turns leave noise the later steps cannot fully
 undo -- run 17's rougher early samples would fit it, and no loss read shows it.
 Numbers in FACTS, "The turn matters while the aim moves".
 
+---
+
+## CLOSED -- rank is a fraction of the matrix's size
+
+2026-09-28, closes E1 (the `live_fraction` target) and E2 (the sizing
+estimator).
+
+`rank_fraction` (default `0.1`) sizes every matrix at `c sqrt(mn)`, capped at
+half its smaller side (SPEC). The calibrated table turned out to be that rule
+for every role that reads the residual stream; the rule ties it at equal planes
+and beats it on both heads at `0.095`, with no calibration run, so the rank
+cannot go stale as the spectrum flattens and same-shape matrices still batch.
+The table's advantage over a uniform rank was never mostly the subspace: rank
+sets each matrix's share of the step through the polar factor's `sqrt(r)` norm,
+and a uniform rank strips the MLP of it. Numbers in FACTS, "Rank is a fraction
+of the matrix's size".
+
+Withdrawn with it: the live-plane calibration (`RankCalibrator`, per-role rank
+tables, `calibrate_rank`, the `rankcal/*` stream) and liveness as a sizing
+target -- it ranks the arms backwards, and the batch size that moves it does not
+move the table's edge. `tangent_live_fraction` stays as a read of how much of
+the turn lands on signal. Also withdrawn: E2's proposal to size a table from a
+fixed-weight capture read, which maximized capture and ignored the dead planes a
+larger rank turns, and which no one could hand over. Not settled: the write
+roles get two to five times the table's rank under the rule, and whether that
+helps or merely costs is inside the `0.095` win, not separated from it. Anima's
+own `c` is open (PLAN E7).
+
+---
+
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
 
 Frozen. Read for evidence, not for current guidance -- every conclusion here that

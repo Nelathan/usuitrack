@@ -312,6 +312,42 @@ Caveats that remain: these score ideal top-`r` eigenspaces of the targets, not
 the tracked `Q`; the trained state is one 300-step run at `eta 0.01`.
 Scratchpad `subspace_read.py`, 2026-09-28.
 
+### Rank is a fraction of the matrix's size
+
+The calibrated LFM table, read as `r / sqrt(mn)`, is a shape rule for every role
+that reads the residual stream: w1 .097, w3 .090, conv.in_proj .104, q .086,
+k .083, v .105. The roles that write it sit at a half to a fifth of that
+(w2 .051, out_proj .041, conv.out_proj .020) -- the roles liveness starves and
+capture says want more. A uniform rank loses to the table because rank is also
+the step's distribution: the update's norm carries `sqrt(r)`, so the table gives
+the MLP read roles a larger share of the step and a uniform rank takes it away.
+`sqrt(mn)` gives it back with one constant and no calibration run.
+
+bs16, 500 steps, `eta 0.04`, `lr 2e-4`, seed 1:
+
+| arm | planes | target | source | live | update/param |
+|---|---:|---:|---:|---:|---:|
+| calibrated table | 11,886 | 1.70995 | 3.00586 | .944 | 3.8e-5 |
+| uniform r128 | 11,776 | 1.71370 | 3.00079 | .802 | 3.3e-5 |
+| `0.078 sqrt(mn)` | 11,924 | 1.71037 | 3.00380 | .882 | 3.6e-5 |
+| `0.095 sqrt(mn)` | ~14,500 | **1.70593** | **3.00358** | .822 | 4.0e-5 |
+
+At equal planes the rule ties the table (target +4e-4, source -2.1e-3, both at
+their floors); at `0.095` it wins both heads, which a larger step alone does not
+do. At 1k (`0.1 sqrt(mn)` against `e3_eta040_1k_s1`, r128) it trades instead:
+target 1.67426 against 1.68288, source 3.02628 against 3.02206, at 24% more
+update per step -- the rank-step coupling makes that comparison partly an lr
+comparison (`PLAN.md` D5).
+
+**Liveness is not a sizing target.** It ranks these arms backwards: the best arm
+has the second-lowest live fraction. A real batch raises it at any rank (bs4 to
+bs16 at `lr` scaled by `sqrt` tokens: r128 .727 to .802, table .806 to .944),
+but the table's target lead over r128 is the same at both batches (-3.2e-3 at
+bs4, -3.7e-3 at bs16), so the batch that sets liveness does not set the table's
+edge. `tangent_live_fraction` stays as a read of how much of the turn lands on
+planes that carry signal. Runs `grid_*`, `shape_c0*`, `shape_c100_1k_s1` (lab
+wandb), 2026-09-28.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
