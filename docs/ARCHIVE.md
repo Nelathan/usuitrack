@@ -763,6 +763,30 @@ roles get two to five times the table's rank under the rule, and whether that
 helps or merely costs is inside the `0.095` win, not separated from it. Anima's
 own `c` is open (PLAN E7).
 
+
+## CLOSED -- AdaLN modulation trains under UsuiTrack
+
+2026-09-28, closes D3 and, with it, D2 (the fallback lr that was sized for the
+gates).
+
+The modulation linears (`normN.linear_1/2`, `norm_out.linear_*`, 178M, the
+`adaln` and `other` roles) go to UsuiTrack at the matrices' lr, with no special
+case. They are shared linear maps: the timestep embedding is one common space
+across samples. At bs16 over 19 steps nothing went non-finite -- gradient or
+weight -- and they moved 0.2-0.8x as far from base as attention and ff. The
+fallback AdamW keeps only the 112 qk-norm gains, and its state shrinks by
+~0.45 GiB.
+
+Withdrawn: the "multiplicative gates" eligibility family (SPEC, README, the
+ai-toolkit exclude list) and its evidence, `norm2.linear_2` non-finite one step
+into training. That failure did not reproduce, and it predated dead-plane
+masking, the constant turn and ortho-first. Also withdrawn: the argument that a
+gate's tracking error compounds downstream -- any optimizer's error on a gate
+does, so it is not an argument for AdamW. D2's nudge-sized fallback lr is moot:
+its subject left the fallback. Open, in E7: at `rank_fraction 0.1` these
+matrices track 72 and 125 planes against a per-step gradient of rank at most the
+batch.
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)

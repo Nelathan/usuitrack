@@ -17,9 +17,9 @@ basis-tracking path; see the [README](../README.md) for results and usage.
   precede held-frame projection and Oja tangent construction.
 - **`side="auto"` knows shape, not architecture.** It cannot infer a transformer's
   residual-facing axis.
-- **`ndim == 2` is a shape gate, not the precondition.** Lookup tables and
-  multiplicative gates pass it and break the method, for reasons no numerical
-  guard can see. See "Parameter eligibility".
+- **`ndim == 2` is a shape gate, not the precondition.** Lookup tables pass it
+  and break the method, for reasons no numerical guard can see. See "Parameter
+  eligibility".
 - **The requirement is that frame motion can anneal; raw sigma is one mechanism
   for that, not the rule itself.** What the tracker owes is the ability to settle
   -- motion that falls as the frame approaches its equilibrium. Two specific
@@ -551,10 +551,10 @@ remain unsupported.
 `ndim == 2` is the structural gate `add_param_group` enforces, and it is not the
 precondition the method has. UsuiTrack tracks a subspace of a **shared linear
 map**: it assumes a weight's rows (or columns) are coordinates in one common
-space, so a basis fitted from a few batches means something for all of them. Two
-families pass the shape test and break that assumption. Neither failure is
-numerical, so no guard in the update path can catch them; both were found as a
-run going non-finite thousands of steps in.
+space, so a basis fitted from a few batches means something for all of them.
+One family passes the shape test and breaks that assumption. The failure is not
+numerical, so no guard in the update path can catch it; it was found as a run
+going non-finite thousands of steps in.
 
 **Lookup tables.** `nn.Embedding` weights, and any matrix whose rows are
 independent per-token vectors. There is no shared map, and the gradient is
@@ -565,14 +565,12 @@ with a finite gradient and a healthy loss, while the updates it did receive were
 so it carried the risk without training. Muon-lineage optimizers exclude
 embedding tables for the same reason.
 
-**Multiplicative gates.** AdaLN/FiLM modulation linears, and anything whose
-output scales or shifts another layer's output instead of feeding forward. These
-are ordinary, well-conditioned matrices; the problem is that a tracking error in
-a gate is multiplied through everything downstream instead of staying local.
-Observed on a `(6144, 256)` AdaLN modulation linear, clear of any rank or shape
-degeneracy: non-finite one step into training.
+AdaLN/FiLM modulation linears are shared linear maps and are eligible, though
+their output scales another layer's. Their input is one conditioning vector per
+sample rather than per token, so a step's gradient has rank at most the batch
+size.
 
-Both families are named consistently within an architecture and are not cheaply
+Lookup tables are named consistently within an architecture and are not cheaply
 detectable at runtime, so the caller names them. The integration owns that
 policy; the library owns the structural rule.
 

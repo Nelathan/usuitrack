@@ -41,9 +41,8 @@ dependency.
 UsuiTrack only accepts 2D matrix parameters. Give it every `Linear`-style
 weight and route everything else to a separate optimizer, the same split Muon
 and other orthogonalized optimizers use. "Everything else" is wider than the
-non-2D tensors: lookup tables (embeddings) and multiplicative gates (AdaLN-style
-modulation linears) are 2D but are not shared linear maps, and belong in the
-fallback. `docs/SPEC.md` has the reasoning.
+non-2D tensors: lookup tables (embeddings) are 2D but are not shared linear
+maps, and belong in the fallback. `docs/SPEC.md` has the reasoning.
 
 Rank is not configured per matrix: `rank_fraction` (default `0.1`) sizes each
 matrix at `rank_fraction * sqrt(m * n)`, capped at half its smaller side, so a

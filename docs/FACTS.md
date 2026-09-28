@@ -17,15 +17,19 @@ Base `circlestone-labs/Anima-Base-v1.0-Diffusers` transformer, by the roles
 | attn2 k/v | 2D | 58.7M each | 0.0094 / 0.0146 | UsuiTrack |
 | ff_up, ff_down | 2D | 470M each | 0.0111 / 0.0114 | UsuiTrack |
 | patch_embed, proj_out | 2D | 0.14M / 0.13M | 0.0158 / 0.0055 | UsuiTrack |
-| adaln (`linear_1`/`linear_2`) | **2D** | 58.7M | 0.0259 | AdamW fallback |
-| other (`linear_1`/`linear_2`) | **2D** | 119M | 0.0406 | AdamW fallback |
+| adaln (`norm1.linear_1`/`linear_2`) | **2D** | 58.7M | 0.0259 | UsuiTrack |
+| other (`norm2`/`norm3`/`norm_out` `linear_1`/`linear_2`) | **2D** | 119M | 0.0406 | UsuiTrack |
 | other 1D (norm_q/norm_k gains) | 1D | 14k | 0.774 | AdamW fallback |
 | time (linears / norm) | 2D / 1D | 16.8M / 2k | 0.0088 / 0.192 | frozen (`ignore_if_contains`) |
 
-The fallback class is not "small modules": ~178M 2D parameters, ~9% of the
-transformer, excluded from UsuiTrack as multiplicative gates (`SPEC.md`,
-parameter eligibility). Which modules `other`'s `linear_1`/`linear_2` belong to
-has not been checked by name.
+`adaln` and `other` are the same kind of module, the AdaLN-LoRA pairs of the
+three block norms and the output norm: `linear_1` reads the SiLU'd timestep
+embedding, one (B, 2048) vector per sample, and `linear_2` writes the shift,
+scale and gate added onto the frozen `temb` base. ~178M parameters, ~9% of the
+transformer. Under UsuiTrack since 2026-09-28; before that they were the
+fallback's, which then carried 48% of the optimizer state for 9% of the
+parameters. The block LayerNorms have no affine weights and the model no biases,
+so the fallback now holds only the qk-norm gains.
 
 ### Per-step motion, in one unit
 

@@ -181,39 +181,6 @@ optimizer steps per wall-clock hour; a longer plateau (run 13's decay started at
 432 of 576); higher `beta`. A1 bears on all of them: a larger step raises travel
 against walk as `sqrt(lr)`.
 
-### D2. The fallback should nudge, not train
-
-Measured in the unit that compares optimizers (relative update per step), the
-AdamW fallback at `2e-6` has ~20x the matrices' per-step budget, and it moved
-further than any matrix role in run 13. The earlier derivation that picked `2e-6`
-assumed unit weight rms and is withdrawn (`ARCHIVE.md`). The user's target: the
-fallback's step motion at **1/4 to 1/10 of the matrices'**, so the gates follow
-the changing attention and MLP rather than being retrained.
-
-If AdamW realized its full `lr / rms` ceiling, that target is `fallback_lr
-~1-2.5e-8` at `adaln`'s rms; it realizes only part of the ceiling, so the right
-number is higher by that fraction, which has only been read from walk-dominated
-displacement (A2). It feels like freezing only in nominal lr. **And it couples
-to A1:** a coordinate update that small is ~1e-4 of a bf16 ulp, so on
-stochastically rounded weights such a fallback would be almost entirely walk. A
-nudge-sized fallback may need fp32 weights before it means anything. Also open:
-whether the gates should be on AdamW at all (D3).
-
-**User's stance (2026-09-28): a lower fallback lr is the honest quick fix.** The
-fallback trained too much and noised every read taken beside it, and freezing it
-(lr 0, run 12) was worse -- stable but bland. So the gates train, less, until D3
-says whether they belong under UsuiTrack.
-
-### D3. Should AdaLN modulation train under UsuiTrack?
-
-`adaln` and `other` are 178M 2D linears, excluded as multiplicative gates because
-one went non-finite one step into training (`SPEC.md`, parameter eligibility).
-That failure predates dead-plane masking, the constant turn, and ortho-first. The
-user's samples say the class matters: frozen (run 12) was stable and bland;
-trained at `5e-6` (runs 9-11) moved most and came with instability. Arm: put the
-gates under UsuiTrack with a reduced lr (D5), watch
-`nonfinite_grads` from step one.
-
 ### D4. Beta, and whether the moment damps too much
 
 `beta 0.9` is the LFM optimum at two step sizes. With polar-first, the moment
@@ -233,9 +200,9 @@ aspect factor, `||U||_F = sqrt(m) sqrt(r / min(m,n))`, so a rank change is an lr
 change -- which also confounds every rank comparison), and the agreement shrink
 after the polar map (the moment averages unit-norm directions, so disagreement
 between steps shrinks the step and forces lr to be re-fixed). The fallback runs
-in a fifth unit (AdamW's per-coordinate `lr`), and under it AdaLN moved further
-than any matrix (D2). `update_to_param_ratio` is one fleet scalar: it cannot say
-which module class took the change.
+in a fifth unit (AdamW's per-coordinate `lr`); on Anima it now carries only the
+qk-norm gains. `update_to_param_ratio` is one fleet scalar: it cannot say which
+module class took the change.
 
 **Candidate law (user's direction, 2026-09-28, not yet chosen):** `lr` is the
 relative change per step, `||dW|| / ||W|| = lr` per module (LAMB's trust ratio in
@@ -261,9 +228,17 @@ on both lanes, so the current distribution is seen before a law replaces it.
 
 `rank_fraction 0.1` is the LFM measurement (`ARCHIVE.md`, "rank is a fraction of
 the matrix's size"); Anima has never run it. At 0.1 its roles get ranks 205
-(2048²), 145 (2048x1024), 410 (the ff pair), 34 and 32 (the thin AdaLN and
-patch projections), and the per-step update rises 1.4-3x over run 17's table at
-the same lr, because rank sets the step (SPEC). Arm: 0.1 against a lower
+(2048²), 145 (2048x1024), 410 (the ff pair), 34 and 32 (the patch projections),
+and the per-step update rises 1.4-3x over run 17's table at the same lr, because
+rank sets the step (SPEC).
+
+The AdaLN linears now train here too, at 72 (`linear_1`, 256x2048) and 125
+(`linear_2`, 6144x256), against a per-step gradient of rank at most the batch
+(16): their input is one timestep embedding per sample. Most of their planes
+carry no signal on a given step, and Newton-Schulz lifts whatever the moment holds
+there to unit scale. Whether that matters has no read yet: the telemetry is
+fleet-wide, so it waits on D5's per-role instrument, and on the samples. The
+verdict so far is 19 finite steps (`ARCHIVE.md`). Arm: 0.1 against a lower
 fraction under a real bs16 (B2), against run 17, with lr lowered to match run
 17's per-module step so the comparison reads the subspace and not the step. The
 verdict is samples. Frame and moment in bf16 grow from 0.11 to 0.47 GiB at 0.1;
