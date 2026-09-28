@@ -85,6 +85,20 @@ gradient onto the planes that are live at `k=4` but not at `k=1`, against random
 planes of the same count in the frame's complement. Signal planes catch more
 than random; span planes do not.
 
+Mechanism to keep in view: the step's tangent is the *mean of the per-micro-batch
+quadratic tangents*, so its expectation is `(G_bar^T G_bar + Cov) Q` at the
+micro-batch's own noise level whatever `k` is. `k` cuts the aim's variance, not
+its bias toward the noise covariance; the extra live planes may be the aim
+settling onto Cov's stable structure rather than onto signal.
+
+Run 14's samples (user, 2026-09-28) side with `k=4`: the warrior is slightly
+broken and nothing reads better than run 13; run 14 also has the worst loss after
+heavy smoothing, and the lowest liveness, capture and overshoot cosine from the
+start. At `k=1` the frame holds fewer planes, catches less, and what it steps
+along carries less into the next batch. That is the frame's side of
+accumulation, which a higher `beta` cannot reach -- the frame has no `beta`; its
+time analog is a smaller `eta` (E3).
+
 ### B2. Orthogonalize each micro-batch, or sum and orthogonalize once?
 
 Autograd's batch gradient is a sum, so sum-then-polar is the standard estimator;
@@ -94,6 +108,15 @@ invariance rather than loss. The across-micro-batch version was adopted by that
 analogy and **never measured**. Arm: run 13 with raw projected gradients summed
 before one polar map (a lab-side patch, not a release option). Read the same four
 mechanism reads as B1, then samples.
+
+**B2 is also the simplification question.** Accumulation brought machinery
+(held frame, per-micro-batch folds, the trainer hook); a real batch would not
+need it. Activation offloading is cheap under gradient checkpointing -- only
+block boundaries are saved, and their transfer overlaps compute -- so a real
+bs16 on the 12 GB card is reachable without accumulation. It buys no throughput
+(bs1 is already within 5% of bs4 per sample, B3); what it changes is the
+estimator: sum-then-polar over the whole batch. If that matches polar-first
+across micro-batches, accumulation can go.
 
 ### B3. The limit of B2: per-sample polar map, and what it costs
 
@@ -167,6 +190,11 @@ stochastically rounded weights such a fallback would be almost entirely walk. A
 nudge-sized fallback may need fp32 weights before it means anything. Also open:
 whether the gates should be on AdamW at all (D3).
 
+**User's stance (2026-09-28): a lower fallback lr is the honest quick fix.** The
+fallback trained too much and noised every read taken beside it, and freezing it
+(lr 0, run 12) was worse -- stable but bland. So the gates train, less, until D3
+says whether they belong under UsuiTrack.
+
 ### D3. Should AdaLN modulation train under UsuiTrack?
 
 `adaln` and `other` are 178M 2D linears, excluded as multiplicative gates because
@@ -216,6 +244,12 @@ calibration, to see whether the spread is depth.
 better projected grad norm on LFM. Never swept downward or in `0.01-0.03` since
 the gain was removed. Cheap on LFM: bs1, 300 steps, a minute an arm. Do not make
 the aim hot to simulate higher rank.
+
+**And `eta` is the frame's time integration.** `k=1` with `eta/4` and a `beta`
+whose memory is `k` times longer (0.975 for 0.9 at `k=4`) is the time analog of
+`k=4`; if it matches on mechanism reads, accumulation is a throughput choice for
+the frame as well as for the update (on the update, `beta` and `k` trade roughly
+one for one: an EMA's running sum is its input's running sum).
 
 ### E4. Parked: an arrival sensor
 
