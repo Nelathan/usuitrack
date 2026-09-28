@@ -10,25 +10,21 @@ from usuitrack.optimizer import GEODESIC_STEPSIZE
 
 
 # A representative transformer-ish weight. Small toy shapes like (8, 4) put
-# effective_rank() straight into its floor -- a quarter of 4 rounds to 1 -- so
-# every test silently exercised a rank-1 basis instead of the regime the
-# optimizer is designed for. RANK sits below the quarter cap of COLS so the
-# configured rank is the rank actually used.
+# effective_rank() straight into its floor, so every test silently exercised a
+# rank-1 basis instead of the regime the optimizer is designed for.
+# RANK_FRACTION is chosen so this shape runs at exactly RANK, below the cap.
 ROWS, COLS, RANK = 256, 128, 16
+RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 
-def test_rejects_non_matrix_and_excessive_rank():
+def test_rejects_non_matrix():
     with pytest.raises(ValueError, match="only supports 2D"):
         UsuiTrack([torch.nn.Parameter(torch.randn(4))])
-    # Over-cap rank is not fatal: effective_rank() caps it at half the smaller
-    # side and says so once at startup.
-    with pytest.warns(UserWarning, match="exceeds half the smaller side"):
-        UsuiTrack([torch.nn.Parameter(torch.randn(ROWS, COLS))], rank=COLS)
 
 
 def test_basis_moves_every_step_by_default():
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
 
     weight.grad = torch.randn_like(weight)
     optimizer.step()
@@ -42,7 +38,7 @@ def test_basis_moves_every_step_by_default():
 
 def test_basis_update_interval_gates_geodesic_not_moment():
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right", basis_update_interval=2)
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", basis_update_interval=2)
 
     weight.grad = torch.randn_like(weight)
     optimizer.step()
@@ -63,8 +59,8 @@ def test_prepare_release_matches_ordinary_step_exactly():
     torch.manual_seed(0)
     ordinary_weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
     released_weight = torch.nn.Parameter(ordinary_weight.detach().clone())
-    ordinary = UsuiTrack([ordinary_weight], lr=0.01, rank=RANK, side="right")
-    released = UsuiTrack([released_weight], lr=0.01, rank=RANK, side="right", release_matrix_grads=True)
+    ordinary = UsuiTrack([ordinary_weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
+    released = UsuiTrack([released_weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", release_matrix_grads=True)
 
     for _ in range(3):
         gradient = torch.randn_like(ordinary_weight)
@@ -102,14 +98,14 @@ def test_plain_gradient_accumulation_without_release_matches_manual_grad_sum():
 
     torch.testing.assert_close(accumulated.weight.grad, presummed.weight.grad, rtol=0, atol=0)
 
-    UsuiTrack([accumulated.weight], lr=0.01, rank=RANK).step()
-    UsuiTrack([presummed.weight], lr=0.01, rank=RANK).step()
+    UsuiTrack([accumulated.weight], lr=0.01, rank_fraction=RANK_FRACTION).step()
+    UsuiTrack([presummed.weight], lr=0.01, rank_fraction=RANK_FRACTION).step()
     torch.testing.assert_close(accumulated.weight, presummed.weight, rtol=0, atol=0)
 
 
 def test_prepare_is_exactly_once():
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], rank=RANK)
+    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION)
     weight.grad = torch.randn_like(weight)
     optimizer.prepare(weight)
     with pytest.raises(RuntimeError, match="already prepared"):
@@ -125,7 +121,7 @@ def test_zero_grad_drops_pending_prepared_work():
     clean."""
 
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], rank=RANK)
+    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION)
     weight.grad = torch.randn_like(weight)
     optimizer.prepare(weight)
     with pytest.warns(UserWarning, match="discarded prepared updates"):
@@ -137,13 +133,13 @@ def test_zero_grad_drops_pending_prepared_work():
 def test_state_dict_resume_matches_uninterrupted_run():
     torch.manual_seed(1)
     first = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    first_optimizer = UsuiTrack([first], lr=0.01, rank=RANK)
+    first_optimizer = UsuiTrack([first], lr=0.01, rank_fraction=RANK_FRACTION)
     for _ in range(2):
         first.grad = torch.randn_like(first)
         first_optimizer.step()
 
     second = torch.nn.Parameter(first.detach().clone())
-    second_optimizer = UsuiTrack([second], lr=0.01, rank=RANK)
+    second_optimizer = UsuiTrack([second], lr=0.01, rank_fraction=RANK_FRACTION)
     second_optimizer.load_state_dict(copy.deepcopy(first_optimizer.state_dict()))
 
     gradient = torch.randn_like(first)
@@ -164,7 +160,7 @@ def test_live_kernel_tangent_is_horizontal(side):
 
     torch.manual_seed(0)
     gradient = torch.randn(ROWS, COLS)
-    projector = SubspaceProjector(rank=RANK, side=side)
+    projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side=side)
     projector.fit(gradient)
     basis = projector.basis
     assert basis is not None
@@ -194,7 +190,7 @@ def _two_matrix_optimizer(**kwargs):
         torch.nn.Parameter(torch.randn(ROWS, COLS)),
         torch.nn.Parameter(torch.randn(ROWS, COLS)),
     ]
-    return params, UsuiTrack(params, lr=1e-3, rank=RANK, **kwargs)
+    return params, UsuiTrack(params, lr=1e-3, rank_fraction=RANK_FRACTION, **kwargs)
 
 
 def _run(params, optimizer, steps):
@@ -215,7 +211,7 @@ def test_a_fitted_frame_is_a_fixed_point_of_its_own_gradient():
     """
     torch.manual_seed(0)
     gradient = torch.randn(ROWS, COLS)
-    projector = SubspaceProjector(rank=RANK, side="right")
+    projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side="right")
     projector.fit(gradient)
     basis = projector.basis
     assert basis is not None
@@ -228,7 +224,7 @@ def test_kernel_matches_a_hand_rolled_step():
     """The fused kernel is the written-out projection, not a path that merely runs."""
     torch.manual_seed(0)
     gradient = torch.randn(ROWS, COLS)
-    projector = SubspaceProjector(rank=RANK, side="right")
+    projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side="right")
     projector.fit(torch.randn(ROWS, COLS))
     basis = projector.basis
     assert basis is not None
@@ -250,7 +246,7 @@ def test_the_moment_integrates_orthogonalized_directions():
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
     before = weight.detach().clone()
-    optimizer = UsuiTrack([weight], lr=0.1, rank=RANK, side="right", beta=0.9, weight_decay=0.0)
+    optimizer = UsuiTrack([weight], lr=0.1, rank_fraction=RANK_FRACTION, side="right", beta=0.9, weight_decay=0.0)
 
     gradient = torch.randn(ROWS, COLS)
     weight.grad = gradient.clone()
@@ -281,7 +277,7 @@ def test_a_contested_direction_takes_a_smaller_step_than_an_agreed_one():
     def final_step_norm(signs: list[int]) -> float:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-        optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right", beta=0.9)
+        optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
         gradient = torch.randn(ROWS, COLS)
         for sign in signs:
             before = weight.detach().clone()
@@ -307,7 +303,7 @@ def test_moment_persistence_reads_zero_on_an_independent_stream():
     def persistence(repeat: bool) -> float:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-        optimizer = UsuiTrack([weight], lr=1e-4, rank=RANK, side="right", beta=0.9)
+        optimizer = UsuiTrack([weight], lr=1e-4, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
         optimizer.diagnostics = "full"
         fixed = torch.randn(ROWS, COLS)
         for _ in range(200):
@@ -334,7 +330,7 @@ def test_the_update_is_invariant_to_gradient_scale():
     def trajectory(scales: list[float]) -> tuple[Tensor, Tensor]:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-        optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right", beta=0.9)
+        optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
         generator = torch.Generator().manual_seed(7)
         for scale in scales:
             weight.grad = torch.randn(ROWS, COLS, generator=generator) * scale
@@ -615,7 +611,7 @@ def test_the_frame_turns_from_the_very_first_basis_update():
 
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
 
     _run([weight], optimizer, 1)
     first = optimizer.state[weight]["basis"].clone().float()
@@ -635,7 +631,7 @@ def test_every_live_plane_turns_by_exactly_eta():
 
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
     optimizer.diagnostics = "core"
     _run([weight], optimizer, 12)
 
@@ -662,7 +658,7 @@ def test_diagnostics_tier_rejects_a_typo_instead_of_silently_downgrading():
     """
 
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
 
     with pytest.raises(ValueError, match="diagnostics must be one of"):
         optimizer.diagnostics = "ful"
@@ -683,7 +679,7 @@ def test_leaving_the_full_tier_drops_the_snapshot_state():
 
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
     optimizer.diagnostics = "full"
     optimizer.diagnostics_lag_interval = 2
     _run([weight], optimizer, 6)
@@ -718,7 +714,7 @@ def test_compiled_and_eager_kernels_produce_the_same_update():
     for compiled in (False, True):
         weight = torch.nn.Parameter(base.clone())
         optimizer = UsuiTrack(
-            [weight], lr=0.01, rank=RANK, side="right", compile_tensor_kernels=compiled
+            [weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", compile_tensor_kernels=compiled
         )
         for gradient in gradients:
             weight.grad = gradient.clone()
@@ -782,14 +778,14 @@ def test_matrices_sharing_a_scale_but_not_a_shape_still_bucket_correctly():
         assert UsuiTrack._muon_aspect_scale(shape) == 1.0
 
     together = {shape: torch.nn.Parameter(base[shape].clone()) for shape in shapes}
-    optimizer = UsuiTrack(list(together.values()), lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack(list(together.values()), lr=0.01, rank_fraction=RANK_FRACTION, side="right")
     for step in range(6):
         for shape, weight in together.items():
             weight.grad = gradients[shape][step].clone()
         optimizer.step()
 
     separate = {shape: torch.nn.Parameter(base[shape].clone()) for shape in shapes}
-    solo_optimizers = {shape: UsuiTrack([separate[shape]], lr=0.01, rank=RANK, side="right") for shape in shapes}
+    solo_optimizers = {shape: UsuiTrack([separate[shape]], lr=0.01, rank_fraction=RANK_FRACTION, side="right") for shape in shapes}
     for step in range(6):
         for shape in shapes:
             separate[shape].grad = gradients[shape][step].clone()
@@ -815,8 +811,8 @@ def test_accumulated_micro_batches_average_to_the_single_step_they_repeat():
     torch.manual_seed(0)
     single = torch.nn.Parameter(torch.randn(ROWS, COLS))
     accumulated = torch.nn.Parameter(single.detach().clone())
-    one = UsuiTrack([single], lr=0.01, rank=RANK, side="right")
-    many = UsuiTrack([accumulated], lr=0.01, rank=RANK, side="right")
+    one = UsuiTrack([single], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
+    many = UsuiTrack([accumulated], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
 
     for _ in range(3):
         gradient = torch.randn_like(single)
@@ -840,8 +836,8 @@ def test_importance_weights_are_a_weighted_mean_over_micro_batches():
     torch.manual_seed(3)
     weighted = torch.nn.Parameter(torch.randn(ROWS, COLS))
     repeated = torch.nn.Parameter(weighted.detach().clone())
-    by_weight = UsuiTrack([weighted], lr=0.01, rank=RANK, side="right")
-    by_repeat = UsuiTrack([repeated], lr=0.01, rank=RANK, side="right")
+    by_weight = UsuiTrack([weighted], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
+    by_repeat = UsuiTrack([repeated], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
 
     for _ in range(3):
         first = torch.randn_like(weighted)
@@ -873,7 +869,7 @@ def test_accumulation_moves_neither_the_moment_nor_the_basis():
 
     torch.manual_seed(4)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
     weight.grad = torch.randn_like(weight)
     optimizer.step()
 
@@ -901,7 +897,7 @@ def test_only_the_final_fold_keeps_full_precision_on_a_bf16_model():
 
     torch.manual_seed(6)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS, dtype=torch.bfloat16))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
     weight.grad = torch.randn_like(weight)
     optimizer.step()
 
@@ -945,7 +941,7 @@ def test_bf16_accumulation_of_repeats_hands_the_weight_write_the_single_step():
         torch.manual_seed(7)
         weight = torch.nn.Parameter(torch.randn(ROWS, COLS).bfloat16())
         gradients = [torch.randn(ROWS, COLS).bfloat16() for _ in range(3)]
-        optimizer = UsuiTrack([weight], lr=0.05, rank=RANK, side="right")
+        optimizer = UsuiTrack([weight], lr=0.05, rank_fraction=RANK_FRACTION, side="right")
         taken = []
         apply = optimizer._apply_matrix_update
 
@@ -976,7 +972,7 @@ def test_micro_batch_agreement_spans_repeats_to_opposites():
 
     torch.manual_seed(5)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank=RANK, side="right")
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
     optimizer.diagnostics = "core"
     gradient = torch.randn_like(weight)
 
@@ -996,44 +992,3 @@ def test_micro_batch_agreement_spans_repeats_to_opposites():
     optimizer.accumulate()
     optimizer.step()
     assert optimizer.pop_diagnostics()["micro_batch_agreement"] == pytest.approx(-1.0, abs=1e-3)
-
-
-def test_rank_calibrator_geometric_mean_reads_a_skewed_label():
-    """Geometric mean on a deliberately skewed label: below the mean, and here
-    above the median. It is not bounded by either; the ratio to the mean is the
-    skew read."""
-
-    from usuitrack.diagnostics import RankCalibrator
-
-    calibrator = RankCalibrator()
-    params = [object() for _ in range(4)]
-    counts = torch.tensor([2.0, 4.0, 8.0, 64.0])
-    for _ in range(3):
-        calibrator.observe("skewed", 128, params, counts)
-        calibrator.roll()
-
-    row = calibrator.report()["skewed"]
-    assert row["geomean"] == pytest.approx(8.0, rel=1e-5)
-    assert row["geomean"] < row["mean"]
-    # torch.median takes the lower of the two middle values, not their average.
-    assert row["median"] == pytest.approx(4.0)
-
-
-def test_rank_calibrator_geometric_mean_floors_a_dead_frame_at_one_plane():
-    """`log(0)` is not a measurement, and no rank names fewer than one plane.
-
-    The pair is the honest report: the geometric mean says one, the arithmetic
-    mean says zero, and only together do they say the frames were dead.
-    """
-
-    from usuitrack.diagnostics import RankCalibrator
-
-    calibrator = RankCalibrator()
-    params = [object(), object()]
-    for _ in range(3):
-        calibrator.observe("dead", 32, params, torch.zeros(2))
-        calibrator.roll()
-
-    row = calibrator.report()["dead"]
-    assert row["geomean"] == pytest.approx(1.0)
-    assert row["mean"] == pytest.approx(0.0)

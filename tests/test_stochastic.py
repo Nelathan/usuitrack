@@ -1,9 +1,12 @@
+import math
+
 import torch
 
 from usuitrack import UsuiTrack, copy_stochastic_
 from usuitrack.stochastic import StochasticAdamW
 
 ROWS, COLS, RANK = 256, 128, 16
+RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 
 def test_copy_stochastic_is_unbiased_for_sub_ulp_values():
@@ -38,7 +41,7 @@ def test_sub_ulp_updates_accumulate_instead_of_vanishing():
         weight = torch.nn.Parameter(start.clone().to(dtype))
         origin = weight.detach().clone().float()
         optimizer = UsuiTrack(
-            [weight], lr=1e-5, rank=RANK, side="right", stochastic_rounding=stochastic
+            [weight], lr=1e-5, rank_fraction=RANK_FRACTION, side="right", stochastic_rounding=stochastic
         )
         for _ in range(400):
             weight.grad = gradient.clone().to(dtype)

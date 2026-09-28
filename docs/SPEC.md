@@ -37,11 +37,18 @@ Let a matrix parameter and gradient be
 
 $$W,G\in\mathbb R^{m\times n},\qquad 1\le r\le\min(m,n).$$
 
-The configured rank is a ceiling, not a promise. Each matrix runs at
+Rank is not configured per matrix. One model-wide `rank_fraction` `c`
+(default `0.1`) sizes every matrix by its shape:
 
-$$r_{\text{eff}}=\min\!\left(r,\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
+$$r=\min\!\left(\max\!\left(1,\ \operatorname{round}(c\sqrt{mn})\right),\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
 
-Two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
+The rank sets both the subspace and, through the polar factor's `sqrt(r)` norm
+(step 8), the matrix's share of the step. On LFM the rule matches or beats a
+per-role rank sized from measured live planes, with no measurement of its own
+(`FACTS.md`, "Rank is a fraction of the matrix's size"). Matrices of one shape
+share one rank, so they batch.
+
+The cap has two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
 has rank at most `min(m,n)`, so a wider basis tracks directions the gradient
 cannot populate; half leaves an orthogonal complement for the Oja residual at
 every step. And narrow modules are bottlenecks -- they carry the residual
@@ -56,14 +63,8 @@ brought occupancy from 25% into line with every other module at ~3%. And the
 rank still has to be capped, because those modules are bottlenecks: too much
 change in them destabilized the model regardless of which side was tracked.
 
-Rank itself is a configured hyperparameter picked by parameter size, the same
-way a LoRA rank is; this is a per-parameter cap on that choice. A model trained
-at rank 256 runs a `(2048, 64)` module at 32. Exceeding the cap is not an
-error, but UsuiTrack reports it once at startup rather than silently giving the
-caller something other than what was asked for.
-
-**Migration:** this cap changed stored basis shapes. Checkpoints written before
-it will fail the basis-shape check on resume.
+At `c = 0.1` the cap binds only on such shapes: Anima's `(2048, 68)` patch
+embedding asks for 37 planes and runs at 34.
 
 `Q` is always the canonical column frame, `Q^T Q = I`:
 
@@ -268,8 +269,7 @@ Both were tried and reverted. The constant turn above sidesteps the question:
 frame's motion.
 
 Tangent-Gram eigendecompositions are batched across matrices that share a
-rank and shape. A per-role rank table (see "Rank calibration") splits that
-batch by role; `release_matrix_grads` consumes each gradient as it arrives
+shape, and with it a rank. `release_matrix_grads` consumes each gradient as it arrives
 rather than grouped, so it forfeits the batch entirely. `eigh` on a small
 `[r,r]` matrix is launch-overhead-bound, so this matters more here than for
 the polar map's matmuls. With `S=Q_raw^T Q_raw`, one near-identity step using
@@ -463,8 +463,7 @@ deliberate: the step scales with the number of directions the gradient
 demonstrably supports. Measured against a unit scale and a rank-compensating one
 at matched effective step, this rule wins both eval heads; see `ARCHIVE.md`,
 "the Muon aspect factor is not double duty". The rank coupling does mean a
-global rank sweep moves the step as well as the subspace -- `PLAN.md` P13
-item 3.
+change of `rank_fraction` moves the step as well as the subspace.
 
 The selected contract has zero weight decay. Apply the learning rate:
 
@@ -629,7 +628,7 @@ against a long quiet interval reads as zero.
 |---|---|
 | `transport_speed` | chordal distance the subspace moved in one geodesic, per plane, measured from the frames before and after: `||Q_now - Q_old (Q_old^T Q_now)||_F / sqrt(r)`. Every motion metric below shares this unit, so they can be divided by one another |
 | `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
-| `tangent_effective_planes` | `(sum_i lambda_i)^2 / sum_i lambda_i^2`, in `[1, r]`: the effective number of planes carrying the aim. The bulk of the same spectrum concentration reads the head of. Published as a count, not a fraction of `r`, so it compares across rank settings -- as a fraction a leaner table raises it while the spectrum is unchanged |
+| `tangent_effective_planes` | `(sum_i lambda_i)^2 / sum_i lambda_i^2`, in `[1, r]`: the effective number of planes carrying the aim. The bulk of the same spectrum concentration reads the head of. Published as a count, not a fraction of `r`, so it compares across rank settings -- as a fraction a lower `rank_fraction` raises it while the spectrum is unchanged |
 | `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_effective_planes`: the plane count is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
 | `projected_grad_norm` | norm of the sanitized gradient inside the held frame |
 | `raw_grad_norm` | norm of the same gradient before projection, as it arrived |
@@ -688,42 +687,6 @@ not the raw-gradient ratio `|s|^2/(|s|^2 + |n|^2)`: the polar map is nonlinear,
 so it is a monotone proxy for that ratio with the same zero. It prices
 accumulation's effect on the step through `sqrt(a + (1-a)/k)`. Rounding in the
 bf16 sums biases it upward by under 1% of its signal. It is wired to nothing.
-
-## Rank calibration
-
-`RankCalibrator` is an opt-in instrument for choosing a per-role rank table. It
-follows the diagnostics discipline: off unless `optimizer.rank_calibrator` is
-set, independent of the diagnostics tier, on-device accumulation with a single
-host read per window.
-
-Run the model at a rank deliberately above what any matrix needs.
-`_polar_tangent` feeds the calibrator one live-plane count per matrix per basis
-update -- the same `tangent_live_fraction` numerator, planes clearing the Gram
-noise floor -- tagged with the param group's `calibration_label`. `roll()` closes
-a window: per label, the mean, median and geometric mean of that count over the
-label's matrices, one host transfer. `report()` returns, per label over the
-windows after the first (the first is the acquisition transient),
-`mean / median / geomean / std / frac`.
-
-`live_n` is how many directions the gradient drives. While the basis has headroom
-it barely moves with the basis rank, so this measures what a right-sized run
-would resolve. The table is that count directly -- a basis sized to it runs at
-`tangent_live_fraction` ~0.8-0.95 -- but choosing it (the per-role mean is the
-simple default; rounding; clamping to `min(m,n)//2`) is a hand step, kept out of
-the tool.
-`frac = mean / rank` is a headroom read: high `frac` means the count is a lower
-bound and the role will be mildly under-provisioned, which is the safe side.
-
-`geomean` is a skew read, not a better estimator. One rank serves every matrix
-in a label, so matrices below it carry dead planes whichever average picked it:
-`geomean / mean` per role predicted the live fraction a training run reached at
-the sized table (correlation 0.92 over ten Anima roles), most skewed lowest. A
-low ratio says the label hides a spread -- depth, say -- that no average fixes.
-Floored at one plane, since no rank names fewer and `log(0)` is not a
-measurement.
-
-A per-role table costs the equal-rank `eigh` batching described under step 4.
-
 
 ## Decisions and reasons
 

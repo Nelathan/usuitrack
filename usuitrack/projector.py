@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -20,16 +21,20 @@ class ProjectionSide(StrEnum):
 
 @dataclass
 class SubspaceProjector:
-    """One-sided rank-r projector with stable side-Gram EIGH initialization."""
+    """One-sided projector with stable side-Gram EIGH initialization.
 
-    rank: int = 32
+    Its rank is not configured per matrix: `effective_rank` derives it from the
+    matrix's shape and one model-wide `rank_fraction`.
+    """
+
+    rank_fraction: float = 0.1
     side: ProjectionSide | str = ProjectionSide.AUTO
     basis: Tensor | None = None
     resolved_side: ProjectionSide | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        if self.rank <= 0:
-            raise ValueError(f"rank must be positive, got {self.rank}")
+        if self.rank_fraction <= 0:
+            raise ValueError(f"rank_fraction must be positive, got {self.rank_fraction}")
         self.side = ProjectionSide(self.side)
 
     @property
@@ -43,9 +48,17 @@ class SubspaceProjector:
         return ProjectionSide(self.side)
 
     def effective_rank(self, matrix: Tensor) -> int:
-        """Rank actually used for this matrix: at most half its smaller side.
+        """`rank_fraction * sqrt(m * n)`, at most half the smaller side.
 
-        Two independent reasons, both structural rather than numerical:
+        The rank sets both the subspace and, through the polar factor's
+        `sqrt(r)` norm, the matrix's share of the step. A calibrated per-role
+        table on LFM turned out to encode `~0.095 * sqrt(m * n)` for every role
+        that reads the residual stream, and this rule at a matched plane count
+        ties it with no calibration run (`docs/FACTS.md`, "Rank is a fraction of
+        the matrix's size"). Matrices of one shape share one rank, so they still
+        batch.
+
+        The cap is structural, for two reasons:
 
         * A gradient of shape [m,n] has rank at most min(m,n), so a basis wider
           than that is asking to track directions the gradient can never
@@ -53,16 +66,12 @@ class SubspaceProjector:
           to live in at every step.
         * Narrow modules are bottlenecks. They carry the whole residual stream
           through a small waist, so a large update there destabilizes every
-          block downstream of it. Limiting their rank limits how much the
-          optimizer can move them per step, independently of rank.
-
-        Rank is a configured hyperparameter picked by parameter size, the same
-        way a LoRA rank is. This is a per-parameter ceiling on that choice, not
-        a replacement for it: a model trained at rank 256 simply runs its tall
-        narrow modules at 32.
+          block downstream of it.
         """
         self._check_matrix(matrix)
-        return min(self.rank, max(1, min(matrix.shape) // 2))
+        rows, cols = matrix.shape
+        wanted = max(1, round(self.rank_fraction * math.sqrt(rows * cols)))
+        return min(wanted, max(1, min(rows, cols) // 2))
 
     @torch.no_grad()
     def fit(self, matrix: Tensor) -> Tensor:

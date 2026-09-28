@@ -45,9 +45,9 @@ non-2D tensors: lookup tables (embeddings) and multiplicative gates (AdaLN-style
 modulation linears) are 2D but are not shared linear maps, and belong in the
 fallback. `docs/SPEC.md` has the reasoning.
 
-Rank is a ceiling, not a promise: each parameter runs at no more than half its
-smaller side, so a model configured at rank 128 runs its tall narrow modules
-lower. UsuiTrack says so once at startup.
+Rank is not configured per matrix: `rank_fraction` (default `0.1`) sizes each
+matrix at `rank_fraction * sqrt(m * n)`, capped at half its smaller side, so a
+1024x1024 projection runs at 102 and a 4608x1024 MLP matrix at 217.
 
 ```python
 import torch
@@ -58,7 +58,7 @@ embedding_params = {id(p) for m in model.modules() if isinstance(m, nn.Embedding
 matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
 other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
 
-matrix_opt = UsuiTrack(matrix_params, lr=4e-4, rank=128)
+matrix_opt = UsuiTrack(matrix_params, lr=4e-4)
 other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
 
 loss = model(**batch).loss
@@ -74,7 +74,7 @@ it's consumed instead of holding the whole backward's gradients in memory at
 once:
 
 ```python
-matrix_opt = UsuiTrack(matrix_params, lr=4e-4, rank=128, release_matrix_grads=True)
+matrix_opt = UsuiTrack(matrix_params, lr=4e-4, release_matrix_grads=True)
 ```
 
 This requires one backward per `step()` call, no gradient accumulation, and
@@ -153,7 +153,7 @@ reasons. [`docs/LEGEND.md`](docs/LEGEND.md) is a long-form narrative account
 of the same mechanism, written for intuition rather than reference. The two
 are meant to be read together and are checked against each other.
 
-In short: each matrix keeps a small orthonormal basis (`rank` columns) and a
+In short: each matrix keeps a small orthonormal basis (`r` columns, sized by `rank_fraction`) and a
 projected first moment in that basis. The basis moves via an exact
 Grassmann-geodesic step driven by an Oja covariance tangent, so momentum
 transports through basis motion as a rigid rotation instead of being

@@ -1,19 +1,21 @@
+import math
+
 import torch
 
 from usuitrack import ProjectionSide, SubspaceProjector
 
 
 # A representative transformer-ish weight. Small toy shapes like (8, 4) put
-# effective_rank() straight into its floor -- a quarter of 4 rounds to 1 -- so
-# every test silently exercised a rank-1 basis instead of the regime the
-# optimizer is designed for. RANK sits below the quarter cap of COLS so the
-# configured rank is the rank actually used.
+# effective_rank() straight into its floor, so every test silently exercised a
+# rank-1 basis instead of the regime the optimizer is designed for.
+# RANK_FRACTION is chosen so this shape runs at exactly RANK, below the cap.
 ROWS, COLS, RANK = 256, 128, 16
+RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 
 def test_eigh_init_is_orthonormal_both_sides():
     for side, shape in ((ProjectionSide.RIGHT, (ROWS, COLS)), (ProjectionSide.LEFT, (COLS, ROWS))):
-        projector = SubspaceProjector(rank=RANK, side=side)
+        projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side=side)
         basis = projector.fit(torch.randn(*shape))
         expected_shape = (RANK, shape[1]) if side is ProjectionSide.RIGHT else (shape[0], RANK)
         assert tuple(basis.shape) == expected_shape
@@ -22,15 +24,15 @@ def test_eigh_init_is_orthonormal_both_sides():
 
 def test_zero_input_gives_deterministic_frame():
     zero = torch.zeros(ROWS, COLS)
-    first = SubspaceProjector(rank=RANK, side="right").fit(zero)
-    second = SubspaceProjector(rank=RANK, side="right").fit(zero)
+    first = SubspaceProjector(rank_fraction=RANK_FRACTION, side="right").fit(zero)
+    second = SubspaceProjector(rank_fraction=RANK_FRACTION, side="right").fit(zero)
     torch.testing.assert_close(first, second, rtol=0, atol=0)
 
 
 def test_project_and_lift_round_trip_shape():
     for side, shape in (("right", (ROWS, COLS)), ("left", (COLS, ROWS))):
         matrix = torch.randn(*shape)
-        projector = SubspaceProjector(rank=RANK, side=side)
+        projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side=side)
         lifted = projector.project_back(projector.project(matrix))
         assert tuple(lifted.shape) == shape
 
@@ -52,15 +54,16 @@ def test_geodesic_stays_on_the_stiefel_manifold():
         torch.testing.assert_close(moved.mT @ moved, torch.eye(RANK), atol=3e-3, rtol=0)
 
 
-def test_effective_rank_caps_at_half_the_smaller_side():
-    """A configured rank is a ceiling, not a promise. Anima's tall narrow
-    modules are the case that matters: a (2048, 64) weight can only ever carry
-    a rank-64 gradient, and it is a bottleneck, so it runs at 32 no matter what
-    the rest of the model is configured for."""
-    tall_narrow = torch.zeros(2048, 64)
+def test_effective_rank_is_a_fraction_of_the_size_capped_at_half_the_smaller_side():
+    """One fraction sizes every matrix by `sqrt(m * n)`; matrices of one shape
+    share a rank whichever way they are stored. Anima's patch embedding is the
+    case the cap exists for: a (2048, 68) weight asks for 37 planes at 0.1 and
+    can carry a rank-68 gradient at most, so it runs at 34."""
     for side in ("auto", "left", "right"):
-        assert SubspaceProjector(rank=256, side=side).effective_rank(tall_narrow) == 32
-    # Below the cap the configured rank is used unchanged.
-    assert SubspaceProjector(rank=16, side="auto").effective_rank(tall_narrow) == 16
+        projector = SubspaceProjector(rank_fraction=0.1, side=side)
+        assert projector.effective_rank(torch.zeros(1024, 1024)) == 102
+        assert projector.effective_rank(torch.zeros(4608, 1024)) == 217
+        assert projector.effective_rank(torch.zeros(1024, 4608)) == 217
+        assert projector.effective_rank(torch.zeros(2048, 68)) == 34
     # A degenerate side still yields a usable rank.
-    assert SubspaceProjector(rank=8, side="auto").effective_rank(torch.zeros(64, 1)) == 1
+    assert SubspaceProjector(rank_fraction=0.1).effective_rank(torch.zeros(64, 1)) == 1

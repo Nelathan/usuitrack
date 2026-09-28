@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from .diagnostics import DiagnosticsAccumulator, RankCalibrator
+from .diagnostics import DiagnosticsAccumulator
 from .projector import ProjectionSide, SubspaceProjector
 from .stochastic import copy_stochastic_, wants_stochastic_rounding
 AURORA_PP_ITERATIONS = 1
@@ -111,7 +111,7 @@ class UsuiTrack(Optimizer):
         beta: float = 0.9,
         eps: float = 1e-8,
         weight_decay: float = 0.0,
-        rank: int = 32,
+        rank_fraction: float = 0.1,
         side: ProjectionSide | str = ProjectionSide.AUTO,
         basis_update_interval: int = 1,
         consume_grad: bool = True,
@@ -127,8 +127,8 @@ class UsuiTrack(Optimizer):
             raise ValueError(f"eps must be positive, got {eps}")
         if weight_decay < 0:
             raise ValueError(f"weight_decay must be non-negative, got {weight_decay}")
-        if rank <= 0:
-            raise ValueError(f"rank must be positive, got {rank}")
+        if rank_fraction <= 0:
+            raise ValueError(f"rank_fraction must be positive, got {rank_fraction}")
         if basis_update_interval <= 0:
             raise ValueError(f"basis_update_interval must be positive, got {basis_update_interval}")
         if release_matrix_grads and not consume_grad:
@@ -139,7 +139,7 @@ class UsuiTrack(Optimizer):
             beta=beta,
             eps=eps,
             weight_decay=weight_decay,
-            rank=rank,
+            rank_fraction=rank_fraction,
             side=ProjectionSide(side).value,
             consume_grad=consume_grad,
             compile_tensor_kernels=compile_tensor_kernels,
@@ -188,11 +188,6 @@ class UsuiTrack(Optimizer):
         self._lag_path: dict[Tensor, Tensor] = {}
         self._lag_sampled: set[Tensor] | None = None
         self._diagnostics: DiagnosticsAccumulator | None = None
-        # Off by default and independent of the diagnostics tier: set it to a
-        # `RankCalibrator` before a run at an oversized rank to collect the
-        # live-plane counts a rank table is then sized from by hand. Groups need
-        # a `calibration_label` key for their counts to be bucketed.
-        self.rank_calibrator: RankCalibrator | None = None
         self._step_update_norm_sq: Tensor | None = None
         self._matrix_grad_hook_handles = []
         self._matrix_param_groups: dict[Tensor, dict] = {}
@@ -220,41 +215,13 @@ class UsuiTrack(Optimizer):
     def add_param_group(self, param_group: dict) -> None:
         super().add_param_group(param_group)
         group = self.param_groups[-1]
-        try:
-            # effective_rank() caps rank at half a parameter's smaller side, so
-            # a configured rank is a ceiling rather than a promise. This is
-            # normal and not an error -- a model trained at rank 256 runs its
-            # tall narrow modules at 32, the same way a LoRA config does -- but
-            # saying nothing would be dishonest, so report it once at startup.
-            # One summary per group, not one warning per parameter: on a real
-            # model the same cap applies to hundreds of weights.
-            clamped: dict[tuple[tuple[int, ...], int], int] = {}
-            for param in group["params"]:
-                if param.ndim != 2:
-                    raise ValueError(
-                        "UsuiTrack only supports 2D matrix parameters; "
-                        f"got shape {tuple(param.shape)}"
-                    )
-                max_rank = SubspaceProjector(
-                    rank=group["rank"], side=ProjectionSide(group["side"])
-                ).effective_rank(param)
-                if group["rank"] > max_rank:
-                    key = (tuple(param.shape), max_rank)
-                    clamped[key] = clamped.get(key, 0) + 1
-            if clamped:
-                detail = ", ".join(
-                    f"{count}x{list(shape)}->rank {rank}"
-                    for (shape, rank), count in sorted(clamped.items())
+        for param in group["params"]:
+            if param.ndim != 2:
+                self.param_groups.pop()
+                raise ValueError(
+                    "UsuiTrack only supports 2D matrix parameters; "
+                    f"got shape {tuple(param.shape)}"
                 )
-                warnings.warn(
-                    f"UsuiTrack: configured rank {group['rank']} exceeds half the smaller side "
-                    f"of {sum(clamped.values())} of {len(group['params'])} matrix parameters; "
-                    f"those run at a reduced rank ({detail}).",
-                    stacklevel=2,
-                )
-        except Exception:
-            self.param_groups.pop()
-            raise
 
         matrix_param_groups = getattr(self, "_matrix_param_groups", None)
         if matrix_param_groups is not None:
@@ -1318,12 +1285,6 @@ class UsuiTrack(Optimizer):
         directions = (tangents @ eigenvectors) * inverse.unsqueeze(-2).to(tangents.dtype)
         polar = directions @ eigenvectors.mT
 
-        if self.rank_calibrator is not None:
-            group = self._matrix_param_groups.get(entries[0].param)
-            label = group.get("calibration_label") if group is not None else None
-            if label is not None:
-                self.rank_calibrator.observe(label, sigma.shape[-1], [entry.param for entry in entries], live.sum(dim=-1))
-
         diagnostics = self._diagnostics_sink()
         if diagnostics is not None:
             diagnostics.add("tangent_live_fraction", live.sum() / sigma.shape[-1], count=live.shape[0])
@@ -1662,7 +1623,7 @@ class UsuiTrack(Optimizer):
     @staticmethod
     def _projector_from_state(p: Tensor, group: dict, state: dict) -> SubspaceProjector:
         projector = SubspaceProjector(
-            rank=group["rank"],
+            rank_fraction=group["rank_fraction"],
             side=ProjectionSide(group["side"]),
         )
         basis = state.get("basis")
