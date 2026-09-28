@@ -7,7 +7,7 @@ Operating contract for agents in the UsuiTrack release repo.
 The shipped optimizer and its documentation. `usuitrack/` is the package
 (`optimizer.py`, `projector.py`, `diagnostics.py`, `stochastic.py`); `tests/`
 guards it; `docs/` carries the design and the open questions. This is what a user
-installs and what the lab (`~/code/optimizers`) measures through a symlink.
+installs and what the lab (`~/Projects/optimizers`) measures through a symlink.
 
 The lab repo contains a stale `usuitrack/` fork of an earlier shape, kept on
 purpose with a `SUPERSEDED` note at the top of its `optimizer.py`. Never edit it;
@@ -132,7 +132,7 @@ never in the foreground.**
 
 ### LFM2.5-350M — the lab harness
 
-From `/home/djg/code/optimizers`. It inserts the `usuitrack-release` symlink at
+From `/home/djg/Projects/optimizers`. It inserts the `usuitrack-release` symlink at
 `sys.path[0]` and raises if the import missed, so it measures this repo and not
 the stale fork beside it. Standard arm:
 
@@ -165,7 +165,7 @@ argument. Import the harness module first so its `sys.path` insertion has
 happened, then set the attribute before the optimizer is built:
 
 ```python
-import sys; sys.path.insert(0, "/home/djg/code/optimizers")
+import sys; sys.path.insert(0, "/home/djg/Projects/optimizers")
 import experiments.llm_synth_smoke as smoke
 smoke.usuitrack_optimizer.GEODESIC_STEPSIZE = 0.05
 sys.argv = ["llm_synth_smoke.py", *sys.argv[1:]]
@@ -177,7 +177,7 @@ pytest) and are not run; verify a harness function by calling it directly.
 
 ### Anima — ai-toolkit
 
-From `/home/djg/code/ai-toolkit`, a `uv`-managed `.venv`:
+From `/home/djg/Projects/ai-toolkit`, a `uv`-managed `.venv`:
 
 ```bash
 uv run python run.py config/train_full_fine_tune_anima_usuitrack.yaml
@@ -247,7 +247,7 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
 - **A `nohup` wrapper's completion is not the run's completion.** The tool
   notification fires when the launcher exits, seconds in. Check the log.
 - **Running a script by path puts its own directory on `sys.path`,** not the lab
-  root. A runner in the scratchpad must insert `/home/djg/code/optimizers`.
+  root. A runner in the scratchpad must insert `/home/djg/Projects/optimizers`.
 - **LR is not anchored across batch changes.** Scale by `sqrt(tokens per step)`:
   at 1/16 the tokens, use 1/4 the LR. Relative comparisons within a sweep
   survive because all arms share it; the absolute losses do not transfer.
