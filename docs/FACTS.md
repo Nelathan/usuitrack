@@ -235,6 +235,39 @@ card is at its limit at bs4 x k4 with the sized table -- an earlier "6.6 GB
 peak" note was a different counter and should not be used for headroom.
 Sampling: ~23 s per 1024x1024 image at 30 steps.
 
+### A real bs16 on 12 GB: offloaded checkpointing
+
+2026-09-28, torch 2.14, bs16 x 768 (36,864 tokens). Held without checkpointing,
+one block saves 5.69 GiB for backward: attn1 1.87 (three fp32 rope'd q/k copies,
+288 MiB each), ff 1.33, attn2 1.22, norms 0.87, glue 0.42. Checkpointing leaves
+28 block inputs; `activation_offloading` (ai-toolkit) keeps those in pinned host
+memory under `save_on_cpu`, which does reach a non-reentrant checkpoint, and
+checkpoints attn1 and attn2 once more inside the block, since the recompute of
+one block is what then sets the peak.
+
+| arm (every block compiled) | peak over weights | s/sample |
+|---|---:|---:|
+| plain bs4 | 2.02 GiB | 0.621 |
+| offload bs16, no nesting | 4.23 GiB | 0.650 |
+| offload bs16, attn1+attn2 nested | 2.58 GiB | 0.718 |
+
+The whole-model compile of run 17 (0.616 s/sample at bs4) is not an option at
+bs16: it graph-breaks at the saved-tensor hooks, and it holds every gradient
+until its one backward graph ends, where per-block compile lets
+`release_matrix_grads` free a block's gradients as its backward finishes. In
+the trainer the unnested arm fits step 1 and OOMs from step 2, once the
+optimizer state is resident; nested runs at ~12.4 s/step. Gradients agree with
+eager within the compile noise floor (relative grad-norm difference median
+~1e-2, as for plain compile against eager).
+
+After a step, with AdaLN still on the fallback: 5.48 GiB allocated, 8.32
+reserved, 7.88 step peak. Parameters 3.89, UsuiTrack state ~0.76, the fallback's
+AdamW moments for the AdaLN pairs ~0.68 -- 48% of optimizer state for 9% of the
+parameters, gone since they moved to UsuiTrack (`optimizer.pt` 1.41 -> 0.97
+GiB). `nvidia-smi` reads reserved allocator cache, not use: 11.4 GB at 20
+steps, and the card is still near full -- a 570 MiB request failed once and
+succeeded on the allocator's retry.
+
 ## LFM2.5-350M lane
 
 bs16 x seq1024, seed 1, 1k steps, broad-no-embeddings. Noise floors: target
