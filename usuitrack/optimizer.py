@@ -34,6 +34,15 @@ GEODESIC_STEPSIZE = 0.04
 # does not), and exists to be deleted with whichever arm loses.
 REORTHOGONALIZE_MOMENT = False
 
+# Experiment arm: cautious update (Liang et al. 2024, arXiv 2411.16085) in frame
+# coordinates. The lifted step is `s P M`, so `<U, G> = s <M, P^T G>`: masking
+# the moment's copy wherever its sign disagrees with the projected gradient
+# keeps the step a descent direction for the observed gradient, exactly as the
+# paper's mask does in full space. The stored moment is never masked, so its
+# memory keeps integrating; only this step stops moving what the batch
+# contradicts. Rescaled by `numel / kept` per matrix, as HeavyBall does.
+CAUTIOUS = False
+
 
 
 @dataclass
@@ -61,6 +70,9 @@ class MatrixUpdate:
     original_shape: tuple[int, ...]
     # `polar(projected grad)` -- see `_orthogonalized_directions`.
     direction: Tensor
+    # Held until `_integrate_step` for `CAUTIOUS`'s sign reference; the prepared
+    # gradient already lives this long, so this adds no memory.
+    projected_grad: Tensor
     projected_grad_norm: Tensor
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
@@ -594,6 +606,7 @@ class UsuiTrack(Optimizer):
                 projector=entry.projector,
                 original_shape=entry.original_shape,
                 direction=direction.float(),
+                projected_grad=entry.projected_grad,
                 projected_grad_norm=entry.projected_grad.float().norm(),
                 oja_tangent=None if entry.oja_tangent is None else entry.oja_tangent.float(),
                 raw_grad_norm=None if entry.raw_grad_norm is None else entry.raw_grad_norm.float(),
@@ -891,7 +904,19 @@ class UsuiTrack(Optimizer):
             else moments
         )
         for entry, update_hat in zip(entries, update_hats, strict=True):
+            if CAUTIOUS:
+                update_hat = self._cautious(update_hat, entry.projected_grad, diagnostics)
             self._apply_matrix_update(entry, update_hat, group)
+
+    @staticmethod
+    def _cautious(update_hat: Tensor, projected_grad: Tensor, diagnostics: DiagnosticsAccumulator | None) -> Tensor:
+        """`CAUTIOUS`: zero the frame coordinates the current gradient contradicts."""
+
+        agree = ~(update_hat.signbit() ^ projected_grad.signbit())
+        kept = agree.sum()
+        if diagnostics is not None:
+            diagnostics.add("caution_kept", kept / agree.numel())
+        return update_hat * agree * (agree.numel() / kept.clamp_min(1))
 
     def _orthogonalize_bucket(self, tensors: list[Tensor], scale: float) -> list[Tensor]:
         if len(tensors) == 1:

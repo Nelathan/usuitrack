@@ -818,3 +818,32 @@ def test_matrices_sharing_a_scale_but_not_a_shape_still_bucket_correctly():
     # every other batched-vs-solo comparison in this file already carries.
     for shape in shapes:
         torch.testing.assert_close(together[shape], separate[shape], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("cautious", [False, True])
+def test_cautious_step_descends_on_a_gradient_that_contradicts_the_moment(monkeypatch, cautious):
+    """A moment built on `G` steps uphill when the batch turns to `-G`; the
+    in-frame mask must make the realised change a descent direction for the
+    gradient the step actually saw."""
+
+    import usuitrack.optimizer as optimizer_module
+
+    monkeypatch.setattr(optimizer_module, "CAUTIOUS", cautious)
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=1e-2, rank_fraction=RANK_FRACTION, side="right")
+    grad = torch.randn(ROWS, COLS)
+    for _ in range(10):
+        weight.grad = grad + 0.1 * torch.randn(ROWS, COLS)
+        optimizer.step()
+
+    turned = -grad + 0.1 * torch.randn(ROWS, COLS)
+    before = weight.detach().clone()
+    weight.grad = turned
+    optimizer.step()
+    descent = float(((weight.detach() - before) * turned).sum())
+
+    if cautious:
+        assert descent <= 0.0
+    else:
+        assert descent > 0.0
