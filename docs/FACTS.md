@@ -444,6 +444,50 @@ plane in nine, not that the moment is low-rank. `transport_speed` follows it as
 `eta sqrt(live)`: 0.038 predicted and 0.037 measured on run 17, 0.013 and 0.014
 on run 18. Run `anima_usuitrack_19_sensor_lr2e4`, `loss_log.db`, 2026-09-29.
 
+### Beta buys target at a held step and pays in source
+
+Standard arm at 1k (bs16, `rank_fraction` 0.1, seed 1, constant lr after 50
+warmup steps); `update/param` is the fleet `update_to_param_ratio`:
+
+| arm | update/param | target | source | cos | grad norm |
+|---|---:|---:|---:|---:|---:|
+| `beta 0.9`, `2e-4` | 4.1e-5 | 1.67416 | 3.0245 | +1.9e-3 | 6.49 |
+| `beta 0.9`, `4e-4` | 8.1e-5 | 1.66161 | 3.0494 | -2.5e-5 | 6.36 |
+| `beta 0.98`, `5e-4` | 4.4e-5 | **1.66081** | 3.0723 | +8.0e-4 | 6.17 |
+| `beta 0.98`, `7e-4` | 6.2e-5 | 1.66459 | 3.0914 | +3.3e-4 | 6.01 |
+| `beta 0.995`, `1e-3` | 4.4e-5 | 1.67819 | 3.1337 | +7.5e-4 | 5.85 |
+| `beta 0.98` re-polared, `5e-5` | 4.4e-5 | 1.66172 | 3.0579 | +1.1e-3 | 6.21 |
+| `beta 0.98` re-polared, `1e-4` | 8.8e-5 | 1.67503 | 3.1068 | +5e-5 | 5.87 |
+| `beta 0.98` cautious, `5e-4` | 6.2e-5 | **1.65734** | 3.0726 | -1.2e-3 | 6.15 |
+
+- The moment stays white at every `beta`: `step_gain` moves by `w` on all nine
+  roles (0.43-0.44x at 0.98 against 0.437 predicted, 0.50x at 0.995 against
+  0.501). What `beta` buys is the signal's share of a noise-dominated norm,
+  which `step_gain` cannot see: at a held step 0.98 gains 0.013 target.
+- Source worsens monotonically with `beta` at a held step (3.025, 3.072,
+  3.134): forgetting grows with memory length, not travel. `beta 0.9` at twice
+  the step reaches 0.98's target with 0.023 less source damage.
+- More lr than the held step does not pay at 0.98, and the cosine does not
+  find that optimum: it stays positive past the loss's best lr, since the
+  moment holds only `1 - beta` of the current direction.
+- 0.995 lags 0.98 by 0.041 at step 250, closing to 0.017 by 1000: part of it is
+  the slow fill of a zero-initialised moment, the source cost is not.
+- Gradient norm falls with `beta` and with lr, independent of loss: the
+  implicit flatness pull of a long lever arm (heavy-ball's `lr/(1-beta)`
+  penalty on `||grad||^2`), a hypothesis for polar directions.
+- Re-polaring the moment before the lift (`REORTHOGONALIZE_MOMENT`, state
+  untouched) trades 9e-4 target for 0.014 source at the held step, and fails
+  at twice the step: a flat spectrum hands noise planes full length.
+- Caution in the frame (`CAUTIOUS`) keeps 56% of the coordinates and its
+  `numel/kept` rescale lifts the step 1.39x, which lands it on plain 0.98 at
+  `7e-4`'s exact step: against that it is 0.0073 better on target and 0.019 on
+  source, and against plain `5e-4` 0.0035 better on target at equal source.
+  Masking what the batch contradicts is what lets the larger step pay. Target
+  quantiles p10/p50/p90 1.322/1.650/1.927.
+
+Frame reads (capture, live fraction 0.81-0.83, `transport_speed` 0.0386) do not
+move with `beta` or lr. Runs `d4_*_1k_s1`, `lfm_1k_d5_relstep`, 2026-09-29.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

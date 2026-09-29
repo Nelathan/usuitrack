@@ -107,9 +107,13 @@ Chosen 2026-09-29: `beta 0.98`, which should cancel noise and not persistence,
 and with less thrash may carry a larger lr than the white floor's 2.29x
 (`w` 0.229 -> 0.100); Anima at ~1e-3 (held step would be 9.2e-4). Increments
 on LFM (bs16, `rank_fraction` 0.1): `beta 0.98` at held step, then caution on
-top; then one Anima run with everything, not one Anima arm per lever.
+top; then one Anima run with everything, not one Anima arm per lever. LFM read
+(`FACTS.md`, "Beta buys target"): 0.98 at the held step wins target and pays
+source; 0.995 and re-polaring the moment lose; caution on top wins again at
+equal source. Open for Anima: lr at bs8 (held step 9.2e-4, or 6.5e-4 by the
+`sqrt(tokens)` rule -- no LFM arm traded batch for `beta`).
 
-Caution in the frame: mask the update where its sign disagrees with the current
+Caution in the frame (built, `CAUTIOUS`): mask the update where its sign disagrees with the current
 gradient (Liang et al. 2024, arXiv 2411.16085; HeavyBall `_compilable_cautioning`,
 which rescales by `numel / kept`), applied to the moment and this step's
 gradient in frame coordinates rather than full space, since the full gradient is
