@@ -387,10 +387,11 @@ wandb), 2026-09-28.
 
 ### Where the step lands, per role
 
-`relative_step/<role>` (`SPEC.md`, telemetry) on the standard arm at 1k
-(`rank_fraction` 0.1, `lr 2e-4`, last logging window):
+The relative step `lr x step_gain/<role>` (`SPEC.md`, telemetry; logged then as
+`relative_step`) on the standard arm at 1k (`rank_fraction` 0.1, `lr 2e-4`, last
+logging window):
 
-| role | `relative_step` |
+| role | relative step |
 |---|---:|
 | `feed_forward.w3` | 5.6e-5 |
 | `self_attn.k_proj` | 5.4e-5 |
@@ -410,6 +411,38 @@ separated. The same run is a third noise point for this arm: target 1.674156 aga
 instrument does not move the trajectory, and accumulation's removal
 (`lfm_1k_bs16_rf010_noaccum`) sits inside the spread. Runs `lfm_1k_d5_relstep`,
 `lfm_1k_bs16_rf010_noaccum`, `shape_c100_1k_s1`, 2026-09-29.
+
+On Anima (sensor run 19: run 18 at `lr 2e-4`, 150 steps, sampling off; steps
+40-110), against the full-lift step `lr aspect sqrt(r) / ||W||` computed from
+shapes and base weights:
+
+| role | relative step | measured / full lift |
+|---|---:|---:|
+| `patch_embed.proj` | 2.35e-4 | 0.22 |
+| `proj_out` | 1.64e-4 | 0.29 |
+| `attn2.to_k` | 5.5e-5 | 0.22 |
+| `ff.net.0` | 4.1e-5 | 0.23 |
+| q, k, v of attn1 and attn2 | 2.8-3.2e-5 | 0.20-0.23 |
+| `to_out` of attn1 and attn2 | 2.4-2.8e-5 | 0.20-0.23 |
+| `ff.net.2` | 2.0e-5 | 0.23 |
+| AdaLN `linear_2` (norm1-3, norm_out) | 1.7-2.4e-5 | 0.06-0.07 |
+| AdaLN `linear_1` | 1.5-5.2e-6 | 0.05 |
+
+Every role outside AdaLN sits at `w = sqrt((1-beta)/(1+beta)) = 0.229`
+(`beta 0.9`): the norm of an average of uncorrelated unit directions, with
+`moment_persistence` at 0.0012. The step of each role is therefore fixed at init
+as `lr w aspect sqrt(r) / ||W||`. The 160x spread is shape and weight norm alone,
+and the two ends of the stream take 5-10x any block role. AdaLN sits below the
+floor: its moment populates about 12 of `linear_2`'s 125 planes and 3 of
+`linear_1`'s 72, near the rank-16 gradient a bs16 batch of timestep embeddings
+can give, so its rank above that does not reach the step. A `beta` change moves
+every non-AdaLN step by `w`: x0.70 at 0.95, x0.44 at 0.98, x0.31 at 0.99, while
+the moment stays white.
+
+Tangent liveness is a different read: `0.11` says the aim has magnitude on one
+plane in nine, not that the moment is low-rank. `transport_speed` follows it as
+`eta sqrt(live)`: 0.038 predicted and 0.037 measured on run 17, 0.013 and 0.014
+on run 18. Run `anima_usuitrack_19_sensor_lr2e4`, `loss_log.db`, 2026-09-29.
 
 ## Run ledger (Anima)
 
@@ -432,7 +465,8 @@ at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
 432, so run 15 moved more *at a lower lr*. Whether the 2026-09-14 trainer
 (token-exact weights, unrounded final fold, fallback divided before the clip)
 or something else did that is not separated. Whale, gown and ethereal barely
-moved in any run.
+moved in any run. No run through 19 set `training_seed`, so batch order and
+noise differ between every pair of them.
 
 Run 18's step is 3.3x run 17's at the same `1e-4`: `update_to_param_ratio`
 `1.20e-5` flat through the stable phase against `3.69e-6`, inside the 2-6x

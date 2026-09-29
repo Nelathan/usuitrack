@@ -94,6 +94,28 @@ LFM and was left out for flops. Arms: higher `beta` at matched
 `update_to_param_ratio` (a beta change is an lr change); `REORTHOGONALIZE_MOMENT`
 on Anima.
 
+On Anima the moment is at the white floor in every block role (`FACTS.md`,
+per-role step), so at `beta 0.9` most of each step cancels over the next ten.
+The user's direction (2026-09-29): higher `beta` rather than larger batches to
+buy signal, at bs8 (VRAM headroom, twice the steps per epoch), `rank_fraction`
+0.025 with `lr 4e-4` (the same step as 0.1 at `2e-4`), warmup only. `step_gain`
+reads whether the longer memory turns coherent: it rises above `w(beta)` only
+if it does. On LFM `beta 0.99` lost to 0.9 on target at the same lr, i.e. at
+0.31x the step when the moment is white, so a held-step arm is unmeasured.
+
+Chosen 2026-09-29: `beta 0.98`, which should cancel noise and not persistence,
+and with less thrash may carry a larger lr than the white floor's 2.29x
+(`w` 0.229 -> 0.100); Anima at ~1e-3 (held step would be 9.2e-4). Increments
+on LFM (bs16, `rank_fraction` 0.1): `beta 0.98` at held step, then caution on
+top; then one Anima run with everything, not one Anima arm per lever.
+
+Caution in the frame: mask the update where its sign disagrees with the current
+gradient (Liang et al. 2024, arXiv 2411.16085; HeavyBall `_compilable_cautioning`,
+which rescales by `numel / kept`), applied to the moment and this step's
+gradient in frame coordinates rather than full space, since the full gradient is
+freed at `prepare()`. It suppresses the part of the step the current batch
+contradicts, which grows with `beta`. Not the bf16 walk (A2).
+
 ### D5. One unit for the step
 
 The step a module takes is today an accident of four factors nobody chose
@@ -119,9 +141,12 @@ below 1. Axes to settle before any arm:
 - a relative step compounds on a growing weight, a finetune's weights barely
   grow, so this is likely moot here and not in pretraining.
 Moonlight's `0.2 sqrt(max(m,n))` is a different distribution again (w2 x2.1
-against today's). The instrument exists (`relative_step/<role>`): on LFM one
-`lr` spreads 2.1x across roles, write projections smallest (`FACTS.md`). Anima's
-distribution comes with its next run; the law waits on both.
+against today's). The instrument exists (`step_gain/<role>`). On Anima the
+agreement factor is not a per-role variable at `beta 0.9`: every non-AdaLN role
+sits at the white floor `w`, so today's distribution is `w aspect sqrt(r)/||W||`,
+known at init, 160x end to end with the stream's two ends hottest (`FACTS.md`).
+A law would mostly correct aspect, rank and weight norm. `w` moves with `beta`,
+so D4's arms change the step unless `lr` follows `1/w`.
 
 ---
 
