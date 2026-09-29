@@ -165,7 +165,7 @@ class UsuiTrack(Optimizer):
         self._lag_sampled: set[Tensor] | None = None
         self._diagnostics: DiagnosticsAccumulator | None = None
         self._step_update_norm_sq: Tensor | None = None
-        # Role class of each matrix, for `relative_step/<role>`. The caller sets
+        # Role class of each matrix, for `step_gain/<role>`. The caller sets
         # it, since only the caller knows names; a matrix without a role counts
         # toward `update_to_param_ratio` only.
         self.diagnostic_roles: dict[Tensor, str] = {}
@@ -363,14 +363,17 @@ class UsuiTrack(Optimizer):
             Mean per-step weight motion against current weight norm. Flat
             through healthy training; mostly useful for finding a sane learning
             rate on an unfamiliar model.
-        ``relative_step/<role>``
-            The same read per role class, for the matrices ``diagnostic_roles``
-            labels: the class's per-step ``||lr U||_F``, summed in squares over
-            its matrices, against the class's current ``||W||_F``. This is the
-            step before rounding -- the stochastic-rounding walk is not in it --
-            so it is the step the optimizer chose, which is what a step-size law
-            is about. Within a class of equal shapes it is a norm-weighted mean
-            of the per-matrix ratios.
+        ``step_gain/<role>``
+            Per role class, for the matrices ``diagnostic_roles`` labels: the
+            class's per-step ``||U||_F``, summed in squares over its matrices,
+            against the class's current ``||W||_F``. The relative step is
+            ``lr`` times this; leaving ``lr`` out keeps the read exact across a
+            schedule, which a mean over a logging window would otherwise smear.
+            It is the update before rounding -- the stochastic-rounding walk is
+            not in it -- so it is the step the optimizer chose. A white moment
+            populating all ``r`` planes sits at ``w aspect sqrt(r) / ||W||``,
+            ``w = sqrt((1-beta)/(1+beta))``; fewer populated planes sit below it,
+            a coherent moment above it.
         ``grad_moment_cosine``
             Agreement between this batch's projected gradient and the moment as
             it stood before this step -- does the batch confirm accumulated
@@ -413,7 +416,7 @@ class UsuiTrack(Optimizer):
             role_param_norms = self._role_param_norms()
             for role, role_update_norm in role_update_norms.items():
                 param_norm = role_param_norms[role]
-                result[f"relative_step/{role}"] = role_update_norm / param_norm if param_norm > 0 else float("nan")
+                result[f"step_gain/{role}"] = role_update_norm / param_norm if param_norm > 0 else float("nan")
         return result
 
     @torch.no_grad()
@@ -1307,14 +1310,15 @@ class UsuiTrack(Optimizer):
 
         if self._diagnostics_sink() is None:
             return
-        contribution = (update.float().norm() * lr).square().detach()
+        update_sq = update.float().norm().square().detach()
+        contribution = update_sq * lr**2
         self._step_update_norm_sq = (
             contribution if self._step_update_norm_sq is None else self._step_update_norm_sq + contribution
         )
         role = self.diagnostic_roles.get(param)
         if role is not None:
             role_sq = self._step_role_update_sq.get(role)
-            self._step_role_update_sq[role] = contribution if role_sq is None else role_sq + contribution
+            self._step_role_update_sq[role] = update_sq if role_sq is None else role_sq + update_sq
 
     def _initialize_projector(
         self,
