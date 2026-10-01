@@ -809,6 +809,28 @@ Withdrawn: the SPEC accumulation contract and `micro_batch_agreement`; the
 measured: a real batch has no such shrink, so bs16 at run 13's `lr` steps
 about twice as far (`a` ~0.003, `k=4`). The step's unit is D5's question.
 
+## CLOSED -- beta 0.98 with caution, unrescaled, is the default
+
+2026-10-01, closes D4 on LFM. The release default is `beta 0.98` with a
+cautious mask in frame coordinates and no `numel / kept` rescale (SPEC steps 5
+and 8). Evidence (`FACTS.md`, "Beta buys target" and "Caution: where it
+pays"):
+- At a held step `beta 0.98` wins target over 0.9 and pays source; 0.995 lags.
+  Source damage grows with `beta` at every step size: forgetting follows memory
+  length.
+- Caution's gain grows with `beta` at a matched step: none at 0.9, 0.006-0.007
+  target at 0.98. Under caution the target optimum is 0.98; 0.95 and 0.99 lose.
+- The rescale was a uniform lr multiplier on LFM (kept fraction equal across
+  roles). Dropping it lets a matrix the batch disputes more step less, and at
+  `7e-4` holds the best target at 0.013-0.017 better source.
+- The moment does not substitute for batch: bs8 at equal tokens loses 0.012
+  target, and raising `beta` to match bs16's sample memory loses more.
+
+Withdrawn: `0.9` as "the measured optimum" of the variance-staleness trade
+(it was measured at one lr, not at a held step); re-polaring the moment
+(`REORTHOGONALIZE_MOMENT`, deleted: it trades target for source and fails at
+twice the step); the rescale. Open on Anima, in PLAN D4.
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)

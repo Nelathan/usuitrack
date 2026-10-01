@@ -83,42 +83,26 @@ optimizer steps per wall-clock hour; a longer plateau (run 13's decay started at
 432 of 576); higher `beta`. A1 bears on all of them: a larger step raises travel
 against walk as `sqrt(lr)`.
 
-### D4. Beta, and whether the moment damps too much
+### D4. Does beta 0.98 with caution hold on Anima?
 
-`beta 0.9` is the LFM optimum at two step sizes. With polar-first, the moment
-cancels whatever disagrees between steps, and `moment_persistence` reads ~1e-3.
-Either that is healthy -- a short geodesic in a low-rank frame -- or the method
-works partly because it damps very hard. Re-orthogonalizing the moment (the
-extrinsic mean, first-order Karcher mean of the directions) helped marginally on
-LFM and was left out for flops. Arms: higher `beta` at matched
-`update_to_param_ratio` (a beta change is an lr change); `REORTHOGONALIZE_MOMENT`
-on Anima.
+Settled on LFM (`ARCHIVE.md`, "beta 0.98 with caution"). Anima has run neither.
+Run 20 is the test: bs8, `rank_fraction` 0.025, warmup only, verdict on the
+samples. lr is a transfer, not a measurement: the `sqrt(tokens)` rule held on
+LFM (bs8 at the same lr lost on both losses), and the unrescaled mask wants
+~1.4x the rescaled lr there, so ~9e-4 against the 6.5e-4 rule. `caution_kept`
+per role is unread on Anima; on LFM it is uniform, so the unrescaled mask only
+redistributes step where it is not.
 
-On Anima the moment is at the white floor in every block role (`FACTS.md`,
-per-role step), so at `beta 0.9` most of each step cancels over the next ten.
-The user's direction (2026-09-29): higher `beta` rather than larger batches to
-buy signal, at bs8 (VRAM headroom, twice the steps per epoch), `rank_fraction`
-0.025 with `lr 4e-4` (the same step as 0.1 at `2e-4`), warmup only. `step_gain`
-reads whether the longer memory turns coherent: it rises above `w(beta)` only
-if it does. On LFM `beta 0.99` lost to 0.9 on target at the same lr, i.e. at
-0.31x the step when the moment is white, so a held-step arm is unmeasured.
+Why bs8 and not bs16 on this lane: the dataset was curated for bs4, so bs16
+pads partial buckets with duplicates (same image, new timestep and noise),
+and bs8 avoids nested attention. LFM's 0.012 for doubling the batch is an upper
+bound here. Reopens with the 1024 px dataset.
 
-Chosen 2026-09-29: `beta 0.98`, which should cancel noise and not persistence,
-and with less thrash may carry a larger lr than the white floor's 2.29x
-(`w` 0.229 -> 0.100); Anima at ~1e-3 (held step would be 9.2e-4). Increments
-on LFM (bs16, `rank_fraction` 0.1): `beta 0.98` at held step, then caution on
-top; then one Anima run with everything, not one Anima arm per lever. LFM read
-(`FACTS.md`, "Beta buys target"): 0.98 at the held step wins target and pays
-source; 0.995 and re-polaring the moment lose; caution on top wins again at
-equal source. Open for Anima: lr at bs8 (held step 9.2e-4, or 6.5e-4 by the
-`sqrt(tokens)` rule -- no LFM arm traded batch for `beta`).
+### D6. LFM run-to-run spread
 
-Caution in the frame (built, `CAUTIOUS`): mask the update where its sign disagrees with the current
-gradient (Liang et al. 2024, arXiv 2411.16085; HeavyBall `_compilable_cautioning`,
-which rescales by `numel / kept`), applied to the moment and this step's
-gradient in frame coordinates rather than full space, since the full gradient is
-freed at `prepare()`. It suppresses the part of the step the current batch
-contradicts, which grows with `beta`. Not the bf16 walk (A2).
+A same-seed replicate differs by 1.6e-3 target and 5.6e-3 source (`FACTS.md`),
+5x and 3x the floors `AGENTS.md` states. One pair. Settle with three seeds of
+the default arm (~40 min) before another LFM claim below ~2e-3 target.
 
 ### D5. One unit for the step
 
@@ -150,7 +134,9 @@ agreement factor is not a per-role variable at `beta 0.9`: every non-AdaLN role
 sits at the white floor `w`, so today's distribution is `w aspect sqrt(r)/||W||`,
 known at init, 160x end to end with the stream's two ends hottest (`FACTS.md`).
 A law would mostly correct aspect, rank and weight norm. `w` moves with `beta`,
-so D4's arms change the step unless `lr` follows `1/w`.
+so a `beta` change is a step change unless `lr` follows `1/w`. Caution adds a
+fifth factor, the masked share of the moment's norm (0.77 on LFM, uniform
+across roles).
 
 ---
 
@@ -197,7 +183,7 @@ Nothing acts on it until a capped matrix starves.
 - **F1. Per-matrix lr from the overshoot meter** (was P15). Decide by first
   logging `grad_moment_cosine` spread across matrices by role; if flat, it is a
   global schedule in costume. Family prior is poor (closed P2).
-- **F2. Magic numbers** (was P5). Rank cap (E5); `beta`/`eps` (D4);
+- **F2. Magic numbers** (was P5). Rank cap (E5); `eps`;
   `AURORA_PP_*` inherited and cheap; Newton-Schulz coefficients (5 steps, the
   largest cost, invisible end to end); `1e-12` floors never audited against
   their dtype -- the lesson of the `1e-6 sigma_max` floor that never fired.
@@ -225,3 +211,7 @@ Nothing acts on it until a capped matrix starves.
 - **Turning only the top planes.** Worse on target; the leading plane's
   magnitude was the problem, which the polar tangent fixes.
 - **A fresh eigendecomposition mid-training** in place of the tracked frame.
+- **Re-polaring the moment before the lift.** Trades target for source at the
+  held step and fails at twice the step: noise planes get full length.
+- **Rescaling caution by `numel / kept`.** A uniform lr multiplier on LFM, and
+  worse source at equal target.
