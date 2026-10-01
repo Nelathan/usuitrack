@@ -43,7 +43,6 @@ class PreparedGrad:
     param: Tensor
     projector: SubspaceProjector
     projected_grad: Tensor
-    original_shape: tuple[int, ...]
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
 
@@ -54,7 +53,6 @@ class MatrixUpdate:
 
     param: Tensor
     projector: SubspaceProjector
-    original_shape: tuple[int, ...]
     # `polar(projected grad)` -- see `_orthogonalized_directions`.
     direction: Tensor
     # Held until `_integrate_step` for `CAUTIOUS`'s sign reference; the prepared
@@ -369,10 +367,11 @@ class UsuiTrack(Optimizer):
             ``lr`` times this; leaving ``lr`` out keeps the read exact across a
             schedule, which a mean over a logging window would otherwise smear.
             It is the update before rounding -- the stochastic-rounding walk is
-            not in it -- so it is the step the optimizer chose. A white moment
-            populating all ``r`` planes sits at ``w aspect sqrt(r) / ||W||``,
-            ``w = sqrt((1-beta)/(1+beta))``; fewer populated planes sit below it,
-            a coherent moment above it.
+            not in it -- so it is the step the optimizer chose. It is the
+            agreement the step carried, times caution's share: a white moment
+            populating all ``r`` planes sits at ``w = sqrt((1-beta)/(1+beta))``
+            before the mask, fewer populated planes below it, a coherent moment
+            above it, a held direction at one.
         ``caution_kept``, ``caution_kept/<role>``
             Fraction of frame coordinates the cautious mask keeps, averaged over
             matrices, fleet-wide and per ``diagnostic_roles`` class. Without a
@@ -596,7 +595,6 @@ class UsuiTrack(Optimizer):
             MatrixUpdate(
                 param=entry.param,
                 projector=entry.projector,
-                original_shape=entry.original_shape,
                 direction=direction.float(),
                 projected_grad=entry.projected_grad,
                 projected_grad_norm=entry.projected_grad.float().norm(),
@@ -648,7 +646,6 @@ class UsuiTrack(Optimizer):
             param=p,
             projector=projector,
             projected_grad=projected_grad,
-            original_shape=tuple(p.shape),
             oja_tangent=None,
             raw_grad_norm=raw_grad_norm,
         )
@@ -680,7 +677,6 @@ class UsuiTrack(Optimizer):
             param=p,
             projector=projector,
             projected_grad=projected_grad,
-            original_shape=tuple(p.shape),
             oja_tangent=oja_tangent,
             raw_grad_norm=raw_grad_norm,
         )
@@ -826,34 +822,26 @@ class UsuiTrack(Optimizer):
         fifteenth of the gradient still took a full-sized step.
         """
 
-        return self._bucketed_polar(
-            [entry.projected_grad for entry in prepared],
-            [entry.original_shape for entry in prepared],
-        )
+        return self._bucketed_polar([entry.projected_grad for entry in prepared])
 
-    def _bucketed_polar(self, tensors: list[Tensor], shapes: list[tuple[int, ...]]) -> list[Tensor]:
+    def _bucketed_polar(self, tensors: list[Tensor]) -> list[Tensor]:
         """One Newton-Schulz call per group of entries sharing shape and scale.
 
-        Keyed on the projected shape (torch.stack's actual requirement) and the
-        scale, not the original parameter shape that scale is computed from.
-        Several original shapes can share a scale -- `_muon_aspect_scale` clamps
-        to 1.0 for every matrix tracked on its wider side, so a fleet of
-        differently-shaped `w2`-like matrices collapses into one bucket. The
-        scale each entry receives is exact, the same float it would have gotten
-        alone; the orthogonalized direction is not bitwise identical to running
-        the matrix solo, at the same ulp-level float tolerance every other
-        batched-vs-solo comparison in this optimizer already carries. The scale
-        is a per-matrix constant, so applying it here and averaging afterwards is
-        the same magnitude convention as applying it last.
+        Keyed on the projected shape, torch.stack's actual requirement, which
+        also fixes the scale: differently-shaped parameters whose projections
+        agree share one call. The orthogonalized direction is not bitwise
+        identical to running the matrix solo, at the same ulp-level float
+        tolerance every other batched-vs-solo comparison in this optimizer
+        already carries.
         """
 
         buckets: dict[tuple, list[int]] = {}
-        for index, (tensor, shape) in enumerate(zip(tensors, shapes, strict=True)):
-            key = (tuple(tensor.shape), UsuiTrack._muon_aspect_scale(shape))
-            buckets.setdefault(key, []).append(index)
+        for index, tensor in enumerate(tensors):
+            buckets.setdefault(tuple(tensor.shape), []).append(index)
 
         mapped: list[Tensor | None] = [None] * len(tensors)
-        for (_projected_shape, scale), indices in buckets.items():
+        for projected_shape, indices in buckets.items():
+            scale = UsuiTrack._unit_direction_scale(projected_shape)
             directions = self._orthogonalize_bucket([tensors[index] for index in indices], scale)
             for index, direction in zip(indices, directions, strict=True):
                 mapped[index] = direction
@@ -1291,12 +1279,22 @@ class UsuiTrack(Optimizer):
         return (group["matrix_step"] + 1) % group["basis_update_interval"] == 0
 
     def _apply_matrix_update(self, entry: MatrixUpdate, update_hat: Tensor, group: dict) -> None:
+        """Lift the step and scale it by the weight's own norm (SPEC step 8).
+
+        `update_hat` has norm at most one -- unit directions, averaged, masked --
+        and the lift is an isometry, so `||U|| / ||W||` is `lr` times the
+        agreement: `lr` is the relative change per step of a fully agreed
+        direction, in every module, whatever its shape, rank or size.
+        """
+
         param = entry.param
         stochastic = self.stochastic_rounding and wants_stochastic_rounding(param)
         decay = 1.0 - group["lr"] * group["weight_decay"] if group["weight_decay"] else None
+        # Before decay: the step is relative to the weight this step started from.
+        weight_norm = torch.linalg.vector_norm(param, dtype=torch.float32)
 
         if not stochastic:
-            update = entry.projector.project_back(update_hat).to(dtype=param.dtype)
+            update = (entry.projector.project_back(update_hat.float()) * weight_norm).to(dtype=param.dtype)
             self._record_update_norm(param, update, group["lr"])
             if decay is not None:
                 param.mul_(decay)
@@ -1311,7 +1309,7 @@ class UsuiTrack(Optimizer):
         work = param.float()
         if decay is not None:
             work.mul_(decay)
-        update = entry.projector.project_back(update_hat.float())
+        update = entry.projector.project_back(update_hat.float()) * weight_norm
         self._record_update_norm(param, update, group["lr"])
         work.add_(update, alpha=-group["lr"])
         copy_stochastic_(param, work)
@@ -1353,29 +1351,25 @@ class UsuiTrack(Optimizer):
                 state.pop("projected_exp_avg", None)
 
     @staticmethod
-    def _muon_aspect_scale(original_shape: tuple[int, ...]) -> float:
-        """Muon's aspect factor, read from the parameter the update will land on.
+    def _unit_direction_scale(projected_shape: tuple[int, ...]) -> float:
+        """`1/sqrt(r)`: the polar factor of a `[d, r]` projection has norm `sqrt(r)`.
 
-        In Muon, which orthogonalizes the full `[m, n]` update, this makes
-        `||U||_F == sqrt(m)` whichever way the matrix is stored. Here it
-        multiplies the projected moment's polar factor instead, `[d, r]` rather
-        than `[m, n]`, so the guarantee becomes `||U||_F == sqrt(m) *
-        sqrt(r/min(m,n))`. Measured against a unit scale and a rank-compensating
-        one at matched effective step, this rule still wins both eval heads --
-        see ARCHIVE.md, "the Muon aspect factor is not double duty".
+        Every direction the moment averages is then a unit, so the moment's norm
+        is the agreement between steps and nothing else -- no shape, no rank.
+        The step's size per module is set where it lands, against `||W||`
+        (`_apply_matrix_update`). `r` is the short side: the rank cap keeps it
+        at most half the parameter's smaller dimension, below `d`.
         """
 
-        rows = original_shape[0]
-        cols = math.prod(original_shape[1:])
-        return math.sqrt(max(1.0, rows / cols))
+        return 1.0 / math.sqrt(min(projected_shape[-2:]))
 
     @staticmethod
     def _orthogonalize_update(update: Tensor, scale: float) -> Tensor:
-        """Direction from the balanced polar map, magnitude from the aspect scale.
+        """Direction from the balanced polar map, scaled to unit Frobenius norm.
 
         The only implementation: `torch.compile` wraps this function, so the
         compiled and eager paths cannot disagree about what an update is. The
-        scale arrives as a number because it is a pure function of the parameter
+        scale arrives as a number because it is a pure function of the projected
         shape, which keeps integer arithmetic out of the graph and leaves this
         with one tensor operation and one multiply.
         """
@@ -1407,7 +1401,7 @@ class UsuiTrack(Optimizer):
 
         Both are reimplemented from the methods; neither is a runtime dependency.
         Square input needs no balancing and goes straight to the polar map.
-        UsuiTrack owns momentum, LR, weight decay, and the aspect scale.
+        UsuiTrack owns momentum, LR, weight decay, and the step's size.
         """
 
         if update.ndim < 2:

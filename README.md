@@ -169,10 +169,11 @@ a leverage-balancing row rescale
 Research), then a Newton-Schulz polar map that does the orthogonalizing, using
 the per-step-tuned quintic schedule from the Muon lineage (see `docs/SPEC.md`
 step 7 for provenance). The polar map runs on each step's projected gradient,
-before the moment averages it. Magnitude comes from Muon's
-aspect factor on the original parameter shape -- which enforces a
-storage-invariant update norm at full rank and, under a rank-`r` projection,
-leaves a `sqrt(r/min(m,n))` residual instead; see `docs/SPEC.md` step 8.
+before the moment averages it. Magnitude is relative to the weight it lands
+on: `lr` is the fraction of `||W||` a matrix moves per step when every step
+agrees, the same in every module whatever its shape or rank (LAMB's trust
+ratio), and the moment's agreement scales it down from there; see
+`docs/SPEC.md` step 8.
 Before the lift, the step drops every coordinate where the moment's sign
 contradicts this batch's gradient (a cautious update, in frame coordinates), so
 each step descends on the gradient it saw and a matrix the batch disputes more

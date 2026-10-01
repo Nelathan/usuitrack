@@ -42,8 +42,9 @@ Rank is not configured per matrix. One model-wide `rank_fraction` `c`
 
 $$r=\min\!\left(\max\!\left(1,\ \operatorname{round}(c\sqrt{mn})\right),\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
 
-The rank sets both the subspace and, through the polar factor's `sqrt(r)` norm
-(step 8), the matrix's share of the step. On LFM the rule matches or beats a
+The rank sets the subspace, not the step: the step is sized against the
+weight's own norm (step 8), so `rank_fraction` decides which directions a matrix
+moves in and never how far. On LFM the rule matches or beats a
 per-role rank sized from measured live planes, with no measurement of its own
 (`FACTS.md`, "Rank is a fraction of the matrix's size"). Matrices of one shape
 share one rank, so they batch.
@@ -108,10 +109,10 @@ raw gradient G
   -> release full gradient; retain rank-sized pending work
   -> Aurora leverage balance (normalization)
   -> Newton-Schulz polar map (orthogonalization)
-  -> Muon aspect scale, read from the parameter shape
+  -> unit scale 1/sqrt(r)
   -> projected EMA M of the orthogonalized direction
   -> cautious mask against Z (step copy only)
-  -> lift through the held frame Q
+  -> lift through the held frame Q, scaled by ||W||_F
   -> parameter update
   -> exact Oja frame move
   -> rotate M by the stored-frame overlap; commit it once
@@ -416,10 +417,8 @@ k    a         b         c
 
 The result `O_t` is an approximate leverage-balanced polar direction, not an
 exact SVD polar factor: at five iterations its orthogonality residual is ~1e-2.
-Its Frobenius norm is constant per matrix, `sqrt(r)` times the aspect scale,
-which is what makes `||M||/||O||` a pure agreement read. The scale is a
-per-matrix constant and commutes with the average, so applying it here is the
-same magnitude convention as applying it last.
+Its polar factor has norm `sqrt(r)`; scaled by `1/sqrt(r)`, every direction is
+a unit, which is what makes `||M||` a pure agreement read.
 
 **Decision (projected balancing):** Aurora's balancing chooses direction inside
 the retained update space. UsuiTrack, not Aurora, owns momentum, basis motion,
@@ -427,32 +426,35 @@ scale, and LR.
 
 ### 8. Scale, lift, and update
 
-The aspect scale uses the original parameter shape, not the projected shape:
+The step is sized against the weight it lands on. `M_t` averages unit
+directions and the lift is an isometry, so
 
-$$\widehat U_t=O_t\sqrt{\max(1,m/n)},
-U_t=\Lambda_{Q_{t+}}(\widehat U_t).$$
+$$U_t=\|W_{t-1}\|_F\,\Lambda_{Q_{t+}}(\widetilde M_t),\qquad
+\frac{\|U_t\|_F}{\|W_{t-1}\|_F}=\|\widetilde M_t\|_F\le 1,$$
 
-**What this factor guarantees.** In Muon it enforces `||U||_F = sqrt(m)`
-whichever way the weight is stored, because the orthogonalized object there has
-the parameter's own two dimensions. Here the orthogonalized object is
-`Z:[d,r]`, whose polar factor has norm `sqrt(r)`, so a single step would give
+with `~M_t` the masked moment below. The learning rate is the relative change
+per step of a direction every step agreed on -- one unit in every module,
+whatever its shape, rank or size: LAMB's trust ratio (You et al. 2019, arXiv
+1904.00962), taken against a unit direction rather than the update's own norm.
 
-$$\|U_t\|_F=\sqrt{m}\,\sqrt{r/\min(m,n)}.$$
+What lands below that is the agreement, and it is the only per-module
+difference in step size: a matrix whose steps contest each other moves less,
+the agreement-as-magnitude rule of step 5. On LFM the agreement sits at the
+white floor `w`, 0.23 at `beta = 0.9` and 0.10 at `0.98`, stable across a 4.4x
+change in learning rate, since it is a property of the gradients rather than of
+the step; caution removes a further 23% of the norm at `0.98`. A learning rate
+that matches another configuration's `update_to_param_ratio` divides by both.
 
-What lands is `M_t`, the average of those directions, so the delivered norm is
-that bound times the agreement `||M||/||O||` -- the white floor `w` on LFM,
-0.23 at `beta = 0.9` and 0.10 at `0.98`, stable across a 4.4x change in learning
-rate, since it is a property of the gradients rather than of the step. Caution
-then removes a further 23% of the norm on LFM at `0.98`. A learning rate that matches another
-configuration's `update_to_param_ratio` therefore has to divide by it.
+**Why the weight's norm and not its shape.** A scale read from shape -- Muon's
+`sqrt(max(1, m/n))`, or the polar factor's own `sqrt(r)` -- fixes the update's
+norm whatever the weight's, so the update's RMS per element grows as the matrix
+shrinks: the module with fewest parameters takes the largest relative step. In
+a diffusion transformer those are the input and output projections, the
+bottlenecks the rank cap exists for (above). Against `||W||`, the update's RMS
+is a fixed fraction of the weight's own.
 
-The invariant holds at `r = min(m,n)` and is attenuated by `sqrt(r/min(m,n))`
-below it -- a factor that varies with rank and with `min(m,n)`. Both are
-deliberate: the step scales with the number of directions the gradient
-demonstrably supports. Measured against a unit scale and a rank-compensating one
-at matched effective step, this rule wins both eval heads; see `ARCHIVE.md`,
-"the Muon aspect factor is not double duty". The rank coupling does mean a
-change of `rank_fraction` moves the step as well as the subspace.
+**Limit.** A matrix with `||W|| = 0` never moves. A zero-initialized matrix
+needs a non-zero init or the fallback optimizer.
 
 **Caution.** Before the lift, the step's copy of `M_t` is masked wherever its
 sign disagrees with this step's projected gradient `Z_t` (Liang et al. 2024,
@@ -623,7 +625,7 @@ against a long quiet interval reads as zero.
 | `grad_moment_cosine` | this step's direction against the moment as it stood *before* the blend, reconstructed so the reading is not self-referential. Read it as an overshoot meter: positive means the step under-travels and the next gradient still points where the last one did, negative means it overshoots and the gradient has flipped behind it. Zero is critically damped, which makes it a learning-rate read -- the LR that zeroes it beat a 2.2x hotter one on both eval heads |
 | `caution_kept` | fraction of frame coordinates the cautious mask keeps, averaged over matrices: where the moment's sign agrees with this step's projected gradient. `caution_kept/<role>` is the same per `diagnostic_roles` class; without a rescale, its spread across roles is the step the mask redistributes |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
-| `step_gain/<role>` | per role class, for the matrices `diagnostic_roles` labels (a `{param: role}` map the caller sets, since only it knows names): the class's per-step `||U||_F` summed in squares over its matrices, against the class's current `||W||_F`. The relative step is `lr` times it; without `lr` the read stays exact across a schedule. The update before rounding, so the bf16 stochastic-rounding walk is not in it. A white moment populating all `r` planes sits at `w aspect sqrt(r)/||W||` with `w = sqrt((1-beta)/(1+beta))`; fewer populated planes sit below it, a coherent moment above it |
+| `step_gain/<role>` | per role class, for the matrices `diagnostic_roles` labels (a `{param: role}` map the caller sets, since only it knows names): the class's per-step `||U||_F` summed in squares over its matrices, against the class's current `||W||_F`. The relative step is `lr` times it; without `lr` the read stays exact across a schedule. The update before rounding, so the bf16 stochastic-rounding walk is not in it. It is the masked moment's norm, the agreement the step carried (step 8): a white moment populating all `r` planes sits at `w = sqrt((1-beta)/(1+beta))` before the mask, fewer populated planes below it, a coherent moment above it, a held direction at one |
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
 | `transport_lag` | net distance a sampled frame covered over `diagnostics_lag_interval` basis updates, same unit as the speed. Also the projected moment's smear: set the interval to `1/(1-beta)` and it reads how far the moment's own history has drifted from the coordinates it was accumulated in |
 | `transport_curve` | `1 - lag / path`: the fraction of that window's travel which cancelled. Zero is a straight drift, approaching one is a frame churning in place |
@@ -685,9 +687,10 @@ These choices define the current design; they are redesignable.
    makes `||M||` an agreement read the step size follows. Measured loss-neutral
    against averaging first; it is kept for the invariance and the observability,
    not for a loss delta.
-8. **Balanced polar direction plus a parameter-shape aspect scale:** direction
-   belongs to projected geometry; scale remains tied to parameter geometry, with
-   the invariant that justified it holding only at full rank (see step 8).
+8. **Balanced polar direction, step relative to the weight:** direction belongs
+   to projected geometry; size belongs to the weight it lands on, so `lr` is one
+   relative unit across the fleet and agreement is the only per-module
+   difference (see step 8).
 9. **Separate AdamW fallback:** non-matrix tensors remain trainable under a
    separate optimizer, with their full state exposed rather than hidden in the
    matrix claim.
@@ -700,6 +703,7 @@ These choices define the current design; they are redesignable.
 | transpose problem and swap left/right | transposed projected and ambient update |
 | Oja covariance action lies inside the current subspace | zero frame motion |
 | Oja tangent is rank-deficient | zero singular planes remain fixed |
-| full rank | projection/lift loses no component; balancing can still alter direction; the aspect scale recovers `||U||_F = sqrt(m)` |
+| full rank | projection/lift loses no component; balancing can still alter direction |
+| any shape, rank or weight scale, every step agreeing | `||U||_F / ||W||_F = 1`, so the relative step is `alpha` |
 | gradient rescaling below raw clipping and away from epsilon floors | Rayleigh-normalized Oja tangent unchanged; pre-balancing magnitude follows the stated conditioning |
 | geodesic frame rotation | stored moment coordinates and singular values unchanged, up to the stored-frame rotation correction |

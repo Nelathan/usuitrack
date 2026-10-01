@@ -250,13 +250,14 @@ def test_the_moment_integrates_orthogonalized_directions():
 
     state = optimizer.state[weight]
     basis = state["basis"]
-    direction = UsuiTrack._orthogonalize_update(gradient @ basis.mT, UsuiTrack._muon_aspect_scale((ROWS, COLS)))
+    projected = gradient @ basis.mT
+    direction = UsuiTrack._orthogonalize_update(projected, UsuiTrack._unit_direction_scale(tuple(projected.shape)))
 
-    torch.testing.assert_close(state["projected_exp_avg"].float(), 0.1 * direction, atol=1e-3, rtol=0)
+    torch.testing.assert_close(state["projected_exp_avg"].float(), 0.1 * direction, atol=1e-4, rtol=0)
     # The frame does not move on the step that fits it, so the update lifts
-    # through the same basis the moment lives in.
+    # through the same basis the moment lives in, sized by the weight it lands on.
     expected_step = (0.1 * direction) @ basis
-    torch.testing.assert_close((before - weight.detach()) / 0.1, expected_step, atol=1e-3, rtol=0)
+    torch.testing.assert_close((before - weight.detach()) / (0.1 * before.norm()), expected_step, atol=1e-4, rtol=0)
 
 
 def test_a_contested_direction_takes_a_smaller_step_than_an_agreed_one():
@@ -768,58 +769,53 @@ def test_compiled_and_eager_kernels_produce_the_same_update():
     torch.testing.assert_close(trained[0], trained[1], rtol=1e-5, atol=1e-6)
 
 
-def test_the_aspect_scale_is_muon_at_full_rank_and_attenuated_below_it():
-    """What the scale still guarantees, and what it stopped guaranteeing.
+def test_lr_is_the_relative_step_of_an_agreed_direction_in_every_module(monkeypatch):
+    """The step's unit (SPEC step 8): `||dW|| / ||W||` is `lr` times agreement.
 
-    Muon's factor exists to make the orthogonalized update's Frobenius norm come
-    out at `sqrt(rows)` however the matrix is stored -- transposing a weight must
-    not change how hard it is pushed. That holds only while the orthogonalized
-    object has the parameter's own two dimensions. Ours is the projected moment,
-    `[d, r]`, whose polar factor has norm `sqrt(r)`, so the product carries a
-    residual `sqrt(r / min(m, n))` that varies across the fleet with `min(m, n)`
-    and not with anything anyone chose.
-
-    Pinned here because the term reads as settled and is not: a future arm that
-    changes it should have to change this test and say why.
+    Shape, rank and the weight's size used to set how hard a module was pushed
+    -- Muon's aspect factor and the polar factor's `sqrt(r)` -- which on Anima
+    spread one `lr` 80x across roles and gave the network's two narrowest
+    matrices its largest relative steps. Now none of them enters: one step from
+    a zero moment carries agreement `1 - beta` exactly, so every module, tall,
+    wide or scaled, moves by `lr (1 - beta)` of its own norm. The polar map's
+    singular values are not exactly one, hence a tolerance on the shapes; the
+    weight's scale enters exactly.
     """
 
-    tall, wide = (4608, 1024), (1024, 4608)
-    assert UsuiTrack._muon_aspect_scale(tall) == pytest.approx(math.sqrt(4.5))
-    # Clamped at one below the diagonal, which is what makes the two orientations
-    # differ by the aspect ratio rather than agree.
-    assert UsuiTrack._muon_aspect_scale(wide) == 1.0
+    import usuitrack.optimizer as optimizer_module
 
-    # At full rank the invariant holds: `sqrt(min(m,n)) * scale == sqrt(rows)`.
-    for shape in (tall, wide):
-        full_rank_norm = math.sqrt(min(shape)) * UsuiTrack._muon_aspect_scale(shape)
-        assert full_rank_norm == pytest.approx(math.sqrt(shape[0]))
+    monkeypatch.setattr(optimizer_module, "CAUTIOUS", False)
+    lr, beta = 1e-2, 0.9
 
-    # Below it the norm is short by `sqrt(r / min(m, n))`, and that shortfall is
-    # a function of the matrix's shape -- the spread nobody picked.
-    rank = 128
-    attenuation = [math.sqrt(rank / min(shape)) for shape in ((4096, 1024), (4096, 512))]
-    assert attenuation[0] == pytest.approx(0.3536, abs=1e-4)
-    assert attenuation[1] == pytest.approx(0.5, abs=1e-4)
+    def relative_step(shape: tuple[int, int], weight_scale: float) -> float:
+        torch.manual_seed(0)
+        weight = torch.nn.Parameter(weight_scale * torch.randn(*shape))
+        before = weight.detach().clone()
+        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, beta=beta, weight_decay=0.0)
+        weight.grad = torch.randn(*shape)
+        optimizer.step()
+        return ((before - weight.detach()).norm() / before.norm()).item()
+
+    reference = relative_step((ROWS, COLS), 1.0)
+    assert relative_step((ROWS, COLS), 30.0) == pytest.approx(reference, rel=1e-5)
+    for shape in ((ROWS, COLS), (COLS, ROWS), (512, 32), (32, 512)):
+        assert relative_step(shape, 1.0) == pytest.approx(lr * (1.0 - beta), rel=0.1)
 
 
-def test_matrices_sharing_a_scale_but_not_a_shape_still_bucket_correctly():
-    """The bucketing win: keying on `(projected shape, scale)` instead of
-    `(projected shape, original shape)` lets differently-shaped matrices that
-    happen to share a scale batch into one Newton-Schulz call. `projected_exp_avg`
-    for a right-tracked matrix is `(rows, r)` and never encodes `cols`, so two
-    matrices with equal `rows` but different `cols` were split by the old key
-    even though their moments already stack; here they also share a scale
-    (`rows < cols` for both, so `_muon_aspect_scale` clamps to `1.0`) and so now
-    land in one bucket. Must train identically whether they share an optimizer
-    or not -- the grouping is bookkeeping, not maths.
+def test_matrices_sharing_a_projected_shape_but_not_a_shape_still_bucket_correctly():
+    """The bucketing win: keying on the projected shape lets differently-shaped
+    matrices batch into one Newton-Schulz call. `projected_exp_avg` for a
+    right-tracked matrix is `(rows, r)` and never encodes `cols`, so two matrices
+    with equal `rows` and equal rank land in one bucket. Must train identically
+    whether they share an optimizer or not -- the grouping is bookkeeping, not
+    maths.
     """
 
     torch.manual_seed(5)
-    shapes = [(64, 512), (64, 768)]
+    shapes = [(64, 512), (64, 520)]
+    assert len({SubspaceProjector(rank_fraction=RANK_FRACTION).effective_rank(torch.empty(*shape)) for shape in shapes}) == 1
     base = {shape: torch.randn(*shape) for shape in shapes}
     gradients = {shape: [torch.randn(*shape) for _ in range(6)] for shape in shapes}
-    for shape in shapes:
-        assert UsuiTrack._muon_aspect_scale(shape) == 1.0
 
     together = {shape: torch.nn.Parameter(base[shape].clone()) for shape in shapes}
     optimizer = UsuiTrack(list(together.values()), lr=0.01, rank_fraction=RANK_FRACTION, side="right")
