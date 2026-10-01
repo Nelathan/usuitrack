@@ -426,6 +426,26 @@ def test_core_diagnostics_read_sane_values():
     assert diagnostics["nonfinite_grads"] == 0.0
 
 
+def test_caution_kept_per_role_partitions_the_fleet_read():
+    """Each role's kept fraction is the mean over its own matrices, so the
+    fleet read is their matrix-weighted mean and every role is a fraction."""
+
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    lone = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer.add_param_group({"params": [lone]})
+    all_params = [*params, lone]
+    _run(all_params, optimizer, 3)
+    optimizer.diagnostic_roles = {params[0]: "pair", params[1]: "pair", lone: "lone"}
+    optimizer.diagnostics = "core"
+    _run(all_params, optimizer, 1)
+
+    diagnostics = optimizer.pop_diagnostics()
+    pair, single = diagnostics["caution_kept/pair"], diagnostics["caution_kept/lone"]
+    assert 0.0 < pair < 1.0 and 0.0 < single < 1.0
+    assert diagnostics["caution_kept"] == pytest.approx((2 * pair + single) / 3, rel=1e-6)
+
+
 def test_step_gain_reads_each_role_s_weight_change_per_unit_lr():
     """In fp32 the parameter moves by exactly `lr U`, so gain times lr must equal
     the realised change of each class against its own norm -- and a class of two

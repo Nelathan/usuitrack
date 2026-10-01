@@ -373,6 +373,11 @@ class UsuiTrack(Optimizer):
             populating all ``r`` planes sits at ``w aspect sqrt(r) / ||W||``,
             ``w = sqrt((1-beta)/(1+beta))``; fewer populated planes sit below it,
             a coherent moment above it.
+        ``caution_kept``, ``caution_kept/<role>``
+            Fraction of frame coordinates the cautious mask keeps, averaged over
+            matrices, fleet-wide and per ``diagnostic_roles`` class. Without a
+            rescale, a role kept less steps less, so a spread across roles is
+            the step the mask redistributes.
         ``grad_moment_cosine``
             Agreement between this batch's projected gradient and the moment as
             it stood before this step -- does the batch confirm accumulated
@@ -886,16 +891,22 @@ class UsuiTrack(Optimizer):
         for entry in entries:
             update_hat = entry.projected_exp_avg
             if CAUTIOUS:
-                update_hat = self._cautious(update_hat, entry.projected_grad, diagnostics)
+                role = self.diagnostic_roles.get(entry.param)
+                update_hat = self._cautious(update_hat, entry.projected_grad, diagnostics, role)
             self._apply_matrix_update(entry, update_hat, group)
 
     @staticmethod
-    def _cautious(update_hat: Tensor, projected_grad: Tensor, diagnostics: DiagnosticsAccumulator | None) -> Tensor:
+    def _cautious(
+        update_hat: Tensor, projected_grad: Tensor, diagnostics: DiagnosticsAccumulator | None, role: str | None
+    ) -> Tensor:
         """Zero the frame coordinates the current gradient contradicts (SPEC step 8)."""
 
         agree = ~(update_hat.signbit() ^ projected_grad.signbit())
         if diagnostics is not None:
-            diagnostics.add("caution_kept", agree.sum() / agree.numel())
+            kept = agree.sum() / agree.numel()
+            diagnostics.add("caution_kept", kept)
+            if role is not None:
+                diagnostics.add(f"caution_kept/{role}", kept)
         return update_hat * agree
 
     def _orthogonalize_bucket(self, tensors: list[Tensor], scale: float) -> list[Tensor]:
