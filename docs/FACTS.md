@@ -593,6 +593,28 @@ Equal tokens (bs16 x 1k against bs8 x 2k), `beta 0.98`, caution rescaled,
 Runs `b9/b95/b99-caut-held-1k`, `b098-caut-bs16-1k`, `b098-caut-bs8-2k*`,
 `b099-caut-bs8-2k`, `b098-caut-norescale-*`, 2026-10-01.
 
+### The step relative to the weight: loss-neutral where agreement is uniform
+
+`PLAN.md` D5's law (`SPEC.md` step 8) against the aspect rule, 1k, bs16,
+`beta 0.98`, caution:
+
+| arm | lr | fleet step | target | source |
+|---|---:|---:|---:|---:|
+| aspect rule | `7e-4` | 4.8e-5 | 1.659416 | 3.065650 |
+| law, agreement inside | `6.2e-4` | 4.8e-5 | 1.659546 | 3.065264 |
+| law, inside, 1.4x | `8.7e-4` | 6.8e-5 | 1.659409 | 3.080202 |
+| law, agreement outside (unit step) | `4.8e-5` | 4.8e-5 | 1.660761 | 3.060560 |
+
+At matched step the law moves neither head beyond the replicate spread, and it
+flattens the per-role step from 2.1x (0.046-0.095) to 1.02x (0.077-0.078). The
+lr that matches the aspect rule's step is `step / (agreement x caution)`, here
+`4.8e-5 / 0.077`, exactly. Above it the familiar `0.98` trade returns: the same
+target, source 0.015 worse. Outside and inside cannot separate here: every LFM
+role carries the same agreement (`caution_kept` 0.550-0.557), so outside is
+inside at another lr; they can differ only where agreement varies by role, which
+on Anima is AdaLN. Runs `d5-inside-6.2e-4`, `d5-inside-8.7e-4`,
+`d5-outside-4.8e-5`, 2026-10-01.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

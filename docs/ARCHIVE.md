@@ -159,6 +159,10 @@ its ballast in the update subspace.
 
 ## CLOSED -- the Muon aspect factor is not double duty with the rank table
 
+*Superseded 2026-10-01 on branch `trust-ratio`:* the aspect factor is gone; the
+step is sized against `||W||` (`SPEC.md` step 8, `PLAN.md` D5). This closure
+compared scale rules read from shape; it did not test one read from the weight.
+
 Three scale rules at matched effective step (`update_to_param_ratio` ~`1.64e-4`),
 LFM bs16, 300 steps: shipped `muon` `sqrt(max(1, rows/cols))` reads
 `1.7062 / 3.0424`, `unit` `1.0` reads `1.7095 / 3.0509`, `fullrank`

@@ -134,8 +134,10 @@ How it is settled, criteria fixed before the arms report:
 - **LFM veto** (1k, bs16, beta 0.98): inside at matched fleet step (`lr 6.2e-4`,
   from the standard arm's `4.8e-5` over agreement x caution ~0.077) and at 1.4x;
   outside at matched step (`4.8e-5`). LFM's spread was only 2.1x, so the law
-  should barely move it: losing beyond the noise floor rules it out.
-- **Anima arm** at run 20's bulk relative step (`lr ~3.2e-4`). Passes on
+  should barely move it: losing beyond the noise floor rules it out. **Passed**
+  (`FACTS.md`, "The step relative to the weight"); outside and inside do not
+  separate on LFM, where agreement is uniform across roles.
+- **Anima arm** at run 20's bulk relative step (`lr ~3.2e-4`), run 21. Passes on
   mechanism if no role's `caution_kept` falls toward 0.5 and fleet
   `grad_moment_cosine` stops leaning negative; samples veto (colour,
   composition, text), they do not rank.
