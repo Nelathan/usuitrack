@@ -268,6 +268,29 @@ GiB). `nvidia-smi` reads reserved allocator cache, not use: 11.4 GB at 20
 steps, and the card is still near full -- a 570 MiB request failed once and
 succeeded on the allocator's retry.
 
+### Run 20 against run 18: what the fleet reads say about lr
+
+Run 20 (bs8, `beta 0.98`, caution, `lr 9e-4`) took a relative step of 2.0e-5
+per step, 1.67x run 18's 1.2e-5 at half the batch: its lr was derived from
+sensor run 19's step, never sample-judged, rather than from run 18's, which
+was. Fleet reads, run 20 against run 18:
+
+| read | run 18 | run 20, steps 200-1700 | run 20, last 50 steps (lr ~0.25x) |
+|---|---:|---:|---:|
+| `grad_moment_cosine` | +0.001 to +0.006 | -0.001 to -0.006 | +0.0027 |
+| `moment_persistence` | 0.001 | 0.000 | 0.0003 |
+| `tangent_concentration` | 0.881-0.888 | 0.892-0.907 | 0.895 |
+| `projected_grad_norm`, mean / max | 0.012-0.014 / 0.023 | 0.012-0.020 / 0.078 | 0.0125 / 0.020 |
+| `caution_kept` | | 0.533-0.535 | 0.534 |
+
+The higher grad norm is mostly the batch: half the batch predicts sqrt(2) x
+0.0125 = 0.0177. The negative cosine lean is the lr read -- the moment carrying
+the weights past where the next gradient wants them -- and it turned positive
+only in the anneal's last bucket, one bucket against a scatter of ~0.002. The
+user's read mid-run: lower loss, degraded samples, not broken. Run
+`anima_usuitrack_20_b098_caution_bs8` and `anima_usuitrack_18_bs16_rf010`,
+`loss_log.db`, 2026-10-01.
+
 ## LFM2.5-350M lane
 
 bs16 x seq1024, seed 1, 1k steps, broad-no-embeddings. Noise floors: target
@@ -445,6 +468,32 @@ plane in nine, not that the moment is low-rank. `transport_speed` follows it as
 `eta sqrt(live)`: 0.038 predicted and 0.037 measured on run 17, 0.013 and 0.014
 on run 18. Run `anima_usuitrack_19_sensor_lr2e4`, `loss_log.db`, 2026-09-29.
 
+Run 20 (`beta 0.98`, caution, bs8, `rank_fraction 0.025`, `lr 9e-4`; steps
+300-560) confirms the read at the new defaults and adds caution's share.
+`step_gain` per role against the white lift `w aspect sqrt(r) / ||W||`
+(`w = 0.100`), and its parts against one `attn1.to_q` (per-matrix `||W||` 20.6):
+
+| role | aspect | `sqrt(r)` | `1/||W||` | measured / white | `caution_kept` |
+|---|---:|---:|---:|---:|---:|
+| `patch_embed.proj` (2048x68, r 9) | 5.5x | 0.42x | 3.5x | 0.63 | 0.584 |
+| `proj_out` (64x2048, r 9) | 1x | 0.42x | 10.3x | 0.81 | 0.549 |
+| attention and ff, 14 roles | 1-2x | | | 0.72-0.77 | 0.53-0.55 |
+| AdaLN `linear_2` | | | | 0.31-0.32 | 0.516 |
+| AdaLN `linear_1` | | | | 0.28-0.31 | 0.52-0.53 |
+
+Per unit lr the two ends of the stream take 6.5x and 4.5x the bulk's relative
+step, and the weight norm, not the rank, is what puts them there: a 0.14M-
+parameter matrix has a small Frobenius norm, so a fixed-norm update is a large
+fraction of it (per element 12x the bulk's update RMS on `patch_embed`). Every
+non-AdaLN role sits at caution's 0.77 of white, LFM's own factor: the moment is
+a white average on this lane at `0.98` as at `0.9`, so `beta` bought no
+coherence and `lr w` only sets the size of the noise walk. The two instruments
+disagree on the ends: run 13's checkpoint increments were anti-correlated with
+net travel only there (cosine -0.062 and -0.016 against 0.001-0.004 for every
+other role, "bf16 stochastic rounding walks the weights" above), yet
+`caution_kept` puts `patch_embed` at the highest agreement of any role. Run
+`anima_usuitrack_20_b098_caution_bs8`, `loss_log.db`, base weights, 2026-10-01.
+
 ### Beta buys target at a held step and pays in source
 
 Standard arm at 1k (bs16, `rank_fraction` 0.1, seed 1, constant lr after 50
@@ -559,6 +608,7 @@ Runs `b9/b95/b99-caut-held-1k`, `b098-caut-bs16-1k`, `b098-caut-bs8-2k*`,
 | 16 `patch_equalized300` | run 15 + patch-equalized loss, no timestep weight | spectrum unchanged vs 15; samples moved less than 15 (C1 closed) |
 | 17 `eta040_300` | run 15 at `eta 0.04` | much faster first 100 steps, then level with 15; slightly rougher early samples that recover |
 | 18 `bs16_rf010` | real bs16, `rank_fraction` 0.1, AdaLN under UsuiTrack, no accumulation, `1e-4`, 960 steps = 5 epochs | first full success: stable, better step by step to the end; wants more lr, maybe more epochs |
+| 20 `b098_caution_bs8` | bs8, `beta 0.98`, caution, `rank_fraction` 0.025, `9e-4` (1.67x run 18's relative step), anneal last 10%, 1920 steps = 5 epochs | lower loss, degraded samples, not broken (user, mid-run); final verdict pending; lr too high by the fleet reads |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
