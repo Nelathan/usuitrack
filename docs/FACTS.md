@@ -271,7 +271,8 @@ succeeded on the allocator's retry.
 ## LFM2.5-350M lane
 
 bs16 x seq1024, seed 1, 1k steps, broad-no-embeddings. Noise floors: target
-`3e-4`, source `2e-3`.
+`3e-4`, source `2e-3` -- contradicted by a same-seed replicate at 1.6e-3 /
+5.6e-3 (below, "Caution: where it pays").
 
 | arm | target | source | `update_to_param_ratio` |
 |---|---:|---:|---:|
@@ -487,6 +488,61 @@ warmup steps); `update/param` is the fleet `update_to_param_ratio`:
 
 Frame reads (capture, live fraction 0.81-0.83, `transport_speed` 0.0386) do not
 move with `beta` or lr. Runs `d4_*_1k_s1`, `lfm_1k_d5_relstep`, 2026-09-29.
+
+### Caution: where it pays, and what its rescale was
+
+Same arm (bs16, 1k, seed 1), caution on, 2026-10-01. Rescaled arms carry the
+removed `numel / kept` factor; the release ships without it.
+
+| arm | update/param | kept | target | source |
+|---|---:|---:|---:|---:|
+| `beta 0.9`, `2e-4`, rescaled | 5.5e-5 | 0.624 | 1.67111 | 3.0292 |
+| `beta 0.95`, `2.9e-4`, rescaled | 5.7e-5 | 0.588 | 1.66352 | 3.0439 |
+| `beta 0.98`, `5e-4`, rescaled (replicate) | 6.2e-5 | 0.555 | 1.65896 | 3.0782 |
+| `beta 0.99`, `6.5e-4`, rescaled | 5.7e-5 | 0.539 | 1.66063 | 3.0965 |
+| `beta 0.98`, `1e-3`, no rescale | 6.8e-5 | 0.555 | 1.65901 | 3.0823 |
+| `beta 0.98`, `7e-4`, **no rescale** | 4.8e-5 | 0.555 | 1.65942 | **3.0657** |
+
+lr per `beta` is the held step, `2e-4 x 0.229 / w(beta)`.
+
+- `0.98` is caution's target optimum; source worsens monotonically with
+  `beta`, as without caution. The kept fraction falls with `beta` (0.62 to
+  0.54): a longer memory disagrees with the current batch more often.
+- Caution's gain grows with `beta` at a matched step. At 0.9 it sits on the
+  line between plain `2e-4` and `4e-4` (interpolated, not measured); at 0.98
+  plain at the same step (`7e-4`) is 0.006-0.007 worse on target.
+- The rescale was an lr multiplier and nothing else on LFM. Without it
+  `step_gain` is 0.552-0.556 of the rescaled value in all nine roles, i.e. the
+  kept fraction, uniform across roles; the masked step is 0.77 of the unmasked
+  norm. Without rescale `1e-3` repeats rescaled `5e-4`, and `7e-4` holds the
+  same target at 0.013-0.017 better source.
+- **Run-to-run spread is wider than the floor this file states.** The
+  rescaled `5e-4` arm repeated at identical config and seed reads 1.65896 /
+  3.0782 against 1.65734 / 3.0726 on 2026-09-29: 1.6e-3 on target, 5.6e-3 on
+  source. One pair, not a floor; differences under ~2e-3 target are not claims.
+
+### Batch is not interchangeable with beta
+
+Equal tokens (bs16 x 1k against bs8 x 2k), `beta 0.98`, caution rescaled,
+2026-10-01:
+
+| arm | update/param | target | source |
+|---|---:|---:|---:|
+| bs16, `5e-4` | 6.2e-5 | 1.65896 | 3.0782 |
+| bs8, `3.5e-4` (`sqrt(tokens)` rule) | 4.3e-5 | 1.67088 | 3.0473 |
+| bs8, `5e-4` (same lr) | 6.2e-5 | 1.67692 | 3.0692 |
+| bs8, `beta 0.99`, `4.6e-4` | 4.0e-5 | 1.67376 | 3.0635 |
+
+- bs8 loses 0.012 target at equal tokens. More lr makes it worse on both
+  losses, so the `sqrt(tokens)` rule held and bs8 was not under-stepped.
+- Raising `beta` to keep bs16's sample memory makes bs8 worse again. A batch
+  averages at one parameter point; the moment averages over points the
+  parameters have left, and pays that staleness.
+- Gradient norm reads ~8.5 at bs8 against ~6.2 at bs16 in every arm: batch
+  noise, not lr.
+
+Runs `b9/b95/b99-caut-held-1k`, `b098-caut-bs16-1k`, `b098-caut-bs8-2k*`,
+`b099-caut-bs8-2k`, `b098-caut-norescale-*`, 2026-10-01.
 
 ## Run ledger (Anima)
 
