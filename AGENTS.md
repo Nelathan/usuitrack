@@ -138,14 +138,16 @@ the stale fork beside it. Standard arm:
 
 ```bash
 uv run python experiments/llm_synth_smoke.py \
-  --max-steps 300 --batch-size 16 --eval-every 150 --wandb-log-every 25 \
-  --seed 1 --usuitrack-lr 2e-4 --beta 0.9 \
+  --max-steps 1000 --batch-size 16 --eval-every 500 --wandb-log-every 25 \
+  --seed 1 --usuitrack-lr 7e-4 --beta 0.98 \
   --basis-lag-diagnostic --basis-lag-interval 10 --no-final-sample \
   --wandb-run <name>
 ```
 
-`--rank-fraction` sets the optimizer's `rank_fraction` (default 0.1). Roughly 0.8 s/step at
-bs16 and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
+Every LFM table in `docs/FACTS.md` is at 1k steps; a shorter arm compares
+against nothing there. The harness's own `--beta` default is not the release's,
+so always pass it. `--rank-fraction` sets the optimizer's `rank_fraction`
+(default 0.1). Roughly 0.8 s/step at bs16 and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
 are the `usuitrack_final_val_loss` (target) and
 `usuitrack_final_retention_val_loss` (source) lines at the end of the log, plus
 the `usuitrack_last_logged_*` telemetry block.
@@ -215,7 +217,8 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
 - **LR is not anchored across batch changes.** Scale by `sqrt(tokens per step)`:
   at 1/16 the tokens, use 1/4 the LR. Relative comparisons within a sweep
   survive because all arms share it; the absolute losses do not transfer.
-- **Noise floors: `3e-4` on target, `2e-3` on source.** Below that, no claim.
+- **Noise floor: unsettled (`PLAN.md` D6).** A same-seed replicate differed by
+  `1.6e-3` on target and `5.6e-3` on source. Below that, no claim.
 
 ## Code style
 
