@@ -37,18 +37,27 @@ Not pushed.
 
 ## In flight
 
-Nothing is running. Run 20 is discussed before launch.
+**Run 20 is running**, launched 2026-10-01 ~13:50 from
+`ai-toolkit/config/anima_usuitrack_20_b098_caution_bs8.yaml` (gitignored): run
+18's config at bs8, `rank_fraction` 0.025, `lr 9e-4`, release defaults (the
+`beta: 0.9` pin is gone), warmup 50, cosine over the last 10% to 0.2x,
+`activation_offloading` off (plain checkpointing; fits past step 2 where the
+unnested bs16 arm OOMed). 1920 steps = 5 epochs, samples every 100, saves every
+384, ~5 s/step (0.64 s/sample against bs16-nested's 0.78), about 3 h plus
+sampling. Output `/mnt/luna/ai/output/anima_usuitrack_20_b098_caution_bs8`; log
+in the session scratchpad `run20.log`.
 
-## Run 20, before launch
+Read from `loss_log.db` (`metrics(step, key, value_real)`):
+`caution_kept/<role>` (new, usuitrack `Read caution_kept per role class`,
+ai-toolkit `8f2e624`), `step_gain/<role>`, `usuitrack/*`. Steps 1-5 read
+`caution_kept` 0.61 (AdaLN) to 0.75 (`patch_embed`), fleet 0.65 -- inside the
+moment's fill, not yet a read. Verdict on samples.
 
-- **Copying run 19's config carries `beta: 0.9` into `optimizer_params`**,
-  which overrides the new default. Drop it.
-- lr, derived and not measured on Anima: run 19 was bs16, `rank_fraction` 0.1,
-  `beta 0.9`, `2e-4`. Per unit lr, run 20's step is `0.5` (rank 0.025,
-  `sqrt(r)`) x `0.44` (`w` at 0.98) x `0.77` (the mask's norm on LFM) = 0.17 of
-  run 19's. Holding run 19's step at bs16 is 1.2e-3; the `sqrt(tokens)` rule
-  for bs8 gives 8.5e-4; LFM's no-rescale optimum sat ~10% above the held step,
-  so ~9e-4.
-- `usuitrack/caution_kept` is fleet-wide. Whether Anima's roles disagree with
-  the batch unequally -- the case where the missing rescale matters -- has no
-  per-role read.
+## Run 20's lr
+
+Per unit lr, run 20's step is `0.5` (rank 0.025, `sqrt(r)`) x `0.44` (`w` at
+0.98) x `0.77` (the mask's norm on LFM) = 0.17 of run 19's. Holding run 19's
+step (bs16, `2e-4`) is 1.2e-3; the `sqrt(tokens)` rule for bs8 gives 8.5e-4;
+LFM's no-rescale optimum sat ~10% above the held step, so 9e-4. Derived, not
+measured on Anima. Run 18's and 19's configs both pin `beta: 0.9`; any config
+copied from them must drop it.
