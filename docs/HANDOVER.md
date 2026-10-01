@@ -54,6 +54,9 @@ zero-norm matrix never moves; documented as a limit).
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`. Undo:
   `uv pip uninstall torchaudio`.
 - The lab venv must run with `uv run --no-sync`, or it rebuilds causal-conv1d.
+- **GPU power limit 198 W** (90% of the 220 W default), set via `pkexec
+  nvidia-smi -pl 198` at your request. Persistence mode is off, so it may revert
+  when the driver unloads. Undo: `pkexec nvidia-smi -pl 220`.
 - ai-toolkit and the lab import this working tree, so **they run whichever
   branch is checked out** -- `trust-ratio` right now.
 
@@ -67,24 +70,24 @@ sample-judged, instead of from run 18, which was; that is my error. Fleet
 the anneal's last bucket (`FACTS.md`, "Run 20 against run 18"). Ledger row
 says "verdict pending".
 
-## In flight: run 21, the law on Anima
+## Run 21 -- stopped at 1099, the law held
 
-Launched 2026-10-01 ~17:50 from `ai-toolkit/config/anima_usuitrack_21_trust_ratio.yaml`
-(gitignored): run 20's config, only name and `lr 3.2e-4` changed -- run 20's
-bulk relative step (2.4e-5) over attention's agreement x caution (0.075).
-Output `/mnt/luna/ai/output/anima_usuitrack_21_trust_ratio`, log
-`run21.log` in the session scratchpad. ~3 h.
+`anima_usuitrack_21_trust_ratio`: run 20 under the law at run 20's bulk step
+(`3.2e-4`). The distribution changed as designed (non-AdaLN roles within 1.1x,
+waists from 6.5x/4.5x to ~1x); fleet reads stayed identical to run 20's. Your
+read: many well-adapted samples, still many bugs, still too hot. Checkpoints
+384 and 768 kept; no final save.
 
-At steps 20-40 the law reads as designed: every non-AdaLN role at 0.061-0.068
-per unit lr (run 20: 0.017-0.175), `patch_embed` 0.97x the bulk (was 6.5x),
-`proj_out` 1.0x (was 4.5x), AdaLN 0.022-0.033, held at ~0.4x by its own
-agreement.
+## In flight: run 22, the law at a cooler step
 
-How it is judged (PLAN D5): no role's `caution_kept` falling toward 0.5, and
-fleet `grad_moment_cosine` not leaning negative as run 20's did; samples veto
-(colour, composition, text), they do not rank. Note this arm matches run 20's
-bulk step, which the fleet reads called too high -- it isolates the law, so a
-cosine lean that persists here is lr, not the law.
+`ai-toolkit/config/anima_usuitrack_22_trust_lr15e5.yaml` (gitignored): run
+21's config at `lr 1.5e-4` (your pick, between run 18's step scaled to bs8,
+1.1e-4, and unscaled, 1.6e-4), annealed over the whole last epoch
+(`decay_start_ratio 0.8`) to 10% (`min_lr_ratio 0.1`). Launched 2026-10-01
+~20:00 under the 198 W cap, ~4.4 s/step, ~2.5 h. Output
+`/mnt/luna/ai/output/anima_usuitrack_22_trust_lr15e5`, log `run22.log` in the
+session scratchpad. Rank stays at 0.025: under the law rank no longer moves the
+step, and a lower rank at fixed lr concentrates the same change in fewer planes.
 
 ## Next, in your order
 
