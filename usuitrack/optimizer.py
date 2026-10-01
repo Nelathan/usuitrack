@@ -27,13 +27,6 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 # SPEC.md, "The turn is constant".
 GEODESIC_STEPSIZE = 0.04
 
-# Control arm for the ortho-first integration: put the second polar map back, so
-# the moment contributes direction only and the step is restored to full size
-# however much the average cancelled. It isolates the spectral-fairness half of
-# ortho-first (which survives here) from the agreement-as-magnitude half (which
-# does not), and exists to be deleted with whichever arm loses.
-REORTHOGONALIZE_MOMENT = False
-
 # Experiment arm: cautious update (Liang et al. 2024, arXiv 2411.16085) in frame
 # coordinates. The lifted step is `s P M`, so `<U, G> = s <M, P^T G>`: masking
 # the moment's copy wherever its sign disagrees with the projected gradient
@@ -832,7 +825,6 @@ class UsuiTrack(Optimizer):
         to full size by a second polar map. Under the old order that restoration
         was unconditional, which is why a moment that had cancelled to a
         fifteenth of the gradient still took a full-sized step.
-        `REORTHOGONALIZE_MOMENT` puts it back as the control.
         """
 
         return self._bucketed_polar(
@@ -897,13 +889,8 @@ class UsuiTrack(Optimizer):
             entry.projected_exp_avg = moment
             self._record_projection_diagnostics(diagnostics, entry, moment, beta)
 
-        moments = [entry.projected_exp_avg for entry in entries]
-        update_hats = (
-            self._bucketed_polar(moments, [entry.original_shape for entry in entries])
-            if REORTHOGONALIZE_MOMENT
-            else moments
-        )
-        for entry, update_hat in zip(entries, update_hats, strict=True):
+        for entry in entries:
+            update_hat = entry.projected_exp_avg
             if CAUTIOUS:
                 update_hat = self._cautious(update_hat, entry.projected_grad, diagnostics)
             self._apply_matrix_update(entry, update_hat, group)
