@@ -139,7 +139,7 @@ the stale fork beside it. Standard arm:
 ```bash
 uv run python experiments/llm_synth_smoke.py \
   --max-steps 1000 --batch-size 16 --eval-every 500 --wandb-log-every 25 \
-  --seed 1 --usuitrack-lr 7e-4 --beta 0.98 \
+  --seed 1 --usuitrack-lr 6.2e-4 --beta 0.98 \
   --basis-lag-diagnostic --basis-lag-interval 10 --no-final-sample \
   --wandb-run <name>
 ```

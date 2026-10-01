@@ -57,7 +57,7 @@ embedding_params = {id(p) for m in model.modules() if isinstance(m, nn.Embedding
 matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
 other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
 
-matrix_opt = UsuiTrack(matrix_params, lr=7e-4)
+matrix_opt = UsuiTrack(matrix_params, lr=6e-4)
 other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
 
 loss = model(**batch).loss
@@ -73,7 +73,7 @@ it's consumed instead of holding the whole backward's gradients in memory at
 once:
 
 ```python
-matrix_opt = UsuiTrack(matrix_params, lr=7e-4, release_matrix_grads=True)
+matrix_opt = UsuiTrack(matrix_params, lr=6e-4, release_matrix_grads=True)
 ```
 
 This requires one backward per `step()` call, no gradient accumulation, and
