@@ -110,6 +110,7 @@ raw gradient G
   -> Newton-Schulz polar map (orthogonalization)
   -> Muon aspect scale, read from the parameter shape
   -> projected EMA M of the orthogonalized direction
+  -> cautious mask against Z (step copy only)
   -> lift through the held frame Q
   -> parameter update
   -> exact Oja frame move
@@ -286,7 +287,7 @@ second tracker state and requires a full matrix gradient on every step.
 The moment integrates the *orthogonalized* direction `O_t` of step 7, not the
 projected gradient:
 
-$$M_t=\beta M_{t-1}+(1-\beta)O_t,\qquad \beta=0.9.$$
+$$M_t=\beta M_{t-1}+(1-\beta)O_t,\qquad \beta=0.98.$$
 
 There is no EMA bias correction, so the moment is undersized for roughly
 `1/(1-beta)` steps at the start of a run.
@@ -302,12 +303,19 @@ took a full-sized step, because the polar map restored it on the way out.
 **What the moment is for.** The projected gradient stream is white -- measured
 `moment_persistence` within `1e-3` of zero at 2-, 10- and 100-step windows on
 LFM at bs16. So the moment is a variance reducer, not a persistence extractor:
-it buys `sqrt((1+beta)/(1-beta))` in signal fraction, 4.4x at `beta = 0.9`, and
-pays in staleness as the mean drifts under the moving parameters. `0.9` is the
-measured optimum of that trade; `0.5` is too weak a filter and `0.99` too stale.
-Removing the moment entirely costs `1.8e-2` on target. The staleness half is
-set by how far the parameters move, so `beta` and `lr` are one parameter with
-two names: halving the step cut `0.99`'s penalty sixfold.
+it buys `sqrt((1+beta)/(1-beta))` in signal fraction, 9.9x at `beta = 0.98`,
+and pays in staleness as the mean drifts under the moving parameters. With
+caution on and the per-step weight motion held fixed, `0.98` is the target
+optimum of that trade on LFM; `0.9` and `0.95` filter too little and `0.99` is
+too stale. Source damage grows with `beta` throughout: forgetting follows memory
+length, not travel. Removing the moment entirely costs `1.8e-2` on target. The
+staleness half is set by how far the parameters move, so `beta` and `lr` are one
+parameter with two names: halving the step cut `0.99`'s penalty sixfold.
+
+The moment is no substitute for batch. A batch averages its samples at one
+parameter point; the moment averages gradients taken at points the parameters
+have since left. At equal samples the larger batch wins, and raising `beta` to
+match a smaller batch's sample memory makes it worse, not better.
 
 ### 6. Transport momentum through frame motion
 
@@ -432,9 +440,10 @@ the parameter's own two dimensions. Here the orthogonalized object is
 $$\|U_t\|_F=\sqrt{m}\,\sqrt{r/\min(m,n)}.$$
 
 What lands is `M_t`, the average of those directions, so the delivered norm is
-that bound times the agreement `||M||/||O||` -- 0.23 on LFM at `beta = 0.9`,
-stable across a 4.4x change in learning rate, since it is a property of the
-gradients rather than of the step. A learning rate that matches another
+that bound times the agreement `||M||/||O||` -- the white floor `w` on LFM,
+0.23 at `beta = 0.9` and 0.10 at `0.98`, stable across a 4.4x change in learning
+rate, since it is a property of the gradients rather than of the step. Caution
+then removes a further 23% of the norm on LFM at `0.98`. A learning rate that matches another
 configuration's `update_to_param_ratio` therefore has to divide by it.
 
 The invariant holds at `r = min(m,n)` and is attenuated by `sqrt(r/min(m,n))`
@@ -444,6 +453,23 @@ demonstrably supports. Measured against a unit scale and a rank-compensating one
 at matched effective step, this rule wins both eval heads; see `ARCHIVE.md`,
 "the Muon aspect factor is not double duty". The rank coupling does mean a
 change of `rank_fraction` moves the step as well as the subspace.
+
+**Caution.** Before the lift, the step's copy of `M_t` is masked wherever its
+sign disagrees with this step's projected gradient `Z_t` (Liang et al. 2024,
+arXiv 2411.16085):
+
+$$\widetilde M_t=M_t\odot\mathbb 1[M_t\odot Z_t\ge 0].$$
+
+The lift is linear, so `<U, G> = s <M, Z>`, and the mask makes every surviving
+term non-negative: the realised step is a descent direction for the gradient the
+step observed, as the paper's mask is in full space. The stored moment is never
+masked, so its memory keeps integrating; only this step stops moving what the
+batch contradicts.
+
+There is no `numel / kept` rescale. A matrix whose moment the batch contradicts
+more takes a smaller step, the same agreement-as-magnitude rule step 5 gives
+the moment; the mask's average shrink is absorbed into `lr`. `caution_kept`
+reports the kept fraction.
 
 The selected contract has zero weight decay. Apply the learning rate:
 
@@ -595,6 +621,7 @@ against a long quiet interval reads as zero.
 | `grad_capture` | `projected_grad_norm / raw_grad_norm`: the share of the gradient's magnitude the frame catches. The only one of the three that reads the basis rather than the model -- the projected norm alone falls with a leaner rank even when every kept plane catches as much as before |
 | `moment_persistence` | how much coherent signal the average holds once the floor of an independent stream is subtracted. An EMA of independent constant-norm directions already has norm `w = sqrt((1-beta)/(1+beta))` from incomplete cancellation, so with `||M||/||O||` as `rho`, this reports `(rho^2 - w^2)/(1 - w^2)`: 0 is a white stream, 1 a direction held throughout, negative anti-correlated. The raw ratio the step size follows is recoverable as `p(1-w^2) + w^2` |
 | `grad_moment_cosine` | this step's direction against the moment as it stood *before* the blend, reconstructed so the reading is not self-referential. Read it as an overshoot meter: positive means the step under-travels and the next gradient still points where the last one did, negative means it overshoots and the gradient has flipped behind it. Zero is critically damped, which makes it a learning-rate read -- the LR that zeroes it beat a 2.2x hotter one on both eval heads |
+| `caution_kept` | fraction of frame coordinates the cautious mask keeps, per matrix: where the moment's sign agrees with this step's projected gradient |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
 | `step_gain/<role>` | per role class, for the matrices `diagnostic_roles` labels (a `{param: role}` map the caller sets, since only it knows names): the class's per-step `||U||_F` summed in squares over its matrices, against the class's current `||W||_F`. The relative step is `lr` times it; without `lr` the read stays exact across a schedule. The update before rounding, so the bf16 stochastic-rounding walk is not in it. A white moment populating all `r` planes sits at `w aspect sqrt(r)/||W||` with `w = sqrt((1-beta)/(1+beta))`; fewer populated planes sit below it, a coherent moment above it |
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |

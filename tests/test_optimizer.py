@@ -433,8 +433,10 @@ def test_step_gain_reads_each_role_s_weight_change_per_unit_lr():
 
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
+    # Both groups at an lr large enough that `param - old` resolves the change
+    # in fp32; the lone matrix in a group of its own.
+    optimizer.param_groups[0]["lr"] = 1e-1
     lone = torch.nn.Parameter(torch.randn(ROWS, COLS) * 3)
-    # Its own lr: large enough that `param - old` resolves the change in fp32.
     optimizer.add_param_group({"params": [lone], "lr": 1e-1})
     all_params = [*params, lone]
     _run(all_params, optimizer, 2)
@@ -448,7 +450,7 @@ def test_step_gain_reads_each_role_s_weight_change_per_unit_lr():
 
     diagnostics = optimizer.pop_diagnostics()
     pair = (change[0] ** 2 + change[1] ** 2).sqrt() / (norm[0] ** 2 + norm[1] ** 2).sqrt()
-    assert diagnostics["step_gain/pair"] * 1e-3 == pytest.approx(float(pair), rel=1e-4)
+    assert diagnostics["step_gain/pair"] * 1e-1 == pytest.approx(float(pair), rel=1e-4)
     assert diagnostics["step_gain/lone"] * 1e-1 == pytest.approx(float(change[2] / norm[2]), rel=1e-4)
 
 

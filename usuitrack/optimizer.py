@@ -27,15 +27,9 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 # SPEC.md, "The turn is constant".
 GEODESIC_STEPSIZE = 0.04
 
-# Experiment arm: cautious update (Liang et al. 2024, arXiv 2411.16085) in frame
-# coordinates. The lifted step is `s P M`, so `<U, G> = s <M, P^T G>`: masking
-# the moment's copy wherever its sign disagrees with the projected gradient
-# keeps the step a descent direction for the observed gradient, exactly as the
-# paper's mask does in full space. The stored moment is never masked, so its
-# memory keeps integrating; only this step stops moving what the batch
-# contradicts. Rescaled by `numel / kept` per matrix, as HeavyBall does.
-CAUTIOUS = False
-
+# Cautious update in frame coordinates (SPEC step 8). A module constant so the
+# lab can run the uncautious control arm; it runs outside the compiled kernels.
+CAUTIOUS = True
 
 
 @dataclass
@@ -93,7 +87,7 @@ class UsuiTrack(Optimizer):
         self,
         params: Iterable[Tensor],
         lr: float = 1e-3,
-        beta: float = 0.9,
+        beta: float = 0.98,
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         rank_fraction: float = 0.1,
@@ -897,13 +891,12 @@ class UsuiTrack(Optimizer):
 
     @staticmethod
     def _cautious(update_hat: Tensor, projected_grad: Tensor, diagnostics: DiagnosticsAccumulator | None) -> Tensor:
-        """`CAUTIOUS`: zero the frame coordinates the current gradient contradicts."""
+        """Zero the frame coordinates the current gradient contradicts (SPEC step 8)."""
 
         agree = ~(update_hat.signbit() ^ projected_grad.signbit())
-        kept = agree.sum()
         if diagnostics is not None:
-            diagnostics.add("caution_kept", kept / agree.numel())
-        return update_hat * agree * (agree.numel() / kept.clamp_min(1))
+            diagnostics.add("caution_kept", agree.sum() / agree.numel())
+        return update_hat * agree
 
     def _orthogonalize_bucket(self, tensors: list[Tensor], scale: float) -> list[Tensor]:
         if len(tensors) == 1:

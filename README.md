@@ -57,7 +57,7 @@ embedding_params = {id(p) for m in model.modules() if isinstance(m, nn.Embedding
 matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
 other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
 
-matrix_opt = UsuiTrack(matrix_params, lr=4e-4)
+matrix_opt = UsuiTrack(matrix_params, lr=7e-4)
 other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
 
 loss = model(**batch).loss
@@ -73,7 +73,7 @@ it's consumed instead of holding the whole backward's gradients in memory at
 once:
 
 ```python
-matrix_opt = UsuiTrack(matrix_params, lr=4e-4, release_matrix_grads=True)
+matrix_opt = UsuiTrack(matrix_params, lr=7e-4, release_matrix_grads=True)
 ```
 
 This requires one backward per `step()` call, no gradient accumulation, and
@@ -173,6 +173,10 @@ before the moment averages it. Magnitude comes from Muon's
 aspect factor on the original parameter shape -- which enforces a
 storage-invariant update norm at full rank and, under a rank-`r` projection,
 leaves a `sqrt(r/min(m,n))` residual instead; see `docs/SPEC.md` step 8.
+Before the lift, the step drops every coordinate where the moment's sign
+contradicts this batch's gradient (a cautious update, in frame coordinates), so
+each step descends on the gradient it saw and a matrix the batch disputes more
+steps less.
 For bf16 weights the update is accumulated in fp32 and written back with
 stochastic rounding, because an orthogonalized step is often a fraction of a
 bf16 ulp and round-to-nearest would discard it outright; `StochasticAdamW` is
