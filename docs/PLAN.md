@@ -106,7 +106,7 @@ the default arm (~40 min) before another LFM claim below ~2e-3 target.
 
 ### D5. One unit for the step
 
-The step a module takes is today an accident of four factors nobody chose
+On `constant-basis-step` the step a module takes is an accident of four factors nobody chose
 together: `lr`, the Muon aspect factor (fan-in and fan-out), the rank (with the
 aspect factor, `||U||_F = sqrt(m) sqrt(r / min(m,n))`, so a rank change is an lr
 change -- which also confounds every rank comparison), and the agreement shrink
@@ -116,27 +116,35 @@ in a fifth unit (AdamW's per-coordinate `lr`); on Anima it now carries only the
 qk-norm gains. `update_to_param_ratio` is one fleet scalar: it cannot say which
 module class took the change.
 
-**Candidate law (user's direction, 2026-09-28, not yet chosen):** `lr` is the
-relative change per step, `||dW|| / ||W|| = lr` per module (LAMB's trust ratio in
-spirit), and the fallback is the minimum that lets the rest of the model follow
-the matrices' change -- `fallback_ratio x lr` in the same relative unit, far
-below 1. Axes to settle before any arm:
-- agreement inside the step (a sensor of how far to go) or out of it (direction
-  only; the moment's norm discarded);
-- reference norm: Frobenius (total energy) or spectral (largest gain);
-- fallback form: AdamW with a relative cap, or normalized momentum;
-- zero-initialized and near-zero tensors need a floor on `||W||`;
-- a relative step compounds on a growing weight, a finetune's weights barely
-  grow, so this is likely moot here and not in pretraining.
-Moonlight's `0.2 sqrt(max(m,n))` is a different distribution again (w2 x2.1
-against today's). The instrument exists (`step_gain/<role>`). On Anima the
-agreement factor is not a per-role variable at `beta 0.9`: every non-AdaLN role
-sits at the white floor `w`, so today's distribution is `w aspect sqrt(r)/||W||`,
-known at init, 160x end to end with the stream's two ends hottest (`FACTS.md`).
-A law would mostly correct aspect, rank and weight norm. `w` moves with `beta`,
-so a `beta` change is a step change unless `lr` follows `1/w`. Caution adds a
-fifth factor, the masked share of the moment's norm (0.77 on LFM, uniform
-across roles).
+**The law, chosen 2026-10-01, on branch `trust-ratio`:** LAMB's Frobenius trust
+ratio with agreement inside the step, `U = ||W||_F lift(~M)` over unit
+directions, so `||dW||/||W|| = lr x agreement x caution` (`SPEC.md` step 8). It
+replaces aspect, `sqrt(r)` and weight norm at once. Why now: run 20 put the
+network's two narrowest matrices at 6.5x and 4.5x the bulk's relative step per
+unit lr, mostly through their small `||W||` -- the bottlenecks SPEC says must
+step less -- and run 13 had already shown them alone moving back and forth
+(`FACTS.md`). Agreement stays inside because the moment's norm already decides
+step size twice in this design (step 5, and caution without a rescale); the
+outside arm is the control. Spectral reference rejected as not worth a pre-run
+measurement. Against: `caution_kept` puts `patch_embed` at the *highest*
+agreement of any role (0.584), so at the step scale run 20 does not show it
+overstepping.
+
+How it is settled, criteria fixed before the arms report:
+- **LFM veto** (1k, bs16, beta 0.98): inside at matched fleet step (`lr 6.2e-4`,
+  from the standard arm's `4.8e-5` over agreement x caution ~0.077) and at 1.4x;
+  outside at matched step (`4.8e-5`). LFM's spread was only 2.1x, so the law
+  should barely move it: losing beyond the noise floor rules it out.
+- **Anima arm** at run 20's bulk relative step (`lr ~3.2e-4`). Passes on
+  mechanism if no role's `caution_kept` falls toward 0.5 and fleet
+  `grad_moment_cosine` stops leaning negative; samples veto (colour,
+  composition, text), they do not rank.
+- Then, in the user's order: rank per role on a step-free footing (E7), the
+  global lr, single overrides. `patch_embed` may need none once the law holds.
+
+Open in the law: a zero-norm matrix never moves (documented as a limit, no
+floor); a relative step compounds on a growing weight, likely moot in a
+finetune. The fallback's unit (AdamW) is not yet relative.
 
 ---
 
