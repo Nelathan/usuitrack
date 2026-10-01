@@ -631,6 +631,7 @@ on Anima is AdaLN. Runs `d5-inside-6.2e-4`, `d5-inside-8.7e-4`,
 | 17 `eta040_300` | run 15 at `eta 0.04` | much faster first 100 steps, then level with 15; slightly rougher early samples that recover |
 | 18 `bs16_rf010` | real bs16, `rank_fraction` 0.1, AdaLN under UsuiTrack, no accumulation, `1e-4`, 960 steps = 5 epochs | first full success: stable, better step by step to the end; wants more lr, maybe more epochs |
 | 20 `b098_caution_bs8` | bs8, `beta 0.98`, caution, `rank_fraction` 0.025, `9e-4` (1.67x run 18's relative step), anneal last 10%, 1920 steps = 5 epochs | lower loss, degraded samples, not broken (user, mid-run); final verdict pending; lr too high by the fleet reads |
+| 21 `trust_ratio` | run 20 under D5's law (step relative to `||W||`), `3.2e-4` = run 20's bulk step; waists cut to the bulk's | many well-adapted samples, still many bugs, still too hot (user); stopped at 1099; fleet reads identical to run 20 |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from

@@ -137,7 +137,10 @@ How it is settled, criteria fixed before the arms report:
   should barely move it: losing beyond the noise floor rules it out. **Passed**
   (`FACTS.md`, "The step relative to the weight"); outside and inside do not
   separate on LFM, where agreement is uniform across roles.
-- **Anima arm** at run 20's bulk relative step (`lr ~3.2e-4`), run 21. Passes on
+- **Anima arm** at run 20's bulk relative step (`lr ~3.2e-4`), run 21: the law
+  held as designed (non-AdaLN roles within 1.1x, waists from 6.5x/4.5x to ~1x),
+  samples many well adapted but still too hot; fleet reads unchanged from run 20,
+  so the heat is the bulk's step, which this arm held on purpose. Passes on
   mechanism if no role's `caution_kept` falls toward 0.5 and fleet
   `grad_moment_cosine` stops leaning negative; samples veto (colour,
   composition, text), they do not rank.
