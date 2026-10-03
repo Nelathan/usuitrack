@@ -177,7 +177,7 @@ ratio), and the moment's agreement scales it down from there; see
 Before the lift, the step drops every coordinate where the moment's sign
 contradicts this batch's gradient (a cautious update, in frame coordinates), so
 each step descends on the gradient it saw and a matrix the batch disputes more
-steps less.
+steps less. `cautious=False` turns the mask off.
 For bf16 weights the update is accumulated in fp32 and written back with
 stochastic rounding, because an orthogonalized step is often a fraction of a
 bf16 ulp and round-to-nearest would discard it outright; `StochasticAdamW` is

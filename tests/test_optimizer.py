@@ -781,7 +781,7 @@ def test_compiled_and_eager_kernels_produce_the_same_update():
     torch.testing.assert_close(trained[0], trained[1], rtol=1e-5, atol=1e-6)
 
 
-def test_lr_is_the_relative_step_of_an_agreed_direction_in_every_module(monkeypatch):
+def test_lr_is_the_relative_step_of_an_agreed_direction_in_every_module():
     """The step's unit (SPEC step 8): `||dW|| / ||W||` is `lr` times agreement.
 
     Shape, rank and the weight's size used to set how hard a module was pushed
@@ -794,16 +794,13 @@ def test_lr_is_the_relative_step_of_an_agreed_direction_in_every_module(monkeypa
     weight's scale enters exactly.
     """
 
-    import usuitrack.optimizer as optimizer_module
-
-    monkeypatch.setattr(optimizer_module, "CAUTIOUS", False)
     lr, beta = 1e-2, 0.9
 
     def relative_step(shape: tuple[int, int], weight_scale: float) -> float:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(weight_scale * torch.randn(*shape))
         before = weight.detach().clone()
-        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, beta=beta, weight_decay=0.0)
+        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, beta=beta, weight_decay=0.0, cautious=False)
         weight.grad = torch.randn(*shape)
         optimizer.step()
         return ((before - weight.detach()).norm() / before.norm()).item()
@@ -851,17 +848,14 @@ def test_matrices_sharing_a_projected_shape_but_not_a_shape_still_bucket_correct
 
 
 @pytest.mark.parametrize("cautious", [False, True])
-def test_cautious_step_descends_on_a_gradient_that_contradicts_the_moment(monkeypatch, cautious):
+def test_cautious_step_descends_on_a_gradient_that_contradicts_the_moment(cautious):
     """A moment built on `G` steps uphill when the batch turns to `-G`; the
     in-frame mask must make the realised change a descent direction for the
     gradient the step actually saw."""
 
-    import usuitrack.optimizer as optimizer_module
-
-    monkeypatch.setattr(optimizer_module, "CAUTIOUS", cautious)
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=1e-2, rank_fraction=RANK_FRACTION, side="right")
+    optimizer = UsuiTrack([weight], lr=1e-2, rank_fraction=RANK_FRACTION, side="right", cautious=cautious)
     grad = torch.randn(ROWS, COLS)
     for _ in range(10):
         weight.grad = grad + 0.1 * torch.randn(ROWS, COLS)

@@ -471,7 +471,8 @@ batch contradicts.
 There is no `numel / kept` rescale. A matrix whose moment the batch contradicts
 more takes a smaller step, the same agreement-as-magnitude rule step 5 gives
 the moment; the mask's average shrink is absorbed into `lr`. `caution_kept`
-reports the kept fraction.
+reports the kept fraction. The mask is on by default; `cautious=False` lifts
+`M_t` unmasked.
 
 The selected contract has zero weight decay. Apply the learning rate:
 

@@ -27,11 +27,6 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 # SPEC.md, "The turn is constant".
 GEODESIC_STEPSIZE = 0.04
 
-# Cautious update in frame coordinates (SPEC step 8). A module constant so the
-# lab can run the uncautious control arm; it runs outside the compiled kernels.
-CAUTIOUS = True
-
-
 @dataclass
 class PreparedGrad:
     """One matrix gradient, projected in the frame the step holds.
@@ -55,7 +50,7 @@ class MatrixUpdate:
     projector: SubspaceProjector
     # `polar(projected grad)` -- see `_orthogonalized_directions`.
     direction: Tensor
-    # Held until `_integrate_step` for `CAUTIOUS`'s sign reference; the prepared
+    # Held until `_integrate_step` for the cautious mask's sign reference; the prepared
     # gradient already lives this long, so this adds no memory.
     projected_grad: Tensor
     projected_grad_norm: Tensor
@@ -95,6 +90,7 @@ class UsuiTrack(Optimizer):
         release_matrix_grads: bool = False,
         compile_tensor_kernels: bool = False,
         stochastic_rounding: bool = True,
+        cautious: bool = True,
     ) -> None:
         if lr <= 0:
             raise ValueError(f"lr must be positive, got {lr}")
@@ -171,6 +167,7 @@ class UsuiTrack(Optimizer):
         self._matrix_param_groups: dict[Tensor, dict] = {}
         self.release_matrix_grads = release_matrix_grads
         self.stochastic_rounding = stochastic_rounding
+        self.cautious = cautious
         for group in self.param_groups:
             for param in group["params"]:
                 if param.ndim == 2:
@@ -878,7 +875,7 @@ class UsuiTrack(Optimizer):
 
         for entry in entries:
             update_hat = entry.projected_exp_avg
-            if CAUTIOUS:
+            if self.cautious:
                 role = self.diagnostic_roles.get(entry.param)
                 update_hat = self._cautious(update_hat, entry.projected_grad, diagnostics, role)
             self._apply_matrix_update(entry, update_hat, group)

@@ -1024,6 +1024,7 @@ def run_optimizer(
             usuitrack_param_groups,
             lr=args.usuitrack_lr,
             beta=args.beta,
+            cautious=args.cautious,
             basis_update_interval=args.basis_update_interval,
             consume_grad=not args.keep_grads_after_step,
             release_matrix_grads=args.release_matrix_grads,
@@ -1353,6 +1354,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-grad-clip-norm", type=float, default=1.0, help="global gradient clip for LoRA adapter parameters")
     parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
     parser.add_argument("--beta", type=float, default=0.95)
+    parser.add_argument("--cautious", action=argparse.BooleanOptionalAction, default=True, help="UsuiTrack cautious mask; --no-cautious for the control arm")
     parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="clip the raw gradient per tensor before Adafactor, Oja, and projection; must be positive for usuitrack, where the clip protects Adafactor's second-moment memory and has no off switch")
     parser.add_argument("--random-basis-init", action="store_true", help="start from a random orthonormal frame instead of the EIGH fit; asks whether Oja's equilibrium is a property of the aim or of its starting point")
     parser.add_argument("--eigh-refit-interval", type=int, default=0, help="discard and refit every frame by EIGH every N measured steps; 0 disables. The fallback if geodesic tracking cannot hold a fit")
