@@ -226,15 +226,17 @@ update and because a full turn at an `eta` chosen for a scale near 0.05 failed
 `eigh`; masking dead planes removed that failure, whose cause was rounding
 artifacts promoted to unit-norm directions by `1/sigma`, not step size.
 
-$$\eta=0.04,$$
+$$\eta=0.02,$$
 
 not scheduled. The frame is in effect an average of its aims over the last
 `~1/eta` basis updates, and the aim -- the leading eigenspace of `G^T G` --
 moves as the model does, fastest early. `eta` sets the trade between lag (a long
 memory holds where the gradient was) and noise (a short one follows each
-batch). The energy aim is a low-variance target, so lag dominates at small
-`eta`: on LFM capture and loss improve steadily from `0.005` to `0.04` and are
-flat to `0.08`, and the gain holds at 1k steps (`FACTS.md` on `lab`). Once the aim
+batch). The energy aim is a low-variance target, so lag costs only while it
+moves: on LFM `0.02` and `0.04` tie on both losses at 1k, the smaller turn lags
+early (capture 0.750 against 0.760 after warmup) and captures the same from
+mid-run, and it moves the frame half as far per update, so it follows half as
+much batch noise (`FACTS.md` on `lab`). Once the aim
 settles the turn stops mattering -- a smaller late turn buys nothing -- so a
 schedule would add a term and no gain, and there is none: with a constant
 step, frame motion is one quantity that `transport_speed` reads directly, and
@@ -683,7 +685,7 @@ These choices define the current design; they are redesignable.
    has explicit fp32, finite-input, symmetrization, and jitter behavior.
 4. **One-state full-gradient basis tracking:** the live frame follows the Oja
    covariance action on its configured cadence, with a constant geodesic step
-   `eta = 0.04` and no second basis.
+   `eta = 0.02` and no second basis.
 5. **Moving-frame momentum:** identity coordinates preserve the projected
    moment's spectrum through the chosen frame rotation.
 6. **No second moment on the full gradient:** the tangent and the moment both

@@ -25,7 +25,7 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 # Fixed step size for the Grassmann geodesic. Constant, not scheduled: it sets
 # the frame's memory, ~1/eta basis updates, against how fast the aim moves.
 # SPEC.md, "The turn is constant".
-GEODESIC_STEPSIZE = 0.04
+GEODESIC_STEPSIZE = 0.02
 
 @dataclass
 class PreparedGrad:
