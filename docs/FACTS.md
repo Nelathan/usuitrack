@@ -628,6 +628,45 @@ inside at another lr; they can differ only where agreement varies by role, which
 on Anima is AdaLN. Runs `d5-inside-6.2e-4`, `d5-inside-8.7e-4`,
 `d5-outside-4.8e-5`, 2026-10-01.
 
+### The lr bracket under the law, and what a doubled batch wants
+
+1k, bs16, `beta 0.98`, caution, law inside, seed 1; the bs32 arms run 500 steps
+for the same tokens. Fleet step is the plateau `relative_step`; cosine and
+persistence are the last logged interval. 2026-10-03.
+
+| arm | lr | fleet step | target | source | cosine | persistence |
+|---|---:|---:|---:|---:|---:|---:|
+| bs16 | `6.2e-5` | 5e-6 | 1.740939 | 2.999729 | +0.019 | +0.0021 |
+| bs16 | `2e-4` | 1.6e-5 | 1.687609 | 3.027565 | +0.0048 | +0.0005 |
+| bs16 | `6.2e-4` | 4.8e-5 | 1.659546 | 3.065264 | -0.0008 | -0.0001 |
+| bs32, `beta 0.98` | `8.8e-4` | 7.0e-5 | 1.675968 | 3.047561 | +0.0006 | +0.00004 |
+| bs32, `beta 0.95` | `8.8e-4` | 1.15e-4 | 1.674347 | 3.032164 | -0.0037 | -0.0006 |
+
+- At bs16, lr trades target for source monotonically across 10x: the low arm
+  learns, less, and forgets least. Cosine crosses
+  zero between `2e-4` and `6.2e-4`; persistence crosses with it at about a tenth
+  of the magnitude, so it is the noisier read of the same thing. `caution_kept`
+  does not move with lr (0.555 in all three).
+- Cosine falls through every run, even the low arm's (0.265 early, 0.126
+  mid-run, 0.021 at the end): part of the decline is the data being used up, not
+  over-travel. A controller holding cosine at zero would cut lr through a run.
+- `grad_capture` dips after warmup and recovers slowly; the trough deepens with
+  lr (0.772 at `6.2e-5`, 0.760 at `6.2e-4`, steps 75-125). The frame lags the
+  step it is asked to follow. The fleet step peaks at step 75 in both, where
+  warmup has finished and the moment is still coherent.
+- bs32 at the `sqrt(tokens)` lr under-steps at `beta 0.98`: 0.016 worse target
+  than bs16 at equal tokens, 0.018 better source, cosine still positive.
+- At the same lr, `beta 0.95` steps 1.64x further, ties 0.98 on target
+  (-0.0016) and forgets 0.015 less. A shorter memory is less stale, and
+  staleness costs step size times memory length, so the larger the step, the
+  more a short memory pays. Its cosine ended negative without a loss cost: on
+  this read, zero is not shown to be the loss-optimal set point.
+- At a held small step on bs16 (above, "Caution: where it pays", pre-law,
+  rescaled) 0.95 lost 0.004 target to 0.98: the optimal beta falls as the step grows.
+
+Runs `law-lr6.2e-5`, `law-lr2e-4-cos0`, `d5-inside-6.2e-4`,
+`law-bs32-b098-lr8.8e-4`, `law-bs32-b095-lr8.8e-4`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
