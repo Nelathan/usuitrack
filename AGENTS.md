@@ -33,6 +33,7 @@ changes go here.
   frozen verbatim as the investigation log — read for evidence, never append.
 - `docs/HANDOVER.md` — session-to-session orientation: where things stand, traps, what to do next.
 - `docs/LEGEND.md` — the anthropomorphic design story. Intuition only.
+- `docs/prerelease/` — the old lab repo's docs, frozen. Evidence only, never edited.
 
 ## How we work from PLAN
 
