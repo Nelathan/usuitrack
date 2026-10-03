@@ -326,22 +326,14 @@ class UsuiTrack(Optimizer):
             not move together. It also grew with rank and shared its unit with
             nothing else here, which made it unreadable against the lag it was
             meant to be compared with.
-        ``tangent_concentration``, ``tangent_effective_planes``
-            Where that motion went, both read from the same eigenvalues.
-            Concentration is the leading plane's share of the tangent's energy in
-            ``[1/r, 1]`` -- the head of the spectrum. The plane count is the
-            effective number of planes carrying it, ``(sum lambda)^2 / sum
-            lambda^2`` in ``[1, r]`` -- the bulk. They separate because the
-            spectrum is a power law with no edge: a high head does not imply a
-            short tail. High concentration with few planes is a confident aim
-            drifting; low concentration with many is a frame turning on a
-            near-isotropic noise tail, which is a mechanism for integrating batch
-            noise into the basis. They are also near-perfectly anti-correlated on
-            a real run (``-0.95`` over two Anima runs), so a story in which one
-            causes the other is a story about one number. Both are magnitude
-            statistics, and the geodesic turns every live plane by ``eta``
-            whatever the eigenvalue said -- so neither describes the motion, only
-            the aim it was formed from.
+        ``tangent_concentration``
+            Where that motion went: the leading plane's share of the tangent's
+            energy, in ``[1/r, 1]``. High is a confident aim drifting; low is a
+            frame turning on a near-isotropic noise tail, which is a mechanism
+            for integrating batch noise into the basis. It is a magnitude
+            statistic, and the geodesic turns every live plane by ``eta``
+            whatever the eigenvalue said -- so it describes the aim the motion
+            was formed from, not the motion.
         ``projected_grad_norm``, ``raw_grad_norm``, ``grad_capture``,
         ``moment_persistence``
             Scale of the gradient inside the frame, outside it, their ratio, and
@@ -1229,18 +1221,11 @@ class UsuiTrack(Optimizer):
         diagnostics: DiagnosticsAccumulator | None,
         eigenvalues: Tensor,
     ) -> None:
-        """The shape of the aim's spectrum: how concentrated, how many planes.
+        """The shape of the aim's spectrum: how concentrated it is.
 
-        `tangent_concentration` is the leading eigenvalue's share of the trace and
-        `tangent_effective_planes` the spectrum's effective rank. Together they
-        separate a confident drift from a frame spinning on its noise tail -- the
-        same displacement can be either.
-
-        The plane count is published raw, not as a fraction of `r`. Divided by
-        the rank it is not comparable across rank settings: a leaner table raises
-        the fraction while the spectrum is unchanged, and one run read that as a
-        third more planes carrying the aim when the count had moved by six
-        percent.
+        `tangent_concentration` is the leading eigenvalue's share of the trace. It
+        separates a confident drift from a frame spinning on its noise tail --
+        the same displacement can be either.
 
         This used to publish `transport_speed` from these eigenvalues too, as the
         displacement the geodesic *would* produce. That reading is gone: speed is
@@ -1253,10 +1238,7 @@ class UsuiTrack(Optimizer):
         spectrum = eigenvalues.clamp_min(0.0)
         energy = spectrum.sum(dim=-1).clamp_min(1e-12)
         concentration = spectrum.amax(dim=-1) / energy
-        planes = energy.square() / spectrum.square().sum(dim=-1).clamp_min(1e-12)
-        samples = int(spectrum.shape[0])
-        diagnostics.add("tangent_concentration", concentration.sum(), count=samples)
-        diagnostics.add("tangent_effective_planes", planes.sum(), count=samples)
+        diagnostics.add("tangent_concentration", concentration.sum(), count=int(spectrum.shape[0]))
 
     @staticmethod
     def _basis_update_step_size(group: dict) -> float:

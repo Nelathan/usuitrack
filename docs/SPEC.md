@@ -624,8 +624,7 @@ telemetry off the frame-motion read is skipped too.
 |---|---|
 | `transport_speed` | chordal distance the subspace moved in one geodesic, per plane, measured from the frames before and after: `||Q_now - Q_old (Q_old^T Q_now)||_F / sqrt(r)`. Every motion metric below shares this unit, so they can be divided by one another |
 | `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
-| `tangent_effective_planes` | `(sum_i lambda_i)^2 / sum_i lambda_i^2`, in `[1, r]`: the effective number of planes carrying the aim. The bulk of the same spectrum concentration reads the head of. Published as a count, not a fraction of `r`, so it compares across rank settings -- as a fraction a lower `rank_fraction` raises it while the spectrum is unchanged |
-| `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_effective_planes`: the plane count is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
+| `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`: how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
 | `projected_grad_norm` | norm of the sanitized gradient inside the held frame |
 | `raw_grad_norm` | norm of the gradient as it arrived, before sanitizing and projection; non-finite when the gradient was |
 | `grad_capture` | `projected_grad_norm / raw_grad_norm`: the share of the gradient's magnitude the frame catches. The only one of the three that reads the basis rather than the model -- the projected norm alone falls with a leaner rank even when every kept plane catches as much as before |
@@ -656,10 +655,8 @@ what accumulates over a window is holonomy plus retraction and rounding error.
 the geodesic was handed. Those agree only while nothing stands between the aim
 and the frame, and they are not the same quantity the moment anything transforms
 the geodesic -- an orthogonalized tangent turns every live plane by `eta`
-whatever `sigma` said. `tangent_concentration` and `tangent_effective_planes` do
-come free from those eigenvalues, and they are two views of one spectrum: on real
-runs they anti-correlate at `-0.95`, so neither can be evidence for the other.
-Read speed and concentration together: the same speed is a confident drift when
+whatever `sigma` said. `tangent_concentration` does come free from those
+eigenvalues. Read speed and concentration together: the same speed is a confident drift when
 concentration is high and a frame spinning on its noise tail when it is low.
 
 The tangent Gram is decomposed bare. There is no jitter and no retry: a failing
