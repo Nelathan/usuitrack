@@ -195,9 +195,12 @@ moves"): best early, flat to `0.08`. `0.02` has not run since the liveness fix.
 The user keeps eta on trial: too hot a turn may leave noise in the weights
 even where loss cannot see it. The `grad_capture` trough after warmup (0.760 at
 `6.2e-4`, 0.772 at `6.2e-5`) deepens with lr, which reads as lag, not heat.
-Arm running: the standard arm at `0.02`. Prediction: target within 2e-3, a
-slightly deeper capture trough, lower `transport_speed`. A shallower trough
-would mean 0.04 admits noise.
+At `0.02` (`FACTS.md`) the prediction held: target tied, the trough 0.010
+deeper, `transport_speed` halved, the frames equal from step 600. Source read
+5.3e-3 better, inside the replicate spread (D6). Loss does not separate the
+two; what is left is the user's concern, noise a hot turn leaves in the
+weights, which needs a read that sees weight noise (A2) or a long run's
+samples. `0.04` stays shipped, and D7 runs on it.
 
 ### E4. Parked: an arrival sensor
 

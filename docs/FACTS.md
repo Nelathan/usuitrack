@@ -708,6 +708,22 @@ persistence are the last logged interval. 2026-10-03.
 Runs `law-lr6.2e-5`, `law-lr2e-4-cos0`, `d5-inside-6.2e-4`,
 `law-bs32-b098-lr8.8e-4`, `law-bs32-b095-lr8.8e-4`.
 
+### `eta 0.02` against `0.04`, after the liveness fix
+
+Standard arm (bs16, 1k, `beta 0.98`, `6.2e-4`, law inside), only
+`GEODESIC_STEPSIZE` changed. 2026-10-03.
+
+| eta | target | source | `transport_speed` | capture trough (75-125) | capture at 900 |
+|---|---:|---:|---:|---:|---:|
+| `0.04` | 1.659546 | 3.065264 | 0.0384 | 0.760 | 0.769 |
+| `0.02` | 1.659738 | 3.059932 | 0.0193 | 0.750 | 0.769 |
+
+Halving the turn halves `transport_speed` and deepens the capture trough by
+0.010; by step 600 the two frames capture the same. Target ties; source is
+5.3e-3 better at `0.02`, inside the one replicate pair's 5.6e-3. Cosine and
+relative step match bin for bin. The turn shows only in the early lag, as
+E3 found. Runs `eta0.02-lr6.2e-4`, `d5-inside-6.2e-4`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
