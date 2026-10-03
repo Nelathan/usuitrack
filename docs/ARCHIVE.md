@@ -835,6 +835,32 @@ Withdrawn: `0.9` as "the measured optimum" of the variance-staleness trade
 (`REORTHOGONALIZE_MOMENT`, deleted: it trades target for source and fails at
 twice the step); the rescale. Open on Anima, in PLAN D4.
 
+## CLOSED -- the step is relative to the weight, with agreement inside
+
+2026-10-03, closes D5. A matrix moves `lr x agreement x caution` of its
+Frobenius norm per step (LAMB's trust ratio, SPEC step 8), replacing the Muon
+aspect factor, the rank's `sqrt(r)` and the weight norm as accidental parts of
+the step. Evidence (`FACTS.md`):
+- LFM, matched fleet step: the law moves neither head beyond the replicate
+  spread and flattens the per-role step from 2.1x to 1.02x. Outside and inside
+  cannot separate there, since every role carries the same agreement.
+- Anima run 21: the network's narrowest matrices, at 6.5x and 4.5x the bulk's
+  relative step under the aspect rule, came to ~1x; non-AdaLN roles within 1.1x.
+- Anima runs 24 and 25, matched fleet step, bs16: with agreement outside,
+  fleet cosine crossed zero at ~60 against ~120 inside, in every role group,
+  and AdaLN `linear_1` did not recover its cosine under the decay. Outside
+  moved less in the samples; the user favours inside.
+
+Agreement stays inside the step. The moment's norm already decides step size
+in this design, and spending the step where the moment agrees keeps the
+coherent modules coherent for longer at the same budget.
+
+Left open, not reasons to reopen: a zero-norm matrix never moves; a relative
+step compounds on a growing weight (moot in a finetune); the fallback's AdamW
+step is not relative. Per-role `relative_step` was not logged, so why
+outside's AdaLN cosine read lower early, while it gave AdaLN less step, is
+unexplained.
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)

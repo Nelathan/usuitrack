@@ -452,7 +452,7 @@ their floors); at `0.095` it wins both heads, which a larger step alone does not
 do. At 1k (`0.1 sqrt(mn)` against `e3_eta040_1k_s1`, r128) it trades instead:
 target 1.67426 against 1.68288, source 3.02628 against 3.02206, at 24% more
 update per step -- the rank-step coupling makes that comparison partly an lr
-comparison (`PLAN.md` D5).
+comparison (`ARCHIVE.md`, "the step is relative to the weight").
 
 **Liveness is not a sizing target.** It ranks these arms backwards: the best arm
 has the second-lowest live fraction. A real batch raises it at any rank (bs4 to
@@ -649,7 +649,7 @@ Runs `b9/b95/b99-caut-held-1k`, `b098-caut-bs16-1k`, `b098-caut-bs8-2k*`,
 
 ### The step relative to the weight: loss-neutral where agreement is uniform
 
-`PLAN.md` D5's law (`SPEC.md` step 8) against the aspect rule, 1k, bs16,
+The trust-ratio law (`SPEC.md` step 8) against the aspect rule, 1k, bs16,
 `beta 0.98`, caution:
 
 | arm | lr | fleet step | target | source |
@@ -724,7 +724,7 @@ Runs `law-lr6.2e-5`, `law-lr2e-4-cos0`, `d5-inside-6.2e-4`,
 | 17 `eta040_300` | run 15 at `eta 0.04` | much faster first 100 steps, then level with 15; slightly rougher early samples that recover |
 | 18 `bs16_rf010` | real bs16, `rank_fraction` 0.1, AdaLN under UsuiTrack, no accumulation, `1e-4`, 960 steps = 5 epochs | first full success: stable, better step by step to the end; wants more lr, maybe more epochs |
 | 20 `b098_caution_bs8` | bs8, `beta 0.98`, caution, `rank_fraction` 0.025, `9e-4` (1.67x run 18's relative step), anneal last 10%, 1920 steps = 5 epochs | lower loss, degraded samples, not broken (user, mid-run); final verdict pending; lr too high by the fleet reads |
-| 21 `trust_ratio` | run 20 under D5's law (step relative to `||W||`), `3.2e-4` = run 20's bulk step; waists cut to the bulk's | many well-adapted samples, still many bugs, still too hot (user); stopped at 1099; fleet reads identical to run 20 |
+| 21 `trust_ratio` | run 20 under the trust-ratio law (step relative to `||W||`), `3.2e-4` = run 20's bulk step; waists cut to the bulk's | many well-adapted samples, still many bugs, still too hot (user); stopped at 1099; fleet reads identical to run 20 |
 | 22 `trust_lr15e5` | run 21 at `1.5e-4`, annealed over the last epoch to 10% | liked, but still hot and slowly degrading (user); stopped at 1130; `grad_moment_cosine` negative from ~128 |
 | 23 `b095_lr5e5` | run 22 at `beta 0.95`, `5e-5`, warmup 100 | good quality, little change (user); cosine at or above zero to ~768, negative after; full 1920 |
 | 24 `inside_bs16` | run 23 at a real bs16 (offloaded), `7e-5`, one epoch, cosine decay | moved more than 25; inside favoured (user); cosine zero at ~120, positive again under the decay |

@@ -67,7 +67,7 @@ by distance.
 
 ### D1. The global matrix lr is open
 
-Under D5's law `lr` is the relative step of an agreed direction, the same unit
+Under the trust-ratio law (`SPEC.md` step 8) `lr` is the relative step of an agreed direction, the same unit
 in every module. Across models, batches and beta it is not measured. Read so
 far (`FACTS.md`):
 
@@ -116,55 +116,6 @@ A same-seed replicate differs by 1.6e-3 target and 5.6e-3 source (`FACTS.md`),
 5x and 3x the floors `AGENTS.md` states. One pair. Settle with three seeds of
 the default arm (~40 min) before another LFM claim below ~2e-3 target.
 
-### D5. One unit for the step
-
-On `constant-basis-step` the step a module takes is an accident of four factors nobody chose
-together: `lr`, the Muon aspect factor (fan-in and fan-out), the rank (with the
-aspect factor, `||U||_F = sqrt(m) sqrt(r / min(m,n))`, so a rank change is an lr
-change -- which also confounds every rank comparison), and the agreement shrink
-after the polar map (the moment averages unit-norm directions, so disagreement
-between steps shrinks the step and forces lr to be re-fixed). The fallback runs
-in a fifth unit (AdamW's per-coordinate `lr`); on Anima it now carries only the
-qk-norm gains. `relative_step` is one fleet scalar: it cannot say which
-module class took the change.
-
-**The law, chosen 2026-10-01, on branch `trust-ratio`:** LAMB's Frobenius trust
-ratio with agreement inside the step, `U = ||W||_F lift(~M)` over unit
-directions, so `||dW||/||W|| = lr x agreement x caution` (`SPEC.md` step 8). It
-replaces aspect, `sqrt(r)` and weight norm at once. Why now: run 20 put the
-network's two narrowest matrices at 6.5x and 4.5x the bulk's relative step per
-unit lr, mostly through their small `||W||` -- the bottlenecks SPEC says must
-step less -- and run 13 had already shown them alone moving back and forth
-(`FACTS.md`). Agreement stays inside because the moment's norm already decides
-step size twice in this design (step 5, and caution without a rescale); the
-outside arm is the control. Spectral reference rejected as not worth a pre-run
-measurement. Against: `caution_kept` puts `patch_embed` at the *highest*
-agreement of any role (0.584), so at the step scale run 20 does not show it
-overstepping.
-
-How it is settled, criteria fixed before the arms report:
-- **LFM veto** (1k, bs16, beta 0.98): inside at matched fleet step (`lr 6.2e-4`,
-  from the standard arm's `4.8e-5` over agreement x caution ~0.077) and at 1.4x;
-  outside at matched step (`4.8e-5`). LFM's spread was only 2.1x, so the law
-  should barely move it: losing beyond the noise floor rules it out. **Passed**
-  (`FACTS.md`, "The step relative to the weight"); outside and inside do not
-  separate on LFM, where agreement is uniform across roles.
-- **Anima arm** at run 20's bulk relative step (`lr ~3.2e-4`), run 21: the law
-  held as designed (non-AdaLN roles within 1.1x, waists from 6.5x/4.5x to ~1x),
-  samples many well adapted but still too hot; fleet reads unchanged from run 20,
-  so the heat is the bulk's step, which this arm held on purpose. Passes on
-  mechanism if no role's `caution_kept` falls toward 0.5 and fleet
-  `grad_moment_cosine` stops leaning negative; samples veto (colour,
-  composition, text), they do not rank.
-- Then, in the user's order: rank per role on a step-free footing (E7), the
-  global lr, single overrides. `patch_embed` may need none once the law holds.
-  At bs8 the global lr ran out before the samples improved (runs 22, 23; D4),
-  so the batch comes first.
-
-Open in the law: a zero-norm matrix never moves (documented as a limit, no
-floor); a relative step compounds on a growing weight, likely moot in a
-finetune. The fallback's unit (AdamW) is not yet relative.
-
 ---
 
 ## Group E. Rank and the frame
@@ -181,8 +132,9 @@ The AdaLN linears now train here too, at 72 (`linear_1`, 256x2048) and 125
 (`linear_2`, 6144x256), against a per-step gradient of rank at most the batch
 (16): their input is one timestep embedding per sample. Most of their planes
 carry no signal on a given step, and Newton-Schulz lifts whatever the moment holds
-there to unit scale. Whether that matters has no read yet: the telemetry is
-fleet-wide, so it waits on D5's per-role instrument, and on the samples. The
+there to unit scale. Whether that matters has no read yet beyond the per-role cosine: runs 24 and
+25 put AdaLN `linear_1` at 5-10x attention's (`FACTS.md`); the verdict is the
+samples. The
 verdict so far is 19 finite steps (`ARCHIVE.md`). Arm: 0.1 against a lower
 fraction under a real bs16, against run 17, with lr lowered to match run
 17's per-module step so the comparison reads the subspace and not the step. The
