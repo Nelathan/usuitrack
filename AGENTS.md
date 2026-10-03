@@ -1,17 +1,20 @@
 # AGENTS.md
 
-Operating contract for agents in the UsuiTrack release repo.
+Operating contract for agents in the UsuiTrack repo.
 
 ## What this repo is
 
-The shipped optimizer and its documentation. `usuitrack/` is the package
-(`optimizer.py`, `projector.py`, `diagnostics.py`, `stochastic.py`); `tests/`
-guards it; `docs/` carries the design and the open questions. This is what a user
-installs and what the lab (`~/Projects/optimizers`) measures through a symlink.
+Two branches with different jobs. `main` is the release: the documented
+optimizer and nothing else. `usuitrack/` is the package (`optimizer.py`,
+`projector.py`, `diagnostics.py`, `stochastic.py`), `tests/` guards it, plus
+`examples/`, `README.md`, `docs/SPEC.md` and `docs/LEGEND.md`. `lab` is the root
+for experiments: everything on `main`, plus the LFM harness in `experiments/`,
+the research ledger in `docs/`, and `docs/prerelease/`. Experiment branches start
+from `lab`. `main` moves by one squashed release commit taken from `lab`, never by
+a merge, so its history is the release history.
 
-The lab repo contains a stale `usuitrack/` fork of an earlier shape, kept on
-purpose with a `SUPERSEDED` note at the top of its `optimizer.py`. Never edit it;
-changes go here.
+The old lab repo (`~/Projects/optimizers`) is retired; its harness lives here
+now and its docs are frozen in `docs/prerelease/`.
 
 ## Documentation map
 
@@ -127,15 +130,16 @@ the measurement target match the claim. If any drift, stop and name the mismatch
 
 ## Running things
 
-Two lanes, two models, two harnesses. Neither lives in this repo; both measure
-this repo. **Always launch a training or calibration job in the background,
-never in the foreground.**
+Two lanes, two models, two harnesses. The LFM harness lives in `experiments/`;
+Anima's lives in ai-toolkit. Both measure this working tree, so they run
+whichever branch is checked out. **Always launch a training or calibration job
+in the background, never in the foreground.**
 
 ### LFM2.5-350M — the lab harness
 
-From `/home/djg/Projects/optimizers`. It inserts the `usuitrack-release` symlink at
-`sys.path[0]` and raises if the import missed, so it measures this repo and not
-the stale fork beside it. Standard arm:
+From the repo root on `lab`. `uv sync` installs the `lab` dependency group by
+default; torch is pinned to the build `causal-conv1d`'s CUDA extension loads
+against (`pyproject.toml`). Standard arm:
 
 ```bash
 uv run python experiments/llm_synth_smoke.py \
@@ -155,19 +159,18 @@ the `usuitrack_last_logged_*` telemetry block.
 
 **Experiment knobs the release does not expose** — `GEODESIC_STEPSIZE` and the
 other module constants — are patched by a runner, never by adding an optimizer
-argument. Import the harness module first so its `sys.path` insertion has
-happened, then set the attribute before the optimizer is built:
+argument. Import the harness module, then set the attribute before the
+optimizer is built:
 
 ```python
-import sys; sys.path.insert(0, "/home/djg/Projects/optimizers")
+import sys; sys.path.insert(0, "/home/djg/Projects/usuitrack")
 import experiments.llm_synth_smoke as smoke
 smoke.usuitrack_optimizer.GEODESIC_STEPSIZE = 0.05
 sys.argv = ["llm_synth_smoke.py", *sys.argv[1:]]
 smoke.main()
 ```
 
-The lab's own tests no longer collect (its fork shadows the release under
-pytest) and are not run; verify a harness function by calling it directly.
+`tests/test_llm_harness.py` guards the harness's wiring and runs with the suite.
 
 ### Anima — ai-toolkit
 
@@ -213,8 +216,8 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
   practice for keeping the session's context cache warm.
 - **A `nohup` wrapper's completion is not the run's completion.** The tool
   notification fires when the launcher exits, seconds in. Check the log.
-- **Running a script by path puts its own directory on `sys.path`,** not the lab
-  root. A runner in the scratchpad must insert `/home/djg/Projects/optimizers`.
+- **Running a script by path puts its own directory on `sys.path`,** not the repo
+  root. A runner in the scratchpad must insert `/home/djg/Projects/usuitrack`.
 - **LR is not anchored across batch changes.** Scale by `sqrt(tokens per step)`:
   at 1/16 the tokens, use 1/4 the LR. Relative comparisons within a sweep
   survive because all arms share it; the absolute losses do not transfer.

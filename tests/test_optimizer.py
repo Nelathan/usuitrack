@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch import Tensor
 
-from usuitrack import SubspaceProjector, UsuiTrack
+from usuitrack import SubspaceProjector, UsuiTrack, optimizer_state_bytes, optimizer_state_bytes_by_category
 from usuitrack.optimizer import GEODESIC_STEPSIZE
 
 
@@ -535,6 +535,18 @@ def test_no_second_moment_state_is_allocated():
             "projected_exp_avg",
             "step",
         }
+
+
+def test_state_bytes_count_only_matrix_state():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    _run(params, optimizer, 1)
+
+    state_bytes = optimizer_state_bytes_by_category(optimizer)
+    assert state_bytes["matrix"] > 0
+    assert state_bytes["fallback"] == 0
+    assert state_bytes["total"] == state_bytes["matrix"]
+    assert optimizer_state_bytes(optimizer) == state_bytes["total"]
 
 
 def test_agreement_reads_the_moment_before_this_step_not_after():

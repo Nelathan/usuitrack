@@ -1,0 +1,1561 @@
+from __future__ import annotations
+
+import argparse
+import gc
+import json
+import re
+import time
+import types
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+import pyarrow.parquet as pq
+import torch
+from torch.utils.checkpoint import checkpoint
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from usuitrack import StochasticAdamW, SubspaceProjector, UsuiTrack, optimizer_state_bytes_by_category
+import usuitrack.optimizer as usuitrack_optimizer
+
+
+DEFAULT_MODEL = "LiquidAI/LFM2.5-350M-Base"
+DEFAULT_SOURCE_HF_DATASET = "HuggingFaceFW/finepdfs_50BT-dclm_30BT-fineweb_edu_20BT-shuffled"
+DEFAULT_FALLBACK_LR = 1e-4
+DEFAULT_LORA_RANK = 44
+DEFAULT_LORA_ALPHA = 44
+
+ParamScope = Literal["full", "broad-no-embeddings", "matrices-no-embeddings"]
+BatchingMode = Literal["eos_packed_no_mask", "synth_right_padded_no_mask"]
+DatasetFormat = Literal["auto", "synth", "profile_text", "text"]
+SYNTH_DIVIDER = "\n---\n"
+PROFILE_TEXT_DIVIDER = "\n\n---\n\n"
+
+
+@dataclass(frozen=True)
+class CudaMemoryReading:
+    current_allocated: int
+    peak_allocated: int
+    current_reserved: int
+    peak_reserved: int
+
+
+class CudaMemorySensors:
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.readings: dict[str, CudaMemoryReading] = {}
+        self.prior_peak_allocated = 0
+        self.prior_peak_reserved = 0
+
+    def start(self) -> None:
+        torch.cuda.synchronize(self.device)
+        self.prior_peak_allocated = torch.cuda.max_memory_allocated(self.device)
+        self.prior_peak_reserved = torch.cuda.max_memory_reserved(self.device)
+        torch.cuda.reset_peak_memory_stats(self.device)
+        self._record("baseline")
+        torch.cuda.reset_peak_memory_stats(self.device)
+
+    def mark(self, name: str) -> None:
+        torch.cuda.synchronize(self.device)
+        self._record(name)
+        torch.cuda.reset_peak_memory_stats(self.device)
+
+    def _record(self, name: str) -> None:
+        self.readings[name] = CudaMemoryReading(
+            current_allocated=torch.cuda.memory_allocated(self.device),
+            peak_allocated=torch.cuda.max_memory_allocated(self.device),
+            current_reserved=torch.cuda.memory_reserved(self.device),
+            peak_reserved=torch.cuda.max_memory_reserved(self.device),
+        )
+
+
+class BackwardMemoryTrace:
+    """Buffer allocator readings around leaf post-accumulate hooks."""
+
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.active = False
+        self.events: list[dict[str, Any]] = []
+        self.handles = []
+
+    def install_before(self, named_params: Sequence[tuple[str, torch.nn.Parameter]]) -> None:
+        self._install(named_params, "before_prepare")
+
+    def install_after(self, named_params: Sequence[tuple[str, torch.nn.Parameter]]) -> None:
+        self._install(named_params, "after_prepare")
+
+    def _install(self, named_params: Sequence[tuple[str, torch.nn.Parameter]], phase: str) -> None:
+        for name, param in named_params:
+            if not param.requires_grad:
+                continue
+
+            def record(completed: torch.Tensor, *, param_name=name, event_phase=phase) -> None:
+                if self.active:
+                    self._record(event_phase, param_name, completed)
+
+            self.handles.append(param.register_post_accumulate_grad_hook(record))
+
+    def start(self) -> None:
+        self.events.clear()
+        self.active = True
+
+    def stop(self) -> None:
+        self.active = False
+
+    def close(self) -> None:
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
+
+    def _record(self, phase: str, name: str, param: torch.Tensor) -> None:
+        grad = param.grad
+        if self.device.type == "cuda":
+            current_allocated = torch.cuda.memory_allocated(self.device)
+            peak_allocated = torch.cuda.max_memory_allocated(self.device)
+            current_reserved = torch.cuda.memory_reserved(self.device)
+        else:
+            current_allocated = peak_allocated = current_reserved = 0
+        self.events.append(
+            {
+                "index": len(self.events),
+                "phase": phase,
+                "name": name,
+                "shape": list(param.shape),
+                "param_bytes": param.numel() * param.element_size(),
+                "grad_present": grad is not None,
+                "grad_bytes": grad.numel() * grad.element_size() if grad is not None else 0,
+                "current_allocated": current_allocated,
+                "peak_allocated": peak_allocated,
+                "current_reserved": current_reserved,
+            }
+        )
+
+    def summary(self) -> dict[str, int | str]:
+        if not self.events:
+            return {
+                "memory_trace_event_count": 0,
+                "memory_trace_peak_current_allocated": 0,
+                "memory_trace_peak_current_event": "none",
+                "memory_trace_peak_cumulative_allocated": 0,
+                "memory_trace_peak_cumulative_event": "none",
+                "memory_trace_events": "[]",
+            }
+        peak_current = max(self.events, key=lambda event: int(event["current_allocated"]))
+        peak_cumulative = max(self.events, key=lambda event: int(event["peak_allocated"]))
+
+        def event_name(event: dict[str, Any]) -> str:
+            return f'{event["index"]}:{event["phase"]}:{event["name"]}'
+
+        return {
+            "memory_trace_event_count": len(self.events),
+            "memory_trace_peak_current_allocated": int(peak_current["current_allocated"]),
+            "memory_trace_peak_current_event": event_name(peak_current),
+            "memory_trace_peak_cumulative_allocated": int(peak_cumulative["peak_allocated"]),
+            "memory_trace_peak_cumulative_event": event_name(peak_cumulative),
+            "memory_trace_events": json.dumps(self.events, separators=(",", ":")),
+        }
+
+
+@torch.no_grad()
+def tensor_global_norm(tensors) -> torch.Tensor:
+    norm_sq = None
+    for tensor in tensors:
+        if tensor is None:
+            continue
+        norm = tensor.detach().float().norm()
+        norm_sq = norm.square() if norm_sq is None else norm_sq + norm.square()
+    if norm_sq is None:
+        return torch.tensor(float("nan"))
+    return norm_sq.sqrt()
+
+
+@torch.no_grad()
+def parameter_norm(params: list[torch.nn.Parameter]) -> torch.Tensor:
+    return tensor_global_norm(params)
+
+
+@torch.no_grad()
+def gradient_norm(params: list[torch.nn.Parameter]) -> torch.Tensor:
+    return tensor_global_norm([param.grad for param in params if param.grad is not None])
+
+
+@torch.no_grad()
+def gradient_norm_statistics(
+    params: list[torch.nn.Parameter], clip_norm: float, extra_norms=()
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    norms = torch.stack(
+        [param.grad.detach().float().norm() for param in params if param.grad is not None]
+        + [norm.detach().float() for norm in extra_norms]
+    )
+    clipped_fraction = (norms > clip_norm).float().mean() if clip_norm > 0 else None
+    return norms.norm(), norms.median(), clipped_fraction
+
+
+def scalar(value: float | int | torch.Tensor) -> float:
+    if isinstance(value, (float, int)):
+        return float(value)
+    return float(value.detach().float().cpu())
+
+
+def scalar_or_none(value: float | int | torch.Tensor | None) -> float | None:
+    return scalar(value) if value is not None else None
+
+
+def last_finite_scalar(values: list[float | int | torch.Tensor | None]) -> float:
+    """Last non-NaN value, e.g. the last real basis refresh event rather than
+    whatever step happened to be logged last (which is NaN on non-refresh steps).
+    """
+
+    for value in reversed(values):
+        if value is None:
+            continue
+        number = scalar(value)
+        if number == number:
+            return number
+    return float("nan")
+
+
+def install_random_basis_init() -> None:
+    """Replace EIGH initialization with a random orthonormal frame.
+
+    Diagnostic only, and deliberately a harness-side patch rather than an
+    optimizer argument: it exists to ask whether Oja's tracking equilibrium is a
+    property of the aim or of where EIGH happens to start it. If a random start
+    converges to the same residual an EIGH start settles to, that residual is the
+    aim's own fixed point.
+    """
+
+    def random_fit(self, matrix):
+        side = self.effective_side(matrix)
+        rank = self.effective_rank(matrix)
+        rows = matrix.shape[1] if side == "right" else matrix.shape[0]
+        seed_matrix = torch.randn(rows, rank, device=matrix.device, dtype=torch.float32)
+        frame, _ = torch.linalg.qr(seed_matrix)
+        basis = frame.mT if side == "right" else frame
+        self.basis = basis.to(device=matrix.device, dtype=matrix.dtype).contiguous()
+        self.resolved_side = side
+        return self.basis
+
+    SubspaceProjector.fit = torch.no_grad()(random_fit)
+
+
+def drop_bases_for_refit(optimizer) -> None:
+    """Force a fresh EIGH fit on the next gradient by discarding the frames.
+
+    This is the `eigh at interval` fallback: an uninitialized projector refits
+    from the gradient it next sees instead of moving geodesically. The projected
+    moment survives, since its shape does not change.
+    """
+
+    for group in optimizer.param_groups:
+        for param in group["params"]:
+            state = optimizer.state.get(param)
+            if state:
+                state.pop("basis", None)
+                state.pop("projection_side_is_right", None)
+
+
+def pop_optimizer_diagnostics(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+    """Drain UsuiTrack's telemetry for the interval since the last read.
+
+    Accumulated every step and read here, so a logged point is the mean over the
+    whole logging interval rather than a sample of one step -- smooth lines
+    without an EMA laid over noise. Duck-typed: an optimizer without the method
+    contributes nothing.
+    """
+
+    pop = getattr(optimizer, "pop_diagnostics", None)
+    if pop is None:
+        return {}
+    # `step_gain/<role>` is one series per role class; under `opt/` it would bury
+    # the fleet reads, so it keeps its own section.
+    return {key if key.startswith("step_gain/") else f"opt/{key}": value for key, value in pop().items()}
+
+
+def matrix_role(name: str) -> str:
+    """A matrix's role class for `step_gain/<role>`: its name without the layer
+    index and the path to the layers, so every layer's `q_proj` reads as one
+    short class name."""
+
+    return re.sub(r"\.\d+\.", ".", name, count=1).removesuffix(".weight").removeprefix("model.layers.")
+
+
+def parquet_table_to_texts(table, dataset_format: DatasetFormat = "auto") -> list[str]:
+    names = set(table.column_names)
+    if dataset_format == "auto":
+        if {"query", "synthetic_reasoning", "synthetic_answer"}.issubset(names):
+            dataset_format = "synth"
+        elif {"profile", "text"}.issubset(names):
+            dataset_format = "profile_text"
+        elif "text" in names:
+            dataset_format = "text"
+
+    if dataset_format == "text" and "text" in names:
+        return [text for text in table.column("text").to_pylist() if text]
+    if dataset_format == "profile_text" and {"profile", "text"}.issubset(names):
+        rows = zip(table.column("profile").to_pylist(), table.column("text").to_pylist())
+        texts = []
+        for profile, text in rows:
+            if text:
+                profile_text = str(profile).strip() if profile else ""
+                body = str(text).strip()
+                if profile_text and body:
+                    texts.append(f"{profile_text}{PROFILE_TEXT_DIVIDER}{body}")
+                elif body:
+                    texts.append(body)
+        return texts
+    if dataset_format == "synth" and {"query", "synthetic_reasoning", "synthetic_answer"}.issubset(names):
+        rows = zip(
+            table.column("query").to_pylist(),
+            table.column("synthetic_reasoning").to_pylist(),
+            table.column("synthetic_answer").to_pylist(),
+        )
+        texts = []
+        for query, reasoning, answer in rows:
+            parts = [part for part in (query, reasoning, answer) if part]
+            if parts:
+                texts.append("\n\n".join(parts))
+        return texts
+    raise ValueError(f"Unsupported parquet schema/format, format={dataset_format}, columns={table.column_names}")
+
+
+def parquet_texts(parquet_path: Path, limit: int, dataset_format: DatasetFormat = "auto", offset: int = 0) -> list[str]:
+    pf = pq.ParquetFile(parquet_path)
+    texts = []
+    seen = 0
+    for row_group in range(pf.num_row_groups):
+        for text in parquet_table_to_texts(pf.read_row_group(row_group), dataset_format):
+            if seen < offset:
+                seen += 1
+                continue
+            texts.append(text)
+            if len(texts) >= limit:
+                return texts
+    return texts
+
+
+def synth_texts(data_dir: Path, split: str, limit: int) -> list[str]:
+    shards = sorted(data_dir.glob("synth_*.parquet"))
+    if not shards:
+        raise FileNotFoundError(f"No SYNTH parquet shards found in {data_dir}")
+    shard = shards[-1] if split == "val" else shards[0]
+    return parquet_texts(shard, limit, "synth")
+
+
+def hf_first_parquet_texts(repo_id: str, limit: int, dataset_format: DatasetFormat = "auto", offset: int = 0) -> tuple[list[str], str]:
+    from huggingface_hub import hf_hub_download, list_repo_files
+
+    parquets = sorted(path for path in list_repo_files(repo_id, repo_type="dataset") if path.endswith(".parquet"))
+    if not parquets:
+        raise FileNotFoundError(f"No parquet files found in Hugging Face dataset {repo_id}")
+    first_parquet = parquets[0]
+    local_path = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=first_parquet)
+    return parquet_texts(Path(local_path), limit, dataset_format, offset), first_parquet
+
+
+def packed_text_limit(blocks: int, batch_size: int, seq_len: int) -> int:
+    # SYNTH rows are often shorter than 1k tokens, so row count must scale with
+    # requested token blocks. The packer still verifies enough real tokens exist.
+    return max(blocks * batch_size, (blocks * batch_size * seq_len + 511) // 512, 16)
+
+
+def load_model_and_tokenizer(model_name: str, device: torch.device, activation_checkpointing: bool, attn_implementation: str):
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model_kwargs = {}
+    if attn_implementation:
+        model_kwargs["attn_implementation"] = attn_implementation
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
+        low_cpu_mem_usage=True,
+        **model_kwargs,
+    )
+    model.config.use_cache = False
+    if activation_checkpointing:
+        if not hasattr(model, "gradient_checkpointing_enable"):
+            raise RuntimeError(f"Model {model_name} does not expose gradient_checkpointing_enable()")
+        model.gradient_checkpointing_enable()
+        repair_lfm2_gradient_checkpointing(model)
+    model.to(device)
+    return model, tokenizer
+
+
+def repair_lfm2_gradient_checkpointing(model: torch.nn.Module) -> int:
+    """Wrap LFM2 decoder layers when the HF checkpointing flag is not used.
+
+    The current Transformers LFM2 model advertises gradient checkpointing and
+    accepts `gradient_checkpointing_enable()`, but `Lfm2Model.forward()` calls
+    decoder layers directly instead of routing through `_gradient_checkpointing_func`.
+    Keep this repair narrow: only patch the LFM2 base model and only when its
+    checkpointing flag is enabled.
+    """
+
+    base_model = getattr(model, "model", model)
+    if base_model.__class__.__name__ != "Lfm2Model":
+        return 0
+    if not getattr(base_model, "gradient_checkpointing", False):
+        return 0
+    layers = getattr(base_model, "layers", None)
+    if layers is None:
+        return 0
+
+    wrapped = 0
+    for layer in layers:
+        if getattr(layer, "_usuitrack_checkpoint_wrapped", False):
+            continue
+        original_forward = layer.forward
+
+        def checkpointed_forward(self, *args, __original_forward=original_forward, **kwargs):
+            if torch.is_grad_enabled():
+                return checkpoint(__original_forward, *args, use_reentrant=False, **kwargs)
+            return __original_forward(*args, **kwargs)
+
+        layer.forward = types.MethodType(checkpointed_forward, layer)
+        layer._usuitrack_checkpoint_wrapped = True
+        wrapped += 1
+
+    base_model._usuitrack_checkpoint_wrapped_layers = wrapped
+    return wrapped
+
+
+def is_embedding_like_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(part in lowered for part in ("embed", "embedding", "wte", "wpe", "lm_head"))
+
+
+def select_trainable_named_params(model: torch.nn.Module, param_scope: ParamScope) -> tuple[list[tuple[str, torch.nn.Parameter]], dict[str, int]]:
+    trainable = []
+    stats = {
+        "selected_tensors": 0,
+        "selected_params": 0,
+        "selected_matrix_tensors": 0,
+        "selected_matrix_params": 0,
+        "selected_fallback_tensors": 0,
+        "selected_fallback_params": 0,
+        "excluded_embedding_tensors": 0,
+        "excluded_embedding_params": 0,
+        "excluded_3d_tensors": 0,
+        "excluded_3d_params": 0,
+    }
+
+    for name, param in model.named_parameters():
+        if param_scope == "full":
+            wants_param = True
+        elif param_scope in {"broad-no-embeddings", "matrices-no-embeddings"}:
+            is_embedding = is_embedding_like_name(name)
+            wants_param = not is_embedding if param_scope == "broad-no-embeddings" else param.ndim == 2 and not is_embedding
+            if is_embedding:
+                stats["excluded_embedding_tensors"] += 1
+                stats["excluded_embedding_params"] += param.numel()
+            if param.ndim == 3 and not wants_param:
+                stats["excluded_3d_tensors"] += 1
+                stats["excluded_3d_params"] += param.numel()
+        else:  # pragma: no cover - argparse constrains this
+            raise ValueError(f"unknown param scope: {param_scope}")
+
+        param.requires_grad_(wants_param)
+        if not wants_param:
+            continue
+        trainable.append((name, param))
+        stats["selected_tensors"] += 1
+        stats["selected_params"] += param.numel()
+        if param.ndim == 2:
+            stats["selected_matrix_tensors"] += 1
+            stats["selected_matrix_params"] += param.numel()
+        else:
+            stats["selected_fallback_tensors"] += 1
+            stats["selected_fallback_params"] += param.numel()
+
+    if not trainable:
+        raise RuntimeError(f"No trainable parameters selected for param_scope={param_scope}")
+    return trainable, stats
+
+
+def select_trainable_params(model: torch.nn.Module, param_scope: ParamScope) -> tuple[list[torch.nn.Parameter], dict[str, int]]:
+    trainable, stats = select_trainable_named_params(model, param_scope)
+    return [param for _name, param in trainable], stats
+
+
+def partition_usuitrack_params(
+    named_params: Sequence[tuple[str, torch.nn.Parameter]],
+) -> tuple[list[tuple[str, torch.nn.Parameter]], list[tuple[str, torch.nn.Parameter]]]:
+    matrix = [(name, param) for name, param in named_params if param.ndim == 2]
+    fallback = [(name, param) for name, param in named_params if param.ndim != 2]
+    return matrix, fallback
+
+
+def install_state_matched_lora(
+    model: torch.nn.Module,
+    param_scope: ParamScope,
+    rank: int,
+    alpha: int,
+) -> tuple[list[tuple[str, torch.nn.Parameter]], list[tuple[str, torch.nn.Parameter]], dict[str, int]]:
+    """Inject LoRA into exactly the matrices selected by the harness policy."""
+
+    from peft import LoraConfig, inject_adapter_in_model
+
+    selected_named, stats = select_trainable_named_params(model, param_scope)
+    matrix_named, fallback_named = partition_usuitrack_params(selected_named)
+    modules = dict(model.named_modules())
+    target_modules = []
+    expected_adapter_params = 0
+    matrix_dtype = None
+    for name, param in matrix_named:
+        if not name.endswith(".weight"):
+            raise RuntimeError(f"LoRA target is not a module weight: {name}")
+        module_name = name.removesuffix(".weight")
+        module = modules.get(module_name)
+        if not isinstance(module, torch.nn.Linear):
+            raise RuntimeError(f"LoRA requires every selected matrix to be an nn.Linear weight, got {name} on {type(module).__name__}")
+        target_modules.append(module_name)
+        expected_adapter_params += rank * (param.shape[0] + param.shape[1])
+        if matrix_dtype is None:
+            matrix_dtype = param.dtype
+        elif param.dtype != matrix_dtype:
+            raise RuntimeError(f"LoRA matrix targets must share one dtype, got {matrix_dtype} and {param.dtype}")
+    if not target_modules:
+        raise RuntimeError(f"No matrix modules selected for LoRA with param_scope={param_scope}")
+
+    config = LoraConfig(
+        r=rank,
+        lora_alpha=alpha,
+        lora_dropout=0.0,
+        target_modules=target_modules,
+        bias="none",
+        init_lora_weights=True,
+    )
+    inject_adapter_in_model(config, model)
+
+    adapter_named = [(name, param) for name, param in model.named_parameters() if ".lora_A." in name or ".lora_B." in name]
+    if len(adapter_named) != 2 * len(matrix_named):
+        raise RuntimeError(f"LoRA injected {len(adapter_named)} adapter tensors for {len(matrix_named)} target matrices")
+    if sum(param.numel() for _name, param in adapter_named) != expected_adapter_params:
+        raise RuntimeError("LoRA adapter parameter count does not match the selected matrix shapes")
+    if any(param.dtype != matrix_dtype for _name, param in adapter_named):
+        raise RuntimeError(f"LoRA adapters must remain in the model dtype {matrix_dtype}")
+
+    for _name, param in fallback_named:
+        param.requires_grad_(True)
+    fallback_ids = {id(param) for _name, param in fallback_named}
+    adapter_ids = {id(param) for _name, param in adapter_named}
+    unexpected = [name for name, param in model.named_parameters() if param.requires_grad and id(param) not in adapter_ids and id(param) not in fallback_ids]
+    if unexpected:
+        raise RuntimeError(f"LoRA left unexpected base parameters trainable: {unexpected[:4]}")
+    return adapter_named, fallback_named, stats
+
+
+def validate_lora_optimizer_state_dtype(optimizer: torch.optim.Optimizer, dtype: torch.dtype) -> None:
+    for state in optimizer.state.values():
+        for key in ("exp_avg", "exp_avg_sq"):
+            value = state.get(key)
+            if value is not None and value.dtype != dtype:
+                raise RuntimeError(f"LoRA AdamW {key} must use {dtype}, got {value.dtype}")
+
+
+def infer_d_model(named_params: list[tuple[str, torch.nn.Parameter]]) -> int:
+    """The residual width: the dimension the most 2D weights share a side with."""
+
+    counts: dict[int, int] = {}
+    for _name, param in named_params:
+        if param.ndim == 2:
+            for dim in param.shape:
+                counts[int(dim)] = counts.get(int(dim), 0) + 1
+    return max(counts, key=counts.__getitem__)
+
+
+def resolve_tracked_side(
+    name: str,
+    shape: tuple[int, int],
+    d_model: int,
+    side_overrides: dict[str, str] | None = None,
+) -> str:
+    """`left` (rows / output) or `right` (columns / input): the storage side that
+    tracks the residual stream for this weight. Always resolves.
+
+    1. an override entry (`{name_substring: "in" | "out"}`) whose key is in the
+       name -- for weights whose residual side the rules below get wrong, e.g. a
+       cross-attention K/V that reads a context stream, not the backbone
+    2. the side whose dimension equals `d_model`
+    3. square, or neither side `d_model`: `out` in the name means the output
+       (left) side, otherwise the input (right) side
+    """
+
+    if side_overrides:
+        for substring, side in side_overrides.items():
+            if substring in name:
+                return "right" if side == "in" else "left"
+    rows, cols = int(shape[0]), int(shape[1])
+    if (rows == d_model) != (cols == d_model):
+        return "left" if rows == d_model else "right"
+    return "left" if "out" in name.lower() else "right"
+
+
+def build_usuitrack_param_groups(
+    named_params: list[tuple[str, torch.nn.Parameter]],
+    rank_fraction: float,
+    *,
+    side_overrides: dict[str, str] | None = None,
+    d_model: int | None = None,
+) -> tuple[list[dict], dict[str, int]]:
+    if rank_fraction <= 0:
+        raise ValueError(f"rank_fraction must be positive, got {rank_fraction}")
+    if d_model is None:
+        d_model = infer_d_model(named_params)
+    stats = {"effective_rank_min": 0, "effective_rank_max": 0, "side_policy_left_tensors": 0, "side_policy_right_tensors": 0}
+
+    grouped: dict[str, list[torch.nn.Parameter]] = {}
+    for name, param in named_params:
+        side = resolve_tracked_side(name, tuple(param.shape), d_model, side_overrides)
+        grouped.setdefault(side, []).append(param)
+        if param.ndim == 2:
+            effective_rank = SubspaceProjector(rank_fraction=rank_fraction, side=side).effective_rank(param)
+            stats["effective_rank_min"] = effective_rank if not stats["effective_rank_min"] else min(stats["effective_rank_min"], effective_rank)
+            stats["effective_rank_max"] = max(stats["effective_rank_max"], effective_rank)
+            stats[f"side_policy_{side}_tensors"] += 1
+
+    groups = [
+        {"params": params, "rank_fraction": rank_fraction, "side": side}
+        for side, params in grouped.items()
+    ]
+    return groups, stats
+
+
+def make_packed_batches(tokenizer, texts: list[str], device: torch.device, batch_size: int, seq_len: int, min_batches: int):
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None:
+        raise RuntimeError("tokenizer must define eos_token_id for packed no-mask LM batches")
+    stream: list[int] = []
+    needed = max(min_batches, 1) * batch_size * seq_len
+    for text in texts:
+        token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        if not token_ids:
+            continue
+        stream.extend(token_ids)
+        stream.append(eos_token_id)
+        if len(stream) >= needed:
+            break
+    if len(stream) < needed:
+        raise RuntimeError(f"not enough real tokens to build packed batches: need {needed}, got {len(stream)}")
+    tokens = torch.tensor(stream[:needed], dtype=torch.long).view(max(min_batches, 1), batch_size, seq_len).to(device)
+    return [{"input_ids": batch, "labels": batch.clone()} for batch in tokens]
+
+
+def synth_masked_examples(texts: list[str]) -> list[tuple[str, str]]:
+    examples = []
+    for text in texts:
+        prefix, body = masked_prefix_and_body(text)
+        if prefix is None or body is None:
+            continue
+        examples.append((f"{prefix}{body}", prefix))
+    return examples
+
+
+def masked_prefix_and_body(text: str) -> tuple[str | None, str | None]:
+    if PROFILE_TEXT_DIVIDER in text:
+        query, separator, body = text.partition(PROFILE_TEXT_DIVIDER)
+        divider = PROFILE_TEXT_DIVIDER
+    elif SYNTH_DIVIDER in text:
+        query, separator, body = text.partition(SYNTH_DIVIDER)
+        divider = SYNTH_DIVIDER
+    else:
+        query, separator, body = text.partition("\n\n")
+        divider = SYNTH_DIVIDER
+    if not separator or not query.strip() or not body.strip():
+        return None, None
+    return f"{query}{divider}", body
+
+
+@torch.no_grad()
+def print_final_eval_sample(model, tokenizer, val_texts: list[str], args) -> None:
+    if not args.final_sample:
+        return
+    if args.target_hf_dataset and args.target_format != "synth" and not args.allow_dirty_final_sample:
+        print("final_sample_skipped=target_hf_dataset_requires_explicit_allow_dirty_final_sample")
+        return
+    if not val_texts:
+        print("final_sample_skipped=no_val_texts")
+        return
+
+    prompt = None
+    for offset in range(len(val_texts)):
+        candidate_prompt, _body = masked_prefix_and_body(val_texts[(args.final_sample_row + offset) % len(val_texts)])
+        if candidate_prompt:
+            prompt = candidate_prompt
+            break
+    if prompt is None:
+        print("final_sample_skipped=no_masked_eval_prompt")
+        return
+
+    generator = getattr(model, "_orig_mod", model)
+    was_training = generator.training
+    generator.eval()
+    try:
+        prompt_ids = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"]
+        if tokenizer.bos_token_id is not None:
+            bos = torch.tensor([[tokenizer.bos_token_id]], dtype=prompt_ids.dtype)
+            prompt_ids = torch.cat([bos, prompt_ids], dim=1)
+        if prompt_ids.shape[1] >= args.final_sample_max_seq_len:
+            prompt_ids = prompt_ids[:, : args.final_sample_max_seq_len - 1]
+        prompt_ids = prompt_ids.to(next(generator.parameters()).device)
+        max_new_tokens = max(1, args.final_sample_max_seq_len - int(prompt_ids.shape[1]))
+        output_ids = generator.generate(
+            input_ids=prompt_ids,
+            do_sample=True,
+            temperature=args.final_sample_temperature,
+            top_k=args.final_sample_top_k,
+            top_p=args.final_sample_top_p,
+            repetition_penalty=args.final_sample_repetition_penalty,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+        )[0]
+        prompt_text = tokenizer.decode(prompt_ids[0], skip_special_tokens=True)
+        completion_text = tokenizer.decode(output_ids[prompt_ids.shape[1] :], skip_special_tokens=True)
+        print("final_sample_prompt_begin")
+        print(prompt_text)
+        print("final_sample_prompt_end")
+        print("final_sample_completion_begin")
+        print(completion_text)
+        print("final_sample_completion_end")
+    finally:
+        if was_training:
+            generator.train()
+
+
+def full_lm_examples(texts: list[str]) -> list[tuple[str, str]]:
+    return [(text, "") for text in texts if text]
+
+
+def make_right_padded_batches(
+    tokenizer,
+    examples: list[tuple[str, str]],
+    device: torch.device,
+    batch_size: int,
+    seq_len: int,
+    min_batches: int,
+):
+    eos_token_id = tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else eos_token_id
+    if eos_token_id is None or pad_token_id is None:
+        raise RuntimeError("tokenizer must define eos_token_id and pad_token_id or eos fallback for right-padded LM batches")
+
+    rows = []
+    needed_rows = max(min_batches, 1) * batch_size
+    bos_token_id = tokenizer.bos_token_id
+    for text, masked_prefix in examples:
+        text_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        if not text_ids:
+            continue
+        prefix_ids = tokenizer(masked_prefix, add_special_tokens=False)["input_ids"] if masked_prefix else []
+        input_ids = ([bos_token_id] if bos_token_id is not None else []) + text_ids + [eos_token_id]
+        labels = input_ids.copy()
+        masked_until = (1 if bos_token_id is not None else 0) + min(len(prefix_ids), len(text_ids))
+        labels[:masked_until] = [-100] * masked_until
+        if len(input_ids) > seq_len:
+            input_ids = input_ids[:seq_len]
+            labels = labels[:seq_len]
+        if not any(label != -100 for label in labels):
+            continue
+        padding = seq_len - len(input_ids)
+        if padding > 0:
+            input_ids.extend([pad_token_id] * padding)
+            labels.extend([-100] * padding)
+        rows.append((input_ids, labels))
+        if len(rows) >= needed_rows:
+            break
+
+    if len(rows) < needed_rows:
+        raise RuntimeError(f"not enough usable examples to build right-padded batches: need {needed_rows}, got {len(rows)}")
+
+    input_tensor = torch.tensor([row[0] for row in rows], dtype=torch.long).view(max(min_batches, 1), batch_size, seq_len).to(device)
+    label_tensor = torch.tensor([row[1] for row in rows], dtype=torch.long).view(max(min_batches, 1), batch_size, seq_len).to(device)
+    return [{"input_ids": input_batch, "labels": label_batch} for input_batch, label_batch in zip(input_tensor, label_tensor)]
+
+
+def make_batches(
+    tokenizer,
+    texts: list[str],
+    device: torch.device,
+    batch_size: int,
+    seq_len: int,
+    min_batches: int,
+    batching: BatchingMode,
+    stream: Literal["synth", "source"],
+):
+    if batching == "eos_packed_no_mask":
+        return make_packed_batches(tokenizer, texts, device, batch_size, seq_len, min_batches)
+    if batching == "synth_right_padded_no_mask":
+        examples = synth_masked_examples(texts) if stream == "synth" else full_lm_examples(texts)
+        return make_right_padded_batches(tokenizer, examples, device, batch_size, seq_len, min_batches)
+    raise ValueError(f"unknown batching mode: {batching}")
+
+
+def batch_tokens(batch: dict[str, torch.Tensor]) -> int:
+    return int(batch["input_ids"].numel())
+
+
+def batch_supervised_tokens(batch: dict[str, torch.Tensor]) -> int:
+    return int((batch["labels"] != -100).sum().item())
+
+
+def _inner_causal_lm_modules(model):
+    inner = getattr(model, "_orig_mod", model)
+    base = getattr(inner, "model", None)
+    lm_head = getattr(inner, "lm_head", None)
+    if base is None or lm_head is None:
+        raise RuntimeError("CCE LM loss requires a causal LM with .model and .lm_head modules")
+    return base, lm_head
+
+
+def cce_causal_lm_loss(model, batch: dict[str, torch.Tensor], reduction: str = "mean") -> torch.Tensor:
+    from cut_cross_entropy import linear_cross_entropy
+
+    base, lm_head = _inner_causal_lm_modules(model)
+    outputs = base(
+        input_ids=batch["input_ids"],
+        use_cache=False,
+    )
+    return linear_cross_entropy(outputs.last_hidden_state, lm_head.weight, batch.get("labels", batch["input_ids"]), ignore_index=-100, shift=True, reduction=reduction)
+
+
+@torch.no_grad()
+def evaluate_loss(model, batches) -> tuple[float, dict[str, float]]:
+    """The mean of per-batch token means, as always, plus p10/p50/p90 of the
+    per-sequence token-mean loss: whether a change is broad or carried by a few."""
+
+    was_training = model.training
+    model.eval()
+    try:
+        losses, sequence_losses = [], []
+        for batch in batches:
+            token_losses = cce_causal_lm_loss(model, batch, reduction="none").float()
+            supervised = (batch.get("labels", batch["input_ids"])[:, 1:] != -100).sum(dim=1)
+            losses.append(token_losses.sum() / supervised.sum())
+            sequence_losses.append(token_losses.sum(dim=1)[supervised > 0] / supervised[supervised > 0])
+        quantiles = torch.quantile(torch.cat(sequence_losses), torch.tensor([0.1, 0.5, 0.9], device=losses[0].device)).tolist()
+        return float(torch.stack(losses).mean().cpu()), dict(zip(("p10", "p50", "p90"), quantiles))
+    finally:
+        if was_training:
+            model.train()
+
+
+def eval_quantile_metrics(name: str, quantiles: dict[str, float] | None) -> dict[str, float]:
+    return {f"eval/{name}_loss_{key}": value for key, value in (quantiles or {}).items()}
+
+
+def train_step(
+    model,
+    optimizer: torch.optim.Optimizer,
+    trainable: list[torch.nn.Parameter],
+    batches,
+    start_index: int,
+    grad_accum_steps: int,
+    grad_clip_norm: float,
+    collect_norms: bool,
+    fallback_optimizer: torch.optim.Optimizer | None = None,
+    fallback_params: Sequence[torch.nn.Parameter] = (),
+    consume_fallback_grads: bool = True,
+    collect_memory: bool = False,
+    backward_memory_trace: BackwardMemoryTrace | None = None,
+    global_clip_params: Sequence[torch.nn.Parameter] = (),
+    global_clip_norm: float | None = None,
+) -> dict[str, float | torch.Tensor | None]:
+    optimizer.zero_grad(set_to_none=True)
+    if fallback_optimizer is not None:
+        fallback_optimizer.zero_grad(set_to_none=True)
+    sensors = CudaMemorySensors(trainable[0].device) if collect_memory and trainable and trainable[0].is_cuda else None
+    if sensors is not None:
+        sensors.start()
+    losses = []
+    for offset in range(grad_accum_steps):
+        batch = batches[(start_index + offset) % len(batches)]
+        loss = cce_causal_lm_loss(model, batch)
+        if sensors is not None and offset == grad_accum_steps - 1:
+            sensors.mark("forward")
+        if backward_memory_trace is not None and offset == grad_accum_steps - 1:
+            backward_memory_trace.start()
+        (loss / grad_accum_steps).backward()
+        if backward_memory_trace is not None and offset == grad_accum_steps - 1:
+            backward_memory_trace.stop()
+        if sensors is not None and offset == grad_accum_steps - 1:
+            sensors.mark("backward")
+        losses.append(loss.detach().float())
+    if collect_norms:
+        released_grad_norms = optimizer.released_matrix_grad_norms() if hasattr(optimizer, "released_matrix_grad_norms") else ()
+        grad_norm, grad_norm_median_tensor, grad_clip_fraction = gradient_norm_statistics(
+            trainable, grad_clip_norm, released_grad_norms
+        )
+    else:
+        grad_norm = float("nan")
+        grad_norm_median_tensor = float("nan")
+        grad_clip_fraction = None
+    if global_clip_norm is not None:
+        torch.nn.utils.clip_grad_norm_(global_clip_params, global_clip_norm)
+    param_norm = parameter_norm(trainable) if collect_norms else float("nan")
+    optimizer.step()
+    if fallback_optimizer is not None:
+        fallback_optimizer.step()
+        if consume_fallback_grads:
+            for param in fallback_params:
+                param.grad = None
+    if sensors is not None:
+        sensors.mark("optimizer")
+    result = {
+        "loss": torch.stack(losses).mean(),
+        "grad_norm": grad_norm,
+        "grad_norm_median_tensor": grad_norm_median_tensor,
+        "grad_clip_fraction": grad_clip_fraction,
+        "param_norm": param_norm,
+    }
+    if sensors is not None:
+        for phase, reading in sensors.readings.items():
+            result[f"memory_{phase}_current_allocated"] = reading.current_allocated
+            result[f"memory_{phase}_peak_allocated"] = reading.peak_allocated
+            result[f"memory_{phase}_current_reserved"] = reading.current_reserved
+            result[f"memory_{phase}_peak_reserved"] = reading.peak_reserved
+        result["_memory_prior_peak_allocated"] = sensors.prior_peak_allocated
+        result["_memory_prior_peak_reserved"] = sensors.prior_peak_reserved
+    return result
+
+
+def wandb_log(wandb_run: Any | None, data: Mapping[str, float | int | str | None], step: int) -> None:
+    if wandb_run is not None:
+        # ``None`` means this run does not define the metric (for example source
+        # validation without a retention corpus). Keep it absent: NaN is reserved
+        # for a numeric result that actually became non-finite.
+        wandb_run.log({key: value for key, value in data.items() if value is not None}, step=step)
+
+
+def optimizer_base_lrs(optimizer: torch.optim.Optimizer) -> list[float]:
+    return [float(group["lr"]) for group in optimizer.param_groups]
+
+
+def apply_lr_warmup(optimizer: torch.optim.Optimizer, base_lrs: Sequence[float], optimizer_step: int, warmup_steps: int) -> float:
+    if warmup_steps <= 0:
+        return 1.0
+    scale = min(1.0, optimizer_step / warmup_steps)
+    for group, base_lr in zip(optimizer.param_groups, base_lrs, strict=True):
+        group["lr"] = base_lr * scale
+    return scale
+
+
+def validate_gradient_release_contract(args) -> None:
+    if not args.release_matrix_grads:
+        return
+    if args.grad_accum_steps != 1:
+        raise ValueError("--release-matrix-grads requires --grad-accum-steps 1")
+    if args.keep_grads_after_step:
+        raise ValueError("--release-matrix-grads is incompatible with --keep-grads-after-step")
+
+
+def maybe_compile_training_model(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
+    """Compile decoder layers independently while leaving their outer loop eager.
+
+    `cce_causal_lm_loss()` bypasses the CausalLM wrapper and calls the inner
+    base model directly. Keeping that base model eager makes each compiled layer
+    a separate AOTAutograd region, so released matrix gradients need not wait for
+    one whole-model compiled backward to return.
+    """
+
+    if not enabled:
+        return model
+    base = getattr(model, "model", None)
+    if not isinstance(base, torch.nn.Module):
+        raise RuntimeError("regional compilation requires a causal LM with a .model module")
+    layers = getattr(base, "layers", None)
+    if not isinstance(layers, torch.nn.ModuleList) or not layers:
+        raise RuntimeError("regional compilation requires a causal LM with a nonempty .model.layers ModuleList")
+    for layer in layers:
+        layer.compile()
+    setattr(base, "_usuitrack_compiled_layer_count", len(layers))
+    return model
+
+
+def run_optimizer(
+    args,
+    optimizer_name: str,
+    model_name: str,
+    train_texts: list[str],
+    val_texts: list[str],
+    retention_texts: list[str] | None,
+    device: torch.device,
+    wandb_run: Any | None = None,
+) -> dict[str, float | int | str]:
+    fallback_lr = args.fallback_lr
+    if optimizer_name == "usuitrack":
+        validate_gradient_release_contract(args)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+    gc.collect()
+    model, tokenizer = load_model_and_tokenizer(model_name, device, args.activation_checkpointing, args.attn_implementation)
+    adapter_named: list[tuple[str, torch.nn.Parameter]] = []
+    if optimizer_name == "lora":
+        adapter_named, fallback_named, param_stats = install_state_matched_lora(model, args.param_scope, args.lora_rank, args.lora_alpha)
+        trainable_named = adapter_named + fallback_named
+    else:
+        trainable_named, param_stats = select_trainable_named_params(model, args.param_scope)
+        _selected_matrix_named, fallback_named = partition_usuitrack_params(trainable_named)
+    trainable = [param for _name, param in trainable_named]
+    matrix_named, _trainable_fallback_named = partition_usuitrack_params(trainable_named)
+    fallback_params = [param for _name, param in fallback_named]
+    backward_memory_trace = BackwardMemoryTrace(device) if args.trace_backward_memory and optimizer_name == "usuitrack" else None
+    if backward_memory_trace is not None:
+        backward_memory_trace.install_before(matrix_named)
+    if optimizer_name == "usuitrack":
+        usuitrack_param_groups, policy_stats = build_usuitrack_param_groups(
+            matrix_named,
+            args.rank_fraction,
+        )
+    else:
+        usuitrack_param_groups = []
+        policy_stats = {"effective_rank_min": 0, "effective_rank_max": 0, "side_policy_left_tensors": 0, "side_policy_right_tensors": 0}
+    train_batch_count = (args.warmup_steps + args.max_steps) * args.grad_accum_steps
+    train_batches = make_batches(tokenizer, train_texts, device, args.batch_size, args.seq_len, train_batch_count, args.batching, "synth")
+    val_batches = make_batches(tokenizer, val_texts, device, args.batch_size, args.seq_len, args.val_blocks, args.batching, "synth")
+    retention_batches = make_batches(tokenizer, retention_texts, device, args.batch_size, args.seq_len, args.retention_val_blocks, args.batching, "source") if retention_texts else None
+
+    fallback_optimizer = None
+    if optimizer_name == "usuitrack":
+        optimizer = UsuiTrack(
+            usuitrack_param_groups,
+            lr=args.usuitrack_lr,
+            beta=args.beta,
+            basis_update_interval=args.basis_update_interval,
+            consume_grad=not args.keep_grads_after_step,
+            release_matrix_grads=args.release_matrix_grads,
+            compile_tensor_kernels=args.torch_compile,
+        )
+        # Accumulated every step and drained on the logging cadence, so each
+        # logged point is the interval's mean rather than one sampled step.
+        optimizer.diagnostics = "full" if args.basis_lag_diagnostic else "core"
+        optimizer.diagnostics_lag_interval = args.basis_lag_interval
+        optimizer.diagnostic_roles = {param: matrix_role(name) for name, param in matrix_named}
+        if fallback_params:
+            fallback_optimizer = StochasticAdamW(
+                fallback_params,
+                lr=fallback_lr,
+                betas=(0.9, 0.99),
+                eps=1e-8,
+                weight_decay=0.0,
+            )
+        if backward_memory_trace is not None:
+            backward_memory_trace.install_after(matrix_named)
+        model = maybe_compile_training_model(model, args.torch_compile)
+    elif optimizer_name in {"adamw", "torch_adamw"}:
+        optimizer = torch.optim.AdamW(trainable, lr=args.adamw_lr, betas=(0.9, 0.95), weight_decay=0.0, fused=device.type == "cuda")
+        model = maybe_compile_training_model(model, args.torch_compile)
+    elif optimizer_name == "lora":
+        adapter_params = [param for _name, param in adapter_named]
+        optimizer = torch.optim.AdamW(
+            adapter_params,
+            lr=args.lora_lr,
+            betas=(0.9, 0.99),
+            eps=1e-8,
+            weight_decay=0.0,
+            fused=device.type == "cuda",
+        )
+        if fallback_params:
+            fallback_optimizer = StochasticAdamW(
+                fallback_params,
+                lr=fallback_lr,
+                betas=(0.9, 0.99),
+                eps=1e-8,
+                weight_decay=0.0,
+            )
+        model = maybe_compile_training_model(model, args.torch_compile)
+    else:  # pragma: no cover
+        raise ValueError(optimizer_name)
+    base_lrs = optimizer_base_lrs(optimizer)
+    fallback_base_lrs = optimizer_base_lrs(fallback_optimizer) if fallback_optimizer is not None else []
+
+    initial_val, initial_q = evaluate_loss(model, val_batches) if not args.skip_validation else (float("nan"), None)
+    initial_retention_val, initial_retention_q = evaluate_loss(model, retention_batches) if retention_batches is not None and not args.skip_validation else (float("nan"), None)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    wandb_log(
+        wandb_run,
+        {
+            "eval/target_loss": initial_val if not args.skip_validation else None,
+            "eval/source_loss": initial_retention_val if retention_batches is not None and not args.skip_validation else None,
+            **eval_quantile_metrics("target", initial_q),
+            **eval_quantile_metrics("source", initial_retention_q),
+        },
+        step=0,
+    )
+    measured_steps = []
+    loss_window = []
+    last_diagnostics: dict[str, float] = {}
+    last_eval_val = float("nan")
+
+    for step in range(args.warmup_steps):
+        batch_index = step * args.grad_accum_steps
+        apply_lr_warmup(optimizer, base_lrs, step + 1, args.lr_warmup_steps)
+        if fallback_optimizer is not None:
+            apply_lr_warmup(fallback_optimizer, fallback_base_lrs, step + 1, args.lr_warmup_steps)
+        train_step(
+            model,
+            optimizer,
+            trainable,
+            train_batches,
+            batch_index,
+            args.grad_accum_steps,
+            args.grad_clip_norm,
+            False,
+            fallback_optimizer,
+            fallback_params,
+            not args.keep_grads_after_step,
+            global_clip_params=[param for _name, param in adapter_named],
+            global_clip_norm=args.lora_grad_clip_norm if optimizer_name == "lora" else None,
+        )
+    if optimizer_name == "lora":
+        validate_lora_optimizer_state_dtype(optimizer, adapter_named[0][1].dtype)
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
+    start_time = time.perf_counter()
+    eval_elapsed = 0.0
+    for step in range(args.max_steps):
+        batch_index = (args.warmup_steps + step) * args.grad_accum_steps
+        global_step = step + 1
+        apply_lr_warmup(optimizer, base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps)
+        if fallback_optimizer is not None:
+            apply_lr_warmup(fallback_optimizer, fallback_base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps)
+        if args.eigh_refit_interval > 0 and global_step > 1 and (global_step - 1) % args.eigh_refit_interval == 0:
+            drop_bases_for_refit(optimizer)
+        should_log_train = args.wandb_log_every > 0 and global_step % args.wandb_log_every == 0
+        should_eval = args.eval_every > 0 and global_step % args.eval_every == 0
+        collect_norms = should_log_train
+        step_result = train_step(
+            model,
+            optimizer,
+            trainable,
+            train_batches,
+            batch_index,
+            args.grad_accum_steps,
+            args.grad_clip_norm,
+            collect_norms,
+            fallback_optimizer,
+            fallback_params,
+            not args.keep_grads_after_step,
+            global_step == args.max_steps,
+            backward_memory_trace if global_step == args.max_steps else None,
+            [param for _name, param in adapter_named],
+            args.lora_grad_clip_norm if optimizer_name == "lora" else None,
+        )
+        measured_steps.append(step_result)
+        loss_window.append(step_result["loss"])
+        train_loss = None
+        if should_log_train:
+            train_loss = scalar(torch.stack(loss_window).mean())
+            loss_window.clear()
+            train_metrics = {
+                "train/loss": train_loss,
+                "train/grad_norm": scalar(step_result["grad_norm"]),
+                "train/grad_norm_median_tensor": scalar(step_result["grad_norm_median_tensor"]),
+                "train/grad_clip_fraction": scalar_or_none(step_result["grad_clip_fraction"]),
+                "train/param_norm": scalar_or_none(step_result["param_norm"]),
+                "train/lr": optimizer.param_groups[0]["lr"],
+            }
+            last_diagnostics = pop_optimizer_diagnostics(optimizer)
+            train_metrics.update(last_diagnostics)
+            wandb_log(
+                wandb_run,
+                train_metrics,
+                step=global_step,
+            )
+        if should_eval and not args.skip_validation:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            eval_start = time.perf_counter()
+            eval_val, eval_q = evaluate_loss(model, val_batches)
+            eval_retention_val, eval_retention_q = evaluate_loss(model, retention_batches) if retention_batches is not None else (None, None)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            eval_elapsed += time.perf_counter() - eval_start
+            last_eval_val = eval_val
+            wandb_log(
+                wandb_run,
+                {
+                    "eval/target_loss": eval_val,
+                    "eval/source_loss": eval_retention_val,
+                    **eval_quantile_metrics("target", eval_q),
+                    **eval_quantile_metrics("source", eval_retention_q),
+                },
+                step=global_step,
+            )
+        if should_log_train or should_eval:
+            avg_step_seconds = (time.perf_counter() - start_time - eval_elapsed) / global_step
+            console_train_loss = train_loss if train_loss is not None else scalar(step_result["loss"])
+            print(
+                f"step={global_step} train_loss={console_train_loss:.6f} eval_loss={last_eval_val:.6f} "
+                f"avg_step_seconds={avg_step_seconds:.4f}",
+                flush=True,
+            )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    measured_elapsed = time.perf_counter() - start_time
+    training_elapsed = measured_elapsed - eval_elapsed
+    training_peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    training_peak_reserved = torch.cuda.max_memory_reserved(device) if device.type == "cuda" else 0
+    memory_result = measured_steps[-1] if measured_steps else {}
+    if device.type == "cuda" and memory_result:
+        training_peak = max(
+            training_peak,
+            int(memory_result.get("_memory_prior_peak_allocated", 0)),
+            *(int(value) for key, value in memory_result.items() if key.endswith("_peak_allocated")),
+        )
+        training_peak_reserved = max(
+            training_peak_reserved,
+            int(memory_result.get("_memory_prior_peak_reserved", 0)),
+            *(int(value) for key, value in memory_result.items() if key.endswith("_peak_reserved")),
+        )
+    final_val, final_q = evaluate_loss(model, val_batches) if not args.skip_validation else (float("nan"), None)
+    final_retention_val, final_retention_q = evaluate_loss(model, retention_batches) if retention_batches is not None and not args.skip_validation else (float("nan"), None)
+    if not args.skip_validation:
+        print_final_eval_sample(model, tokenizer, val_texts, args)
+        wandb_log(
+            wandb_run,
+            {
+                "eval/target_loss": final_val,
+                "eval/source_loss": final_retention_val if retention_batches is not None else None,
+                **eval_quantile_metrics("target", final_q),
+                **eval_quantile_metrics("source", final_retention_q),
+            },
+            step=global_step,
+        )
+    post_eval_peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    post_eval_peak_reserved = torch.cuda.max_memory_reserved(device) if device.type == "cuda" else 0
+    post_eval_peak = max(post_eval_peak, training_peak)
+    post_eval_peak_reserved = max(post_eval_peak_reserved, training_peak_reserved)
+    measured_losses = [step["loss"] for step in measured_steps]
+    measured_grad_norms = [step["grad_norm"] for step in measured_steps]
+    measured_param_norms = [step["param_norm"] for step in measured_steps]
+    state_bytes = optimizer_state_bytes_by_category(optimizer)
+    fallback_state_bytes = optimizer_state_bytes_by_category(fallback_optimizer)["total"] if fallback_optimizer is not None else state_bytes["fallback"]
+    adapter_param_bytes = sum(param.numel() * param.element_size() for _name, param in adapter_named)
+    adapter_optimizer_state_bytes = state_bytes["total"] if optimizer_name == "lora" else 0
+    matrix_state_bytes = adapter_param_bytes + adapter_optimizer_state_bytes if optimizer_name == "lora" else state_bytes["matrix"]
+    total_state_bytes = matrix_state_bytes + fallback_state_bytes if optimizer_name in {"usuitrack", "lora"} else state_bytes["total"]
+    compiled_layer_count = int(getattr(getattr(model, "model", None), "_usuitrack_compiled_layer_count", 0))
+    result = {
+        "optimizer": optimizer_name,
+        "rank": args.lora_rank if optimizer_name == "lora" else 0,
+        "rank_fraction": args.rank_fraction if optimizer_name == "usuitrack" else 0.0,
+        "lora_alpha": args.lora_alpha if optimizer_name == "lora" else 0,
+        "lora_adapter_dtype": str(adapter_named[0][1].dtype).removeprefix("torch.") if optimizer_name == "lora" else "n/a",
+        "lora_optimizer_state_dtype": str(adapter_named[0][1].dtype).removeprefix("torch.") if optimizer_name == "lora" else "n/a",
+        "lora_adapter_param_bytes": adapter_param_bytes,
+        "lora_optimizer_state_bytes": adapter_optimizer_state_bytes,
+        "lora_lr": args.lora_lr if optimizer_name == "lora" else 0.0,
+        "lora_beta1": 0.9 if optimizer_name == "lora" else 0.0,
+        "lora_beta2": 0.99 if optimizer_name == "lora" else 0.0,
+        "lora_grad_clip_norm": args.lora_grad_clip_norm if optimizer_name == "lora" else 0.0,
+        "effective_rank_min": policy_stats["effective_rank_min"] if optimizer_name == "usuitrack" else 0,
+        "effective_rank_max": policy_stats["effective_rank_max"] if optimizer_name == "usuitrack" else 0,
+        "side_policy_left_tensors": policy_stats["side_policy_left_tensors"] if optimizer_name == "usuitrack" else 0,
+        "side_policy_right_tensors": policy_stats["side_policy_right_tensors"] if optimizer_name == "usuitrack" else 0,
+        "basis_update_interval": args.basis_update_interval if optimizer_name == "usuitrack" else 0,
+        "lr_warmup_steps": args.lr_warmup_steps,
+        "consume_grad": (not args.keep_grads_after_step) if optimizer_name == "usuitrack" else False,
+        "release_matrix_grads": args.release_matrix_grads if optimizer_name == "usuitrack" else False,
+        "fallback_lr": fallback_lr if optimizer_name in {"usuitrack", "lora"} and fallback_params else 0.0,
+        # StochasticAdamW dispatches per parameter: bf16 parameters get bf16
+        # moments accumulated in fp32 and written back stochastically, fp32
+        # parameters get plain fp32 state. So this reports what the fallback set
+        # actually holds rather than a single assumed dtype.
+        "fallback_state_dtype": (
+            "/".join(sorted({str(param.dtype).removeprefix("torch.") for param in fallback_params}))
+            if optimizer_name in {"usuitrack", "lora"} and fallback_params
+            else "n/a"
+        ),
+        "activation_checkpointing": args.activation_checkpointing,
+        "torch_compile": args.torch_compile,
+        "compile_scope": "decoder_layer" if args.torch_compile else "off",
+        "compiled_layer_count": compiled_layer_count,
+        "attn_implementation": getattr(getattr(model, "config", None), "_attn_implementation", "n/a"),
+        "batching": args.batching,
+        "loss_impl": "cce",
+        "skip_validation": args.skip_validation,
+        "actual_sequence_tokens": batch_tokens(train_batches[0]),
+        "actual_supervised_tokens": batch_supervised_tokens(train_batches[0]),
+        "tokens_per_optimizer_step": batch_tokens(train_batches[0]) * args.grad_accum_steps,
+        "supervised_tokens_per_optimizer_step": batch_supervised_tokens(train_batches[0]) * args.grad_accum_steps,
+        "measured_tokens_per_second": (batch_tokens(train_batches[0]) * args.grad_accum_steps * args.max_steps) / training_elapsed,
+        "measured_tokens_per_second_with_eval": (batch_tokens(train_batches[0]) * args.grad_accum_steps * args.max_steps) / measured_elapsed,
+        "matrix_state_bytes": matrix_state_bytes,
+        "fallback_state_bytes": fallback_state_bytes,
+        "state_bytes": total_state_bytes,
+        "initial_val_loss": initial_val,
+        "final_val_loss": final_val,
+        "initial_retention_val_loss": initial_retention_val,
+        "final_retention_val_loss": final_retention_val,
+        **{f"final_val_loss_{key}": value for key, value in (final_q or {}).items()},
+        **{f"final_retention_val_loss_{key}": value for key, value in (final_retention_q or {}).items()},
+        "retention_val_loss_delta": final_retention_val - initial_retention_val,
+        "last_measured_train_loss": scalar(measured_losses[-1]),
+        "last_logged_grad_norm": last_finite_scalar(measured_grad_norms),
+        "last_logged_param_norm": last_finite_scalar(measured_param_norms),
+        **{f"last_logged_{key.removeprefix('opt/')}": value for key, value in last_diagnostics.items()},
+        "measured_elapsed_seconds": measured_elapsed,
+        "measured_train_elapsed_seconds": training_elapsed,
+        "measured_eval_elapsed_seconds": eval_elapsed,
+        "measured_step_seconds": training_elapsed / args.max_steps,
+        "measured_step_seconds_with_eval": measured_elapsed / args.max_steps,
+        "peak_cuda_bytes": training_peak,
+        "peak_cuda_reserved_bytes": training_peak_reserved,
+        "post_eval_peak_cuda_bytes": post_eval_peak,
+        "post_eval_peak_cuda_reserved_bytes": post_eval_peak_reserved,
+    }
+    for phase in ("baseline", "forward", "backward", "optimizer"):
+        for kind in ("current_allocated", "peak_allocated", "current_reserved", "peak_reserved"):
+            result[f"memory_{phase}_{kind}"] = int(memory_result.get(f"memory_{phase}_{kind}", 0))
+    if backward_memory_trace is not None:
+        result.update(backward_memory_trace.summary())
+        backward_memory_trace.close()
+    del optimizer, fallback_optimizer, model, tokenizer, train_batches, val_batches, retention_batches
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    gc.collect()
+    return result
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Faithful pretrained-LLM SYNTH harness for UsuiTrack")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"HF model name; default = {DEFAULT_MODEL}")
+    parser.add_argument("--data-dir", default="/home/djg/.cache/nanochat/base_data_synth")
+    parser.add_argument("--target-hf-dataset", default="", help="optional Hugging Face target dataset; first parquet shard only")
+    parser.add_argument("--target-format", choices=("auto", "synth", "profile_text", "text"), default="auto", help="target dataset row formatter; profile_text masks profile+divider and trains only on text")
+    parser.add_argument("--target-val-offset", type=int, default=9000, help="row offset for validation when --target-hf-dataset is used")
+    parser.add_argument("--retention-data-dir", default="", help="optional SYNTH-format source/retention parquet directory")
+    parser.add_argument("--retention-hf-dataset", default=DEFAULT_SOURCE_HF_DATASET, help=f"Hugging Face source/retention dataset; first parquet shard only; default = {DEFAULT_SOURCE_HF_DATASET}; pass an empty string to disable")
+    parser.add_argument("--optimizers", default="usuitrack", help="comma-separated: usuitrack,lora,torch_adamw")
+    parser.add_argument("--param-scope", choices=("full", "broad-no-embeddings", "matrices-no-embeddings"), default="broad-no-embeddings")
+    parser.add_argument("--warmup-steps", type=int, default=1)
+    parser.add_argument("--max-steps", type=int, default=1000, help="ceiling on measured optimizer steps; default is the current 1k quality contract; clamped down with a warning if the dataset can't supply this many rows")
+    parser.add_argument("--seq-len", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--val-blocks", type=int, default=8, help="number of validation batches/blocks to build")
+    parser.add_argument("--retention-val-blocks", type=int, default=8, help="number of source validation batches/blocks to build")
+    parser.add_argument("--batching", choices=("synth_right_padded_no_mask", "eos_packed_no_mask"), default="synth_right_padded_no_mask", help="batch construction policy; default is faithful SYNTH diagnostics; choose eos_packed_no_mask explicitly for throughput")
+    parser.add_argument("--rank-fraction", type=float, default=0.1, help="UsuiTrack rank_fraction: each matrix's rank is this times sqrt(rows * cols)")
+    parser.add_argument("--usuitrack-lr", type=float, default=4e-4)
+    parser.add_argument("--fallback-lr", type=float, default=DEFAULT_FALLBACK_LR, help="Non-matrix AdamW LR")
+    parser.add_argument("--adamw-lr", type=float, default=2e-5)
+    parser.add_argument("--lora-rank", type=int, default=DEFAULT_LORA_RANK)
+    parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
+    parser.add_argument("--lora-lr", type=float, default=2e-4)
+    parser.add_argument("--lora-grad-clip-norm", type=float, default=1.0, help="global gradient clip for LoRA adapter parameters")
+    parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
+    parser.add_argument("--beta", type=float, default=0.95)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="clip the raw gradient per tensor before Adafactor, Oja, and projection; must be positive for usuitrack, where the clip protects Adafactor's second-moment memory and has no off switch")
+    parser.add_argument("--random-basis-init", action="store_true", help="start from a random orthonormal frame instead of the EIGH fit; asks whether Oja's equilibrium is a property of the aim or of its starting point")
+    parser.add_argument("--eigh-refit-interval", type=int, default=0, help="discard and refit every frame by EIGH every N measured steps; 0 disables. The fallback if geodesic tracking cannot hold a fit")
+    parser.add_argument("--agreement-planes", type=int, default=0, help="override the agreement meter's width k for a sweep; 0 keeps the released constant. Set on the module, like --geodesic-stepsize, because it is a harness knob and not a product surface")
+    parser.add_argument("--geodesic-stepsize", type=float, default=0.0, help="override eta, the angle one geodesic turns each live plane by; 0 keeps the released constant. Not a cadence -- that is --basis-update-interval. Set on the module rather than as an optimizer argument deliberately -- this is a harness knob for experiments, not a product surface")
+    parser.add_argument("--seed", type=int, default=0, help="seed torch's RNG. Stochastic rounding draws from it on every bf16 parameter write, so without this a run is not reproducible; measured run-to-run spread without a seed was 3e-4 on target loss and 2e-3 on source")
+    parser.add_argument("--basis-lag-diagnostic", action="store_true", help="run the optimizer at diagnostics=full: adds transport_lag, transport_curve and transport_spin, the reads that need a frame snapshot. The only reads that can show the frame has converged rather than orbiting; costs one [d,r] snapshot per sampled matrix")
+    parser.add_argument("--basis-lag-interval", type=int, default=5, help="how many basis updates back the lag snapshot sits")
+    parser.add_argument("--basis-update-interval", type=int, default=1, help="basis geodesic cadence in matrix optimizer steps; the held-frame projection and projected EMA still run every step")
+    parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=True, help="model gradient checkpointing; default ON (bs16@seq1024 OOMs a 12GB card without it); --no-activation-checkpointing to disable")
+    parser.add_argument(
+        "--torch-compile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="compile each decoder layer independently plus UsuiTrack tensor kernels with torch.compile (default on); the outer model loop and Python optimizer orchestration remain eager",
+    )
+    parser.add_argument("--attn-implementation", default="sdpa", help="Transformers attention implementation; local default is sdpa until real flash kernels are available")
+    parser.add_argument("--skip-validation", action="store_true", help="skip initial/final validation for throughput-only runs")
+    parser.add_argument("--keep-grads-after-step", action="store_true", help="leave p.grad populated after optimizer.step(); default consumes grads once projected")
+    parser.add_argument(
+        "--release-matrix-grads",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="prepare each full matrix gradient in a post-accumulate backward hook and release it immediately while retaining batched Oja/Aurora application in optimizer.step() (default on; requires no accumulation)",
+    )
+    parser.add_argument(
+        "--trace-backward-memory",
+        action="store_true",
+        help="probe-only: buffer per-matrix CUDA allocator readings immediately before and after gradient preparation on the final measured backward",
+    )
+    parser.add_argument("--eval-every", type=int, default=100, help="periodically log target/source validation loss every N measured steps; default 100 for the 1k quality contract; use 50 for a 200-step sensor; 0 disables")
+    parser.add_argument("--no-final-sample", dest="final_sample", action="store_false", help="disable final qualitative generation from a target eval prompt")
+    parser.set_defaults(final_sample=True)
+    parser.add_argument("--final-sample-row", type=int, default=0, help="target eval row index used for final qualitative generation")
+    parser.add_argument("--final-sample-max-seq-len", type=int, default=4096, help="maximum prompt+generated token length for final qualitative generation")
+    parser.add_argument("--final-sample-temperature", type=float, default=0.6)
+    parser.add_argument("--final-sample-top-k", type=int, default=20)
+    parser.add_argument("--final-sample-top-p", type=float, default=0.95)
+    parser.add_argument("--final-sample-repetition-penalty", type=float, default=1.1, help="mild repetition penalty for final qualitative generation; 1.0 disables")
+    parser.add_argument("--allow-dirty-final-sample", action="store_true", help="allow printing target-HF samples for non-SYNTH formats; never enable for dirty/NSFW datasets")
+    parser.add_argument("--wandb-run", default="", help="wandb run name; empty disables wandb")
+    parser.add_argument("--wandb-entity", default="pink-marker")
+    parser.add_argument("--wandb-project", default="usuitrack")
+    parser.add_argument("--wandb-log-every", type=int, default=25, help="log train loss and optimizer diagnostics every N measured steps; basis_capture always measures the held frame before that step's basis movement")
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.random_basis_init:
+        install_random_basis_init()
+    if args.geodesic_stepsize > 0:
+        usuitrack_optimizer.GEODESIC_STEPSIZE = args.geodesic_stepsize
+    if args.agreement_planes > 0:
+        usuitrack_optimizer.AGREEMENT_PLANES = args.agreement_planes
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    validate_gradient_release_contract(args)
+
+    if args.warmup_steps < 0:
+        raise ValueError("warmup_steps must be non-negative")
+    if args.max_steps <= 0:
+        raise ValueError("max_steps must be positive")
+    if args.grad_accum_steps <= 0:
+        raise ValueError("grad_accum_steps must be positive")
+    if args.seq_len <= 1:
+        raise ValueError("seq_len must be greater than 1")
+    if args.batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if args.val_blocks <= 0:
+        raise ValueError("val_blocks must be positive")
+    if args.retention_val_blocks <= 0:
+        raise ValueError("retention_val_blocks must be positive")
+    if args.eval_every < 0:
+        raise ValueError("eval_every must be non-negative")
+    if args.final_sample_row < 0:
+        raise ValueError("final_sample_row must be non-negative")
+    if args.final_sample_max_seq_len <= 1:
+        raise ValueError("final_sample_max_seq_len must be greater than 1")
+    if args.final_sample_temperature <= 0:
+        raise ValueError("final_sample_temperature must be positive")
+    if args.final_sample_top_k <= 0:
+        raise ValueError("final_sample_top_k must be positive")
+    if not 0 < args.final_sample_top_p <= 1:
+        raise ValueError("final_sample_top_p must be in (0, 1]")
+    if args.final_sample_repetition_penalty <= 0:
+        raise ValueError("final_sample_repetition_penalty must be positive")
+    if args.wandb_log_every < 0:
+        raise ValueError("wandb_log_every must be non-negative")
+    if args.retention_data_dir and args.retention_hf_dataset:
+        raise ValueError("Use either --retention-data-dir or --retention-hf-dataset, not both")
+    if args.rank_fraction <= 0:
+        raise ValueError("rank_fraction must be positive")
+    if args.lora_rank <= 0:
+        raise ValueError("lora_rank must be positive")
+    if args.lora_alpha <= 0:
+        raise ValueError("lora_alpha must be positive")
+    if args.grad_clip_norm <= 0:
+        # Harness telemetry only: UsuiTrack no longer clips, so this is the
+        # threshold `grad_clip_fraction` counts against, not an applied bound.
+        raise ValueError("grad_clip_norm must be positive; it is the reporting threshold for grad_clip_fraction")
+    if args.lora_grad_clip_norm <= 0:
+        raise ValueError("lora_grad_clip_norm must be positive")
+    if args.basis_update_interval <= 0:
+        raise ValueError("basis_update_interval must be positive")
+    if args.lr_warmup_steps < 0:
+        raise ValueError("lr_warmup_steps must be non-negative")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+    model_name = args.model
+
+    total_train_steps = args.warmup_steps + args.max_steps
+    train_blocks = max(total_train_steps * args.grad_accum_steps, 1)
+    val_blocks = args.val_blocks
+    target_source = args.data_dir
+    if args.target_hf_dataset:
+        train_limit = packed_text_limit(train_blocks, args.batch_size, args.seq_len)
+        if train_limit > args.target_val_offset:
+            while train_blocks > 1 and packed_text_limit(train_blocks, args.batch_size, args.seq_len) > args.target_val_offset:
+                train_blocks -= 1
+            train_limit = packed_text_limit(train_blocks, args.batch_size, args.seq_len)
+            clamped_total_steps = max(train_blocks // args.grad_accum_steps, 1)
+            clamped_max_steps = max(clamped_total_steps - args.warmup_steps, 1)
+            print(
+                f"warning: --max-steps {args.max_steps} needs {packed_text_limit(max(total_train_steps * args.grad_accum_steps, 1), args.batch_size, args.seq_len)} "
+                f"training rows but only {args.target_val_offset} are available before --target-val-offset; "
+                f"clamping to --max-steps {clamped_max_steps}",
+                flush=True,
+            )
+            args.max_steps = clamped_max_steps
+            total_train_steps = args.warmup_steps + args.max_steps
+        train_texts, target_train_parquet = hf_first_parquet_texts(
+            args.target_hf_dataset,
+            limit=train_limit,
+            dataset_format=args.target_format,
+        )
+        val_texts, target_val_parquet = hf_first_parquet_texts(
+            args.target_hf_dataset,
+            limit=packed_text_limit(val_blocks, args.batch_size, args.seq_len),
+            dataset_format=args.target_format,
+            offset=args.target_val_offset,
+        )
+        target_source = f"{args.target_hf_dataset}:{target_train_parquet}:format={args.target_format}:val_offset={args.target_val_offset}"
+        if target_train_parquet != target_val_parquet:
+            target_source += f":val_parquet={target_val_parquet}"
+    else:
+        train_texts = synth_texts(Path(args.data_dir), "train", limit=packed_text_limit(train_blocks, args.batch_size, args.seq_len))
+        val_texts = synth_texts(Path(args.data_dir), "val", limit=packed_text_limit(val_blocks, args.batch_size, args.seq_len))
+    retention_texts = None
+    retention_source = "none"
+    if args.retention_data_dir:
+        retention_blocks = args.retention_val_blocks
+        retention_texts = synth_texts(Path(args.retention_data_dir), "val", limit=packed_text_limit(retention_blocks, args.batch_size, args.seq_len))
+        retention_source = args.retention_data_dir
+    elif args.retention_hf_dataset:
+        retention_blocks = args.retention_val_blocks
+        retention_texts, first_parquet = hf_first_parquet_texts(args.retention_hf_dataset, limit=packed_text_limit(retention_blocks, args.batch_size, args.seq_len))
+        retention_source = f"{args.retention_hf_dataset}:{first_parquet}"
+    print(f"device={device}")
+    print(f"model={model_name}")
+    print(f"target_source={target_source}")
+    print(f"retention_source={retention_source}")
+    print(f"train_texts={len(train_texts)} val_texts={len(val_texts)} retention_texts={len(retention_texts) if retention_texts else 0}")
+    print(
+        f"seq_len={args.seq_len} batch_size={args.batch_size} grad_accum_steps={args.grad_accum_steps} "
+        f"warmup_steps={args.warmup_steps} max_steps={args.max_steps} param_scope={args.param_scope} "
+        f"rank_fraction={args.rank_fraction} "
+        f"lora_rank={args.lora_rank} lora_alpha={args.lora_alpha} lora_lr={args.lora_lr} lora_grad_clip_norm={args.lora_grad_clip_norm} "
+        f"basis_update_interval={args.basis_update_interval} "
+        f"lr_warmup_steps={args.lr_warmup_steps} "
+        f"orthogonalization=aurora "
+        f"activation_checkpointing={args.activation_checkpointing} torch_compile={'decoder_layer' if args.torch_compile else 'off'} attn_implementation={args.attn_implementation or 'default'} "
+        f"batching={args.batching} loss_impl=cce release_matrix_grads={args.release_matrix_grads} trace_backward_memory={args.trace_backward_memory} "
+        f"skip_validation={args.skip_validation} eval_every={args.eval_every} "
+        f"final_sample={args.final_sample} final_sample_max_seq_len={args.final_sample_max_seq_len} "
+        f"final_sample_temperature={args.final_sample_temperature} final_sample_top_k={args.final_sample_top_k} final_sample_top_p={args.final_sample_top_p} "
+        f"final_sample_repetition_penalty={args.final_sample_repetition_penalty} "
+        f"wandb_run={args.wandb_run or 'none'} wandb_entity={args.wandb_entity} consume_grad={not args.keep_grads_after_step}"
+    )
+
+    wandb_run = None
+    if args.wandb_run:
+        import wandb
+
+        wandb_run = wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.wandb_run, config=vars(args))
+
+    try:
+        for optimizer_name in [name.strip() for name in args.optimizers.split(",") if name.strip()]:
+            result = run_optimizer(args, optimizer_name, model_name, train_texts, val_texts, retention_texts, device, wandb_run=wandb_run)
+            prefix = optimizer_name
+            for key, value in result.items():
+                if key == "optimizer":
+                    continue
+                if isinstance(value, float):
+                    print(f"{prefix}_{key}={value:.6f}")
+                else:
+                    print(f"{prefix}_{key}={value}")
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
+
+
+if __name__ == "__main__":
+    main()
