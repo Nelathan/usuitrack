@@ -65,23 +65,28 @@ by distance.
 
 ## Group D. The step budget: learning rate, fallback, beta
 
-### D1. The matrix learning rate is probably low
+### D1. The global matrix lr is open
 
-- `grad_moment_cosine` stayed positive through run 13 (+3.4e-3 to +6.6e-3): by
-  P14's rule, under-travel. Run 12 hovered near zero.
-- Anima's per-step relative update is ~20x smaller than LFM's best arm
-  (`FACTS.md`), at roughly twice the tokens per step.
-- The user reads run 13 as undertrained and wants more.
+Under D5's law `lr` is the relative step of an agreed direction, the same unit
+in every module. Across models, batches and beta it is not measured. Read so
+far (`FACTS.md`):
 
-Against it: the cosine's zero is the descent optimum, not the finetune optimum
-(forgetting is invisible to it), and there is no forgetting instrument on this
-lane. The user's napkin math: bs4 at 768 px is noisier than LFM at bs16 -- about
-LFM bs2 x 1024 -- so accumulation might want about half the LFM-equivalent lr.
+- LFM2.5-350M, bs16 x 1024 tokens, beta 0.98: `6.2e-4` is the law's best arm;
+  1.4x holds target and loses 0.015 on source.
+- Anima, bs8, beta 0.98, `rank_fraction 0.025`: `3.2e-4` (run 21) and
+  `1.5e-4` (run 22) ran hot. At beta 0.95, `5e-5` (run 23) was good but
+  changed little, and cosine leaned negative from ~768.
+- The constructor's `1e-3` is a placeholder, and README says so.
 
-**Levers, not yet chosen between:** raise lr at `k=4`; `k=2` or bs2 to get more
-optimizer steps per wall-clock hour; a longer plateau (run 13's decay started at
-432 of 576); higher `beta`. A1 bears on all of them: a larger step raises travel
-against walk as `sqrt(lr)`.
+Transfer: `sqrt(tokens)` held across batch on LFM (D4). Across beta a matched
+per-step ratio does not transfer -- at 0.98 the moment hides ~2.3x the travel
+of 0.9 -- and the travel unit that would carry it is unreviewed (HANDOVER).
+On Anima the batch comes first: at bs8 the lr ran out before the samples
+improved (D4). Settled by a bracket at the larger batch; samples decide,
+cosine is the mechanism read.
+
+Withdraws "the matrix lr is probably low" (runs 12-13, under the old step
+rule): under the law, runs 20-22 ran hot.
 
 ### D4. Does beta 0.98 with caution hold on Anima?
 

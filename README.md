@@ -172,6 +172,10 @@ on: `lr` is the fraction of `||W||` a matrix moves per step when every step
 agrees, the same in every module whatever its shape or rank (LAMB's trust
 ratio), and the moment's agreement scales it down from there; see
 `docs/SPEC.md` step 8.
+No `lr` is a measured recommendation yet; the constructor's `1e-3` is a
+placeholder. `6.2e-4` was best finetuning a 350M LLM at 16 x 1024 tokens per
+step; a 2B image DiT at batch 8 ran too hot at `1.5e-4` and changed little at
+`5e-5` (beta 0.95).
 Before the lift, the step drops every coordinate where the moment's sign
 contradicts this batch's gradient (a cautious update, in frame coordinates), so
 each step descends on the gradient it saw and a matrix the batch disputes more
