@@ -84,23 +84,24 @@ bs32. Across beta a matched per-step ratio does not transfer -- at 0.98 the
 moment hides ~2.3x the travel of 0.9 -- and the travel unit that would carry it
 is unreviewed (HANDOVER).
 
-**The user's controller, not built.** lr is a ceiling, set at the start.
-When fleet `grad_moment_cosine` falls below zero (over-travel), lr is cut
-slowly; it may rise again, never past the start. Its controls are fixed
-schedules from the same peak: constant, cosine decay, linear, power. All
-harness code, not optimizer arguments.
+**The user's controller, built on branch `cosine-controller`** (constructor
+flag `lr_controller`, off by default). lr is a ceiling. The fleet votes each
+step with `sign(<O_t, M_{t-1}>)`; the vote's EMA at twice the moment's memory
+is read directly, `lr_scale = exp(10 min(s, 0))`. Its gain is unmeasured, and
+the user finds the formula too complex: it works and is parked for redesign.
 - For: cosine falls through every run even at a tenth of the lr, as the data
   is used up, so holding it at zero anneals the run on its own evidence; a
-  decay restored cosine on both lanes (LFM's low arm, run 24's tail). Late
-  runs wanted less lr.
-- Against or unknown: at bs32 beta 0.95 cosine ended at -0.0037 with no loss
-  cost, so zero is not shown to be the set point. Fleet cosine scatters about
-  0.002 per 30-step bin on Anima, which bounds how fast a cut may react;
-  `moment_persistence` crosses zero with it at a tenth of the size and is the
-  noisier input; `caution_kept` does not see lr.
-- How it is settled: LFM 1k, the controller against the four schedules at the
-  same peak lr; then a long Anima run, samples deciding. The user decides
-  when the controller is ready to test; a long run is the judge, not a probe.
+  decay restored cosine on both lanes (LFM's low arm, run 24's tail). On LFM
+  both forms tried found the hand-tuned lr on their own (`FACTS.md`).
+- Against or unknown: on LFM both forms bought 5.5e-3 target and paid ~0.02
+  source against constant `6.2e-4`; the cost is the early travel at the
+  ceiling, so the ceiling, not the reaction speed, is the open knob. At bs32
+  beta 0.95 cosine ended at -0.0037 with no loss cost, so zero is not shown
+  to be the set point. Fleet cosine scatters about 0.002 per 30-step bin on
+  Anima. The schedule controls (cosine, linear, power from the same peak) are
+  not run.
+- How it is settled: run 26 (Anima, 5 epochs, ceiling `1.4e-4`), samples
+  deciding; then the formula with the user.
 
 Withdraws "the matrix lr is probably low" (runs 12-13, under the old step
 rule): under the law, runs 20-22 ran hot.
