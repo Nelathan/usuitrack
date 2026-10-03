@@ -98,6 +98,13 @@ pads partial buckets with duplicates (same image, new timestep and noise),
 and bs8 avoids nested attention. LFM's 0.012 for doubling the batch is an upper
 bound here. Reopens with the 1024 px dataset.
 
+Runs 22 and 23 (`FACTS.md` ledger) moved the bs8 answer. At `5e-5`, a third of
+run 22's lr, run 23 held `grad_moment_cosine` at or above zero to ~768, where
+run 22 had leaned negative from ~128. It then leaned negative too. Beta moved
+with lr, so beta is not separated on Anima. The user's read: run 23 is good
+quality but changed little, so the earlier visible advances were the model
+breaking and repairing, not learning; at bs8 this data wants a larger batch.
+
 ### D6. LFM run-to-run spread
 
 A same-seed replicate differs by 1.6e-3 target and 5.6e-3 source (`FACTS.md`),
@@ -146,6 +153,8 @@ How it is settled, criteria fixed before the arms report:
   composition, text), they do not rank.
 - Then, in the user's order: rank per role on a step-free footing (E7), the
   global lr, single overrides. `patch_embed` may need none once the law holds.
+  At bs8 the global lr ran out before the samples improved (runs 22, 23; D4),
+  so the batch comes first.
 
 Open in the law: a zero-norm matrix never moves (documented as a limit, no
 floor); a relative step compounds on a growing weight, likely moot in a
