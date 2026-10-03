@@ -724,6 +724,40 @@ Halving the turn halves `transport_speed` and deepens the capture trough by
 relative step match bin for bin. The turn shows only in the early lag, as
 E3 found. Runs `eta0.02-lr6.2e-4`, `d5-inside-6.2e-4`.
 
+### The mask against `polar(g)`: loss-neutral, and `caution_kept` lands on its floor
+
+Standard arm (bs16, 1k, `beta 0.98`, `6.2e-4`, eta `0.04`), the mask's sign
+reference swapped from the raw projected gradient to `direction` by runner
+patch. 2026-10-03.
+
+| reference | target | source | `caution_kept` | floor | `relative_step` |
+|---|---:|---:|---:|---:|---:|
+| raw `g` | 1.659546 | 3.065264 | 0.5553 | 0.564 | 4.8e-5 |
+| `polar(g)` | 1.659703 | 3.064518 | 0.5632 | 0.564 | 4.9e-5 |
+
+Both loss deltas sit under the noise floor. The read that moved is kept: against
+`polar(g)` it sits on the independence floor, uniform across roles (0.561 to
+0.564); against raw `g` it sat 0.009 under. The deficit under the floor was a
+property of the reference, not anticorrelation between moment and batch: in
+the space the moment is made of, a late-run batch is sign-independent of it.
+Runs `polarmask-lr6.2e-4`, `d5-inside-6.2e-4`.
+
+### `beta 0.95` against `0.98` at a matched step, bs16
+
+Standard arm at eta `0.02`; `beta 0.95` at `3.8e-4`, the lr that matches
+0.98's step at `6.2e-4`. 2026-10-03.
+
+| beta | lr | target | source | `relative_step` | `caution_kept` (floor) |
+|---|---:|---:|---:|---:|---:|
+| 0.98 | `6.2e-4` | 1.659738 | 3.059932 | 4.8e-5 | 0.556 (0.564) |
+| 0.95 | `3.8e-4` | 1.666523 | 3.040345 | 5.0e-5 | 0.588 (0.601) |
+
+The step matched (4%). The shorter memory lost 6.8e-3 target and kept 0.020
+source, both past the replicate pair's noise. At a matched bs16 step this is
+the trade "Beta buys target at a held step" already reads, not a win: unlike
+bs32, the step here is too small for staleness to dominate. Runs
+`b095-lr3.8e-4`, `eta0.02-lr6.2e-4`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

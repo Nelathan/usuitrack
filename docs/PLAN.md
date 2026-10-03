@@ -145,9 +145,11 @@ further, tied target and forgot 0.015 less. At a small held step on bs16
 (pre-law, rescaled caution) 0.95 lost 0.004 target to 0.98. A cosine
 controller (D1) may let beta go lower still.
 
-Settled by bs16, beta 0.95 at `3.8e-4`, the lr that matches 0.98's step at
-`6.2e-4`, at eta `0.02`, the default since E8 closed.
-Then SPEC, README and the constructor default move together.
+At bs16 and a matched step (`FACTS.md`), 0.95 traded 6.8e-3 target for
+0.020 source: the beta trade, not a win. Open: whether 0.95 at equal target
+(a larger lr) keeps its source lead, and whether the controller, which cuts
+lr on over-travel, changes which memory pays. If 0.95 moves, SPEC, README and
+the constructor default move together.
 
 ### D8. The cautious mask's sign reference
 
@@ -158,10 +160,10 @@ gradient, every kept coordinate descends on this batch; against `polar(g)`,
 the mask judges the moment in the space it is made of, and `caution_kept`
 gets a floor it can be read against (0.5 + arcsin(sqrt(1 - beta^2)) / pi for
 independent directions). LFM reads 0.01-0.02 under that floor at every beta;
-Anima reads 0.03-0.045 under it (runs 20, 24, 25). Arm queued: LFM standard
-arm with the mask against `direction` (runner patch), against
-`d5-inside-6.2e-4`; target and source veto, kept against its floor and
-cosine are the reads.
+Anima reads 0.03-0.045 under it (runs 20, 24, 25). The LFM arm with the mask
+against `direction` (`FACTS.md`) tied on loss and put kept on its floor: the
+deficit was the reference's. Open: the user's choice of reference; loss does
+not decide it.
 
 ---
 
