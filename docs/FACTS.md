@@ -758,6 +758,28 @@ the trade "Beta buys target at a held step" already reads, not a win: unlike
 bs32, the step here is too small for staleness to dominate. Runs
 `b095-lr3.8e-4`, `eta0.02-lr6.2e-4`.
 
+### The cosine lr controller, first two forms
+
+Standard arm (bs16, 1k, `beta 0.98`, eta `0.02`, polar mask); controller arms
+start at a `1.24e-3` ceiling with no warmup, on branch `cosine-controller`.
+The vote is the fleet mean of `sign(<O_t, M_{t-1}>)`. 2026-10-03.
+
+| arm | target | source |
+|---|---:|---:|
+| constant `6.2e-4`, warmup 50 | 1.659873 | 3.063877 |
+| integrator: vote EMA at `(1+beta)/2`, log-lr integrates it | 1.654286 | 3.085022 |
+| direct: vote EMA at `beta`, `lr_scale = exp(10 min(s, 0))` | 1.654680 | 3.082949 |
+
+Both controllers buy 5.5e-3 target and pay ~0.02 source, past the noise
+floor on both. The integrator's vote crossed zero ~100 steps after cosine
+(~450 against ~350) and its lr kept falling while the vote sat slightly
+negative, settling near `0.5x` the ceiling, i.e. near the hand-tuned
+`6.2e-4`. The direct read was reactive but spiky (user, wandb). Reacting
+faster did not recover source: the cost is in the early travel at the
+ceiling while agreement is still positive, not in the late cut. The
+polar-mask baseline ties the raw-mask one (1.659738 / 3.059932). Runs
+`polarbase-lr6.2e-4`, `controller-lr1.24e-3`, `controller2-lr1.24e-3`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
