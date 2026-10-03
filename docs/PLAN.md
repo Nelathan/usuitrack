@@ -146,10 +146,10 @@ further, tied target and forgot 0.015 less. At a small held step on bs16
 controller (D1) may let beta go lower still.
 
 At bs16 and a matched step (`FACTS.md`), 0.95 traded 6.8e-3 target for
-0.020 source: the beta trade, not a win. Open: whether 0.95 at equal target
-(a larger lr) keeps its source lead, and whether the controller, which cuts
-lr on over-travel, changes which memory pays. If 0.95 moves, SPEC, README and
-the constructor default move together.
+0.020 source: the beta trade, not a win. The default stays 0.98 (user,
+2026-10-03) until beta is re-read under the controller (D1), which cuts lr
+on over-travel and may change which memory pays. If 0.95 moves, SPEC, README
+and the constructor default move together.
 
 ---
 
