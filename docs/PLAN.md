@@ -151,20 +151,6 @@ At bs16 and a matched step (`FACTS.md`), 0.95 traded 6.8e-3 target for
 lr on over-travel, changes which memory pays. If 0.95 moves, SPEC, README and
 the constructor default move together.
 
-### D8. The cautious mask's sign reference
-
-The mask compares the moment's signs with the raw projected gradient's
-(`optimizer.py` `_cautious`), while the moment averages polar directions and
-`grad_moment_cosine` and `moment_persistence` read those. Against the raw
-gradient, every kept coordinate descends on this batch; against `polar(g)`,
-the mask judges the moment in the space it is made of, and `caution_kept`
-gets a floor it can be read against (0.5 + arcsin(sqrt(1 - beta^2)) / pi for
-independent directions). LFM reads 0.01-0.02 under that floor at every beta;
-Anima reads 0.03-0.045 under it (runs 20, 24, 25). The LFM arm with the mask
-against `direction` (`FACTS.md`) tied on loss and put kept on its floor: the
-deficit was the reference's. Open: the user's choice of reference; loss does
-not decide it.
-
 ---
 
 ## Group E. Rank and the frame

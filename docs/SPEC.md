@@ -111,7 +111,7 @@ raw gradient G
   -> Newton-Schulz polar map (orthogonalization)
   -> unit scale 1/sqrt(r)
   -> projected EMA M of the orthogonalized direction
-  -> cautious mask against Z (step copy only)
+  -> cautious mask against O (step copy only)
   -> lift through the held frame Q, scaled by ||W||_F
   -> parameter update
   -> exact Oja frame move
@@ -460,16 +460,20 @@ is a fixed fraction of the weight's own.
 needs a non-zero init or the fallback optimizer.
 
 **Caution.** Before the lift, the step's copy of `M_t` is masked wherever its
-sign disagrees with this step's projected gradient `Z_t` (Liang et al. 2024,
-arXiv 2411.16085):
+sign disagrees with this step's direction `O_t` (Liang et al. 2024,
+arXiv 2411.16085, there against the raw gradient):
 
-$$\widetilde M_t=M_t\odot\mathbb 1[M_t\odot Z_t\ge 0].$$
+$$\widetilde M_t=M_t\odot\mathbb 1[M_t\odot O_t\ge 0].$$
 
-The lift is linear, so `<U, G> = s <M, Z>`, and the mask makes every surviving
-term non-negative: the realised step is a descent direction for the gradient the
-step observed, as the paper's mask is in full space. The stored moment is never
-masked, so its memory keeps integrating; only this step stops moving what the
-batch contradicts.
+The mask judges the moment in the space it is made of: every surviving
+coordinate agrees with the direction this step contributes to `M`, so
+`<M~, O> >= 0`. That is a descent guarantee for `O`, not coordinate-wise for
+`Z`; the polar map reweights `Z`'s coordinates, and against `Z` the paper's
+guarantee would hold instead. The reference buys `caution_kept` a floor: for
+directions independent of the moment it is
+`0.5 + arcsin(sqrt(1 - beta^2)) / pi`, which a late run sits on. The stored
+moment is never masked, so its memory keeps integrating; only this step stops
+moving what the batch contradicts.
 
 There is no `numel / kept` rescale. A matrix whose moment the batch contradicts
 more takes a smaller step, the same agreement-as-magnitude rule step 5 gives
@@ -638,7 +642,7 @@ default; each selected read adds one key per role.
 | `grad_capture` | `projected_grad_norm / raw_grad_norm`: the share of the gradient's magnitude the frame catches. The only one of the three that reads the basis rather than the model -- the projected norm alone falls with a leaner rank even when every kept plane catches as much as before |
 | `moment_persistence` | how much coherent signal the average holds once the floor of an independent stream is subtracted. An EMA of independent constant-norm directions already has norm `w = sqrt((1-beta)/(1+beta))` from incomplete cancellation, so with `||M||/||O||` as `rho`, this reports `(rho^2 - w^2)/(1 - w^2)`: 0 is a white stream, 1 a direction held throughout, negative anti-correlated. The raw ratio the step size follows is recoverable as `p(1-w^2) + w^2` |
 | `grad_moment_cosine` | this step's direction against the moment as it stood *before* the blend, reconstructed so the reading is not self-referential. Read it as an overshoot meter: positive means the step under-travels and the next gradient still points where the last one did, negative means it overshoots and the gradient has flipped behind it. Zero is critically damped, which makes it a learning-rate read -- the LR that zeroes it beat a 2.2x hotter one on both eval heads |
-| `caution_kept` | fraction of frame coordinates the cautious mask keeps, averaged over matrices: where the moment's sign agrees with this step's projected gradient. Without a rescale, its spread across roles is the step the mask redistributes |
+| `caution_kept` | fraction of frame coordinates the cautious mask keeps, averaged over matrices: where the moment's sign agrees with this step's direction `O`, against an independence floor of `0.5 + arcsin(sqrt(1 - beta^2)) / pi`. Without a rescale, its spread across roles is the step the mask redistributes |
 | `relative_step` | the whole step's `||dW||_F` over every matrix against their current `||W||_F`: the final ratio, `lr` times agreement times caution (step 8), and the read that compares across models. The update before rounding, so the bf16 stochastic-rounding walk is not in it |
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized, counted from `raw_grad_norm` |
 | `transport_lag` | net distance a sampled frame covered over `diagnostics_lag_interval` basis updates, same unit as the speed. Also the projected moment's smear: set the interval to `1/(1-beta)` and it reads how far the moment's own history has drifted from the coordinates it was accumulated in |

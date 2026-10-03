@@ -865,8 +865,8 @@ def test_matrices_sharing_a_projected_shape_but_not_a_shape_still_bucket_correct
 @pytest.mark.parametrize("cautious", [False, True])
 def test_cautious_step_descends_on_a_gradient_that_contradicts_the_moment(cautious):
     """A moment built on `G` steps uphill when the batch turns to `-G`; the
-    in-frame mask must make the realised change a descent direction for the
-    gradient the step actually saw."""
+    in-frame mask, judging against the batch's direction, must turn the
+    realised change into a descent direction for that batch."""
 
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))

@@ -871,6 +871,19 @@ Withdrawn: `0.04` as the shipped turn, chosen on the pre-liveness tracker
 ("the turn matters only while the aim moves", above). Not measured: whether
 a smaller turn reduces noise in the weights, which loss cannot see (A2).
 
+## CLOSED -- the cautious mask reads the step's direction
+
+2026-10-03, closes D8. The mask compares the moment's signs with `O_t`,
+the polar direction the moment averages, not the raw projected gradient
+(SPEC step 8). On LFM at 1k the two references tie on both losses
+(`FACTS.md`); against `O_t`, `caution_kept` sits on its independence floor,
+where against `Z_t` it read 0.009 under it, so the deficit was the
+reference's and not a moment the batch fights. The user chose `O_t`: the
+mask judges the moment in the space it is made of, and its kept fraction
+gains a floor to read against. Withdrawn: the coordinate-wise descent
+guarantee for `Z_t`; it now holds for `O_t`. The Anima reads 0.03-0.045
+under the floor were taken against `Z_t`.
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)

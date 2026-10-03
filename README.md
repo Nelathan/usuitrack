@@ -177,9 +177,9 @@ placeholder. `6.2e-4` was best finetuning a 350M LLM at 16 x 1024 tokens per
 step; a 2B image DiT at batch 8 ran too hot at `1.5e-4` and changed little at
 `5e-5` (beta 0.95).
 Before the lift, the step drops every coordinate where the moment's sign
-contradicts this batch's gradient (a cautious update, in frame coordinates), so
-each step descends on the gradient it saw and a matrix the batch disputes more
-steps less. `cautious=False` turns the mask off.
+contradicts this batch's orthogonalized direction (a cautious update, in frame
+coordinates), so each step moves only where the batch agrees with the moment and
+a matrix the batch disputes more steps less. `cautious=False` turns the mask off.
 For bf16 weights the update is accumulated in fp32 and written back with
 stochastic rounding, because an orthogonalized step is often a fraction of a
 bf16 ulp and round-to-nearest would discard it outright; `StochasticAdamW` is

@@ -50,9 +50,6 @@ class MatrixUpdate:
     projector: SubspaceProjector
     # `polar(projected grad)` -- see `_orthogonalized_directions`.
     direction: Tensor
-    # Held until `_integrate_step` for the cautious mask's sign reference; the prepared
-    # gradient already lives this long, so this adds no memory.
-    projected_grad: Tensor
     projected_grad_norm: Tensor
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
@@ -585,7 +582,6 @@ class UsuiTrack(Optimizer):
                 param=entry.param,
                 projector=entry.projector,
                 direction=direction.float(),
-                projected_grad=entry.projected_grad,
                 projected_grad_norm=entry.projected_grad.float().norm(),
                 oja_tangent=None if entry.oja_tangent is None else entry.oja_tangent.float(),
                 raw_grad_norm=None if entry.raw_grad_norm is None else entry.raw_grad_norm.float(),
@@ -861,16 +857,16 @@ class UsuiTrack(Optimizer):
             update_hat = entry.projected_exp_avg
             if self.cautious:
                 role = self.diagnostic_roles.get(entry.param)
-                update_hat = self._cautious(update_hat, entry.projected_grad, diagnostics, role)
+                update_hat = self._cautious(update_hat, entry.direction, diagnostics, role)
             self._apply_matrix_update(entry, update_hat, group)
 
     @staticmethod
     def _cautious(
-        update_hat: Tensor, projected_grad: Tensor, diagnostics: DiagnosticsAccumulator | None, role: str | None
+        update_hat: Tensor, direction: Tensor, diagnostics: DiagnosticsAccumulator | None, role: str | None
     ) -> Tensor:
-        """Zero the frame coordinates the current gradient contradicts (SPEC step 8)."""
+        """Zero the frame coordinates this step's direction contradicts (SPEC step 8)."""
 
-        agree = ~(update_hat.signbit() ^ projected_grad.signbit())
+        agree = ~(update_hat.signbit() ^ direction.signbit())
         if diagnostics is not None:
             kept = agree.sum() / agree.numel()
             diagnostics.add("caution_kept", kept, role=role)
