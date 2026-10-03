@@ -125,7 +125,7 @@ change -- which also confounds every rank comparison), and the agreement shrink
 after the polar map (the moment averages unit-norm directions, so disagreement
 between steps shrinks the step and forces lr to be re-fixed). The fallback runs
 in a fifth unit (AdamW's per-coordinate `lr`); on Anima it now carries only the
-qk-norm gains. `update_to_param_ratio` is one fleet scalar: it cannot say which
+qk-norm gains. `relative_step` is one fleet scalar: it cannot say which
 module class took the change.
 
 **The law, chosen 2026-10-01, on branch `trust-ratio`:** LAMB's Frobenius trust

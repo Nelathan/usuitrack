@@ -56,20 +56,29 @@ class DiagnosticsAccumulator:
     per step contributes one sample per matrix per step, so a run's mean weights
     every tracked matrix equally regardless of how many steps it appeared in.
     ``add_total`` is the exception, for rare-event counts an average would hide.
+
+    A read named in ``role_reads`` is also kept per role class, as
+    ``<name>/<role>``, for every sample that arrives with a role.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, role_reads: frozenset[str] = frozenset()) -> None:
         self._sums: dict[str, Tensor] = {}
         self._counts: defaultdict[str, int] = defaultdict(int)
         self._report_as_total: set[str] = set()
+        self.role_reads = role_reads
 
     def __bool__(self) -> bool:
         return bool(self._sums)
 
-    def add(self, name: str, value: Tensor, count: int = 1) -> None:
+    def add(self, name: str, value: Tensor, count: int = 1, role: str | None = None) -> None:
         """Add one (or ``count`` pre-summed) samples of a scalar measurement."""
 
         sample = value.detach().float().reshape(())
+        self._accumulate(name, sample, count)
+        if role is not None and name in self.role_reads:
+            self._accumulate(f"{name}/{role}", sample, count)
+
+    def _accumulate(self, name: str, sample: Tensor, count: int) -> None:
         current = self._sums.get(name)
         if current is None:
             self._sums[name] = sample
@@ -77,7 +86,7 @@ class DiagnosticsAccumulator:
             self._sums[name] = current + sample.to(current.device)
         self._counts[name] += count
 
-    def add_total(self, name: str, value: Tensor) -> None:
+    def add_total(self, name: str, value: Tensor, role: str | None = None) -> None:
         """Accumulate an event count that only exists as a device tensor.
 
         Same on-device path as ``add``, reported as a running total rather than
@@ -86,8 +95,10 @@ class DiagnosticsAccumulator:
         avoid, and where an average would hide a single rare firing.
         """
 
-        self.add(name, value)
+        self.add(name, value, role=role)
         self._report_as_total.add(name)
+        if role is not None and name in self.role_reads:
+            self._report_as_total.add(f"{name}/{role}")
 
     def reduce(self) -> dict[str, float]:
         """Mean of every accumulated measurement plus every counter total.

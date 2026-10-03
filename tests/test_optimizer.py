@@ -422,13 +422,14 @@ def test_core_diagnostics_read_sane_values():
     assert diagnostics["raw_grad_norm"] > 0
     # A healthy aim resolves every plane above the Gram's noise floor.
     assert diagnostics["tangent_live_fraction"] == 1.0
-    assert diagnostics["update_to_param_ratio"] > 0
+    assert diagnostics["relative_step"] > 0
     assert diagnostics["nonfinite_grads"] == 0.0
 
 
-def test_caution_kept_per_role_partitions_the_fleet_read():
-    """Each role's kept fraction is the mean over its own matrices, so the
-    fleet read is their matrix-weighted mean and every role is a fraction."""
+def test_role_reads_partition_the_fleet_read_only_when_asked_for():
+    """Each role's read is the mean over its own matrices, so the fleet read is
+    their matrix-weighted mean. Labelling matrices alone publishes no role key:
+    the breakout is per read, by name."""
 
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
@@ -439,17 +440,35 @@ def test_caution_kept_per_role_partitions_the_fleet_read():
     optimizer.diagnostic_roles = {params[0]: "pair", params[1]: "pair", lone: "lone"}
     optimizer.diagnostics = "core"
     _run(all_params, optimizer, 1)
+    assert not [key for key in optimizer.pop_diagnostics() if "/" in key]
+
+    optimizer.diagnostic_role_reads = {"caution_kept", "grad_moment_cosine"}
+    _run(all_params, optimizer, 1)
 
     diagnostics = optimizer.pop_diagnostics()
+    assert sorted(key for key in diagnostics if "/" in key) == [
+        "caution_kept/lone",
+        "caution_kept/pair",
+        "grad_moment_cosine/lone",
+        "grad_moment_cosine/pair",
+    ]
     pair, single = diagnostics["caution_kept/pair"], diagnostics["caution_kept/lone"]
     assert 0.0 < pair < 1.0 and 0.0 < single < 1.0
     assert diagnostics["caution_kept"] == pytest.approx((2 * pair + single) / 3, rel=1e-6)
+    pair, single = diagnostics["grad_moment_cosine/pair"], diagnostics["grad_moment_cosine/lone"]
+    assert diagnostics["grad_moment_cosine"] == pytest.approx((2 * pair + single) / 3, rel=1e-5, abs=1e-7)
 
 
-def test_step_gain_reads_each_role_s_weight_change_per_unit_lr():
-    """In fp32 the parameter moves by exactly `lr U`, so gain times lr must equal
-    the realised change of each class against its own norm -- and a class of two
-    matrices is their joint Frobenius ratio, not a mean of the two."""
+def test_role_reads_reject_an_unknown_read():
+    _, optimizer = _two_matrix_optimizer()
+    with pytest.raises(ValueError, match="diagnostic_role_reads"):
+        optimizer.diagnostic_role_reads = {"caution_kep"}
+
+
+def test_relative_step_reads_the_whole_step_against_the_whole_weight():
+    """In fp32 the parameters move by exactly `lr U`, so the read must equal the
+    realised change of every matrix against their norm -- the joint Frobenius
+    ratio, not a mean over matrices."""
 
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
@@ -460,7 +479,6 @@ def test_step_gain_reads_each_role_s_weight_change_per_unit_lr():
     optimizer.add_param_group({"params": [lone], "lr": 1e-1})
     all_params = [*params, lone]
     _run(all_params, optimizer, 2)
-    optimizer.diagnostic_roles = {params[0]: "pair", params[1]: "pair", lone: "lone"}
     optimizer.diagnostics = "core"
 
     before = [param.detach().clone() for param in all_params]
@@ -468,10 +486,8 @@ def test_step_gain_reads_each_role_s_weight_change_per_unit_lr():
     change = [(param.detach() - old).norm() for param, old in zip(all_params, before, strict=True)]
     norm = [param.detach().norm() for param in all_params]
 
-    diagnostics = optimizer.pop_diagnostics()
-    pair = (change[0] ** 2 + change[1] ** 2).sqrt() / (norm[0] ** 2 + norm[1] ** 2).sqrt()
-    assert diagnostics["step_gain/pair"] * 1e-1 == pytest.approx(float(pair), rel=1e-4)
-    assert diagnostics["step_gain/lone"] * 1e-1 == pytest.approx(float(change[2] / norm[2]), rel=1e-4)
+    expected = torch.stack(change).square().sum().sqrt() / torch.stack(norm).square().sum().sqrt()
+    assert optimizer.pop_diagnostics()["relative_step"] == pytest.approx(float(expected), rel=1e-4)
 
 
 def test_pop_diagnostics_clears_the_window():

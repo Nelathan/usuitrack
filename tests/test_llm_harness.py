@@ -185,6 +185,7 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.lr_warmup_steps, 50)
         self.assertEqual(args.beta, 0.95)
         self.assertTrue(args.cautious)
+        self.assertEqual(args.role_reads, [])
         self.assertEqual(args.basis_update_interval, 1)
         self.assertEqual(args.grad_clip_norm, 1.0)
         self.assertEqual(args.val_blocks, 8)

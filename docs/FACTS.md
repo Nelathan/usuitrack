@@ -4,6 +4,11 @@ Measured numbers that neither state a rule (`SPEC.md`) nor frame an open questio
 (`PLAN.md`). Each carries where it came from. A fact here is a measurement at a
 date, not a law; when a new read contradicts one, replace it and say so in PLAN.
 
+Telemetry names are the ones logged at the time. `update_to_param_ratio` is
+today's `relative_step`, the same quantity; `step_gain/<role>` was
+`relative_step/<role>` over `lr`, and was dropped once the law made it
+agreement times caution (2026-10-03).
+
 ## Anima lane
 
 ### What the model is made of

@@ -268,13 +268,13 @@ def pop_optimizer_diagnostics(optimizer: torch.optim.Optimizer) -> dict[str, flo
     pop = getattr(optimizer, "pop_diagnostics", None)
     if pop is None:
         return {}
-    # `step_gain/<role>` is one series per role class; under `opt/` it would bury
-    # the fleet reads, so it keeps its own section.
-    return {key if key.startswith("step_gain/") else f"opt/{key}": value for key, value in pop().items()}
+    # A `<read>/<role>` key is one series per role class; under `opt/` it would
+    # bury the fleet reads, so each read keeps its own section.
+    return {key if "/" in key else f"opt/{key}": value for key, value in pop().items()}
 
 
 def matrix_role(name: str) -> str:
-    """A matrix's role class for `step_gain/<role>`: its name without the layer
+    """A matrix's role class for `<read>/<role>`: its name without the layer
     index and the path to the layers, so every layer's `q_proj` reads as one
     short class name."""
 
@@ -1035,6 +1035,7 @@ def run_optimizer(
         optimizer.diagnostics = "full" if args.basis_lag_diagnostic else "core"
         optimizer.diagnostics_lag_interval = args.basis_lag_interval
         optimizer.diagnostic_roles = {param: matrix_role(name) for name, param in matrix_named}
+        optimizer.diagnostic_role_reads = args.role_reads
         if fallback_params:
             fallback_optimizer = StochasticAdamW(
                 fallback_params,
@@ -1354,6 +1355,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-grad-clip-norm", type=float, default=1.0, help="global gradient clip for LoRA adapter parameters")
     parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
     parser.add_argument("--beta", type=float, default=0.95)
+    parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from UsuiTrack.ROLE_READS")
     parser.add_argument("--cautious", action=argparse.BooleanOptionalAction, default=True, help="UsuiTrack cautious mask; --no-cautious for the control arm")
     parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="clip the raw gradient per tensor before Adafactor, Oja, and projection; must be positive for usuitrack, where the clip protects Adafactor's second-moment memory and has no off switch")
     parser.add_argument("--random-basis-init", action="store_true", help="start from a random orthonormal frame instead of the EIGH fit; asks whether Oja's equilibrium is a property of the aim or of its starting point")
