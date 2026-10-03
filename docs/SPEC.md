@@ -124,8 +124,9 @@ parameter update, so no step lifts through a frame it did not measure in.
 
 ### 1. Sanitize
 
-Let `G` replace each non-finite entry with zero. Its Frobenius norm is measured
-for telemetry and applied to nothing.
+Let `G` replace each non-finite entry with zero. The incoming gradient's
+Frobenius norm, taken before the replacement, is measured for telemetry and
+applied to nothing.
 
 **There is no gradient clipping, because no consumer can see the magnitude.**
 The Oja tangent is exactly invariant to a uniform rescale (step 4: `action` and
@@ -613,6 +614,12 @@ caller's logging cadence rather than every step. `nonfinite_grads` is reported a
 a total over the interval rather than a mean, because a rare event averaged
 against a long quiet interval reads as zero.
 
+No `"core"` read makes its own pass over a full matrix. Each is a reduction of
+a rank-sized tensor or of a norm the step already took: the update's norm is
+read in frame coordinates, `||U|| = ||~M|| ||W||`, since the lift is an
+isometry, and non-finite gradients are counted from the raw norm. With
+telemetry off the frame-motion read is skipped too.
+
 | key | what it measures |
 |---|---|
 | `transport_speed` | chordal distance the subspace moved in one geodesic, per plane, measured from the frames before and after: `||Q_now - Q_old (Q_old^T Q_now)||_F / sqrt(r)`. Every motion metric below shares this unit, so they can be divided by one another |
@@ -620,14 +627,14 @@ against a long quiet interval reads as zero.
 | `tangent_effective_planes` | `(sum_i lambda_i)^2 / sum_i lambda_i^2`, in `[1, r]`: the effective number of planes carrying the aim. The bulk of the same spectrum concentration reads the head of. Published as a count, not a fraction of `r`, so it compares across rank settings -- as a fraction a lower `rank_fraction` raises it while the spectrum is unchanged |
 | `tangent_live_fraction` | the fraction of planes whose eigenvalue clears the Gram's numerical noise floor, `r * eps * lambda_max`. Divide it against `tangent_effective_planes`: the plane count is how the aim's energy is spread, this is how many planes the decomposition can resolve at all. Below `1.0` the aim is rank-collapsed against the rank it was given, and the planes below the floor are held still rather than turned on rounding error |
 | `projected_grad_norm` | norm of the sanitized gradient inside the held frame |
-| `raw_grad_norm` | norm of the same gradient before projection, as it arrived |
+| `raw_grad_norm` | norm of the gradient as it arrived, before sanitizing and projection; non-finite when the gradient was |
 | `grad_capture` | `projected_grad_norm / raw_grad_norm`: the share of the gradient's magnitude the frame catches. The only one of the three that reads the basis rather than the model -- the projected norm alone falls with a leaner rank even when every kept plane catches as much as before |
 | `moment_persistence` | how much coherent signal the average holds once the floor of an independent stream is subtracted. An EMA of independent constant-norm directions already has norm `w = sqrt((1-beta)/(1+beta))` from incomplete cancellation, so with `||M||/||O||` as `rho`, this reports `(rho^2 - w^2)/(1 - w^2)`: 0 is a white stream, 1 a direction held throughout, negative anti-correlated. The raw ratio the step size follows is recoverable as `p(1-w^2) + w^2` |
 | `grad_moment_cosine` | this step's direction against the moment as it stood *before* the blend, reconstructed so the reading is not self-referential. Read it as an overshoot meter: positive means the step under-travels and the next gradient still points where the last one did, negative means it overshoots and the gradient has flipped behind it. Zero is critically damped, which makes it a learning-rate read -- the LR that zeroes it beat a 2.2x hotter one on both eval heads |
 | `caution_kept` | fraction of frame coordinates the cautious mask keeps, averaged over matrices: where the moment's sign agrees with this step's projected gradient. `caution_kept/<role>` is the same per `diagnostic_roles` class; without a rescale, its spread across roles is the step the mask redistributes |
 | `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
 | `step_gain/<role>` | per role class, for the matrices `diagnostic_roles` labels (a `{param: role}` map the caller sets, since only it knows names): the class's per-step `||U||_F` summed in squares over its matrices, against the class's current `||W||_F`. The relative step is `lr` times it; without `lr` the read stays exact across a schedule. The update before rounding, so the bf16 stochastic-rounding walk is not in it. It is the masked moment's norm, the agreement the step carried (step 8): a white moment populating all `r` planes sits at `w = sqrt((1-beta)/(1+beta))` before the mask, fewer populated planes below it, a coherent moment above it, a held direction at one |
-| `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
+| `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized, counted from `raw_grad_norm` |
 | `transport_lag` | net distance a sampled frame covered over `diagnostics_lag_interval` basis updates, same unit as the speed. Also the projected moment's smear: set the interval to `1/(1-beta)` and it reads how far the moment's own history has drifted from the coordinates it was accumulated in |
 | `transport_curve` | `1 - lag / path`: the fraction of that window's travel which cancelled. Zero is a straight drift, approaching one is a frame churning in place |
 | `transport_spin` | `||skew(Q_old^T Q_now)||_F / sqrt(r)`: rotation of the frame's columns *within* their own span. Moves the subspace not at all; scrambles the projected moment one-for-one, because transport is the identity in these coordinates |

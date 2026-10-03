@@ -235,6 +235,14 @@ card is at its limit at bs4 x k4 with the sized table -- an earlier "6.6 GB
 peak" note was a different counter and should not be used for headroom.
 Sampling: ~23 s per 1024x1024 image at 30 steps.
 
+Telemetry's cost, 2026-10-03 (synthetic gradients, so a cost read only): 40
+bf16 matrices at Anima's block shapes, eager, `rank_fraction 0.025`. The
+optimizer step takes 55 ms with diagnostics off, 61 ms at `core`, 62 ms at
+`full`, and peak transient VRAM is 45.5 MiB at every tier. That is ~0.16 ms per
+matrix per step for `core`, almost all of it small kernel launches. Before the
+update norm moved to frame coordinates and the non-finite count to the raw norm,
+the step took 59 ms off and 70 ms at `core`; both were full-matrix passes.
+
 ### A real bs16 on 12 GB: offloaded checkpointing
 
 2026-09-28, torch 2.14, bs16 x 768 (36,864 tokens). Held without checkpointing,

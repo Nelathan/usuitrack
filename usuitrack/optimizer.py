@@ -632,8 +632,6 @@ class UsuiTrack(Optimizer):
         # size, and one step-54 blip collapsed alignment for the back half of a
         # 100-step run. Sanitizing non-finite gradients is a different job and
         # stays.
-        diagnostics = self._diagnostics_sink()
-        self._record_incoming_grad_diagnostics(diagnostics, grad)
         grad, raw_grad_norm = self._sanitize_grad_tensors(grad)
         if not projector.is_initialized:
             self._initialize_projector(projector, grad, state)
@@ -655,8 +653,6 @@ class UsuiTrack(Optimizer):
         state: dict,
         group: dict,
     ) -> PreparedGrad:
-        diagnostics = self._diagnostics_sink()
-        self._record_incoming_grad_diagnostics(diagnostics, grad)
         basis = projector.basis
         assert basis is not None
         is_right = projector._basis_side() is ProjectionSide.RIGHT
@@ -679,18 +675,6 @@ class UsuiTrack(Optimizer):
         )
 
     @staticmethod
-    def _record_incoming_grad_diagnostics(diagnostics: DiagnosticsAccumulator | None, grad: Tensor) -> None:
-        """Count matrix gradients that arrive non-finite.
-
-        Stays a device tensor: an `isfinite().all()` read here would be a sync
-        on the hot path, which is exactly what the sanitizer avoids being.
-        """
-
-        if diagnostics is None:
-            return
-        diagnostics.add_total("nonfinite_grads", (~torch.isfinite(grad)).any().float())
-
-    @staticmethod
     def _record_projection_diagnostics(
         diagnostics: DiagnosticsAccumulator | None,
         entry: MatrixUpdate,
@@ -710,6 +694,9 @@ class UsuiTrack(Optimizer):
             # needs the raw norm published beside it because the two move for
             # different reasons -- capture is the basis's business, the raw norm
             # is the model's.
+            # Stays a device tensor: an `isfinite` read on the host would be a
+            # sync on the hot path, which is exactly what the sanitizer avoids.
+            diagnostics.add_total("nonfinite_grads", (~torch.isfinite(raw_grad_norm)).float())
             diagnostics.add("raw_grad_norm", raw_grad_norm)
             diagnostics.add("grad_capture", projected_norm / raw_grad_norm.clamp_min(1e-12))
         direction_norm = direction.norm()
@@ -799,10 +786,13 @@ class UsuiTrack(Optimizer):
         """Replace non-finite entries and report the raw norm for telemetry.
 
         The norm is measured, never applied: nothing downstream scales by it.
+        It is the incoming gradient's, before sanitizing, so a non-finite
+        gradient reads non-finite here and `nonfinite_grads` counts it from this
+        0-dim value instead of a second pass over the matrix.
         """
 
-        grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
-        return grad, grad.float().norm().detach()
+        raw_grad_norm = torch.linalg.vector_norm(grad, dtype=torch.float32).detach()
+        return torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0), raw_grad_norm
 
     def _orthogonalized_directions(self, prepared: list[PreparedGrad]) -> list[Tensor]:
         """The polar map over one step's projected gradients.
@@ -1140,6 +1130,9 @@ class UsuiTrack(Optimizer):
         window, taken from the frame that was actually written.
         """
 
+        diagnostics = self._diagnostics_sink()
+        if diagnostics is None:
+            return
         sample = self._lag_sample()
         indices = [index for index, entry in enumerate(entries) if entry.param in sample]
         if not indices:
@@ -1156,9 +1149,7 @@ class UsuiTrack(Optimizer):
         # orthogonalized tangent turns every plane by `eta` while the raw
         # spectrum proposed 2.2x that, so the eigenvalue read was reporting an
         # aim the frame never followed.
-        diagnostics = self._diagnostics
-        if diagnostics is not None:
-            diagnostics.add("transport_speed", followed.sum(), count=len(indices))
+        diagnostics.add("transport_speed", followed.sum(), count=len(indices))
 
     def _record_basis_lag(self, entries: list[MatrixUpdate], group: dict) -> None:
         """Where each sampled frame ended up against where it has been.
@@ -1292,7 +1283,7 @@ class UsuiTrack(Optimizer):
 
         if not stochastic:
             update = (entry.projector.project_back(update_hat.float()) * weight_norm).to(dtype=param.dtype)
-            self._record_update_norm(param, update, group["lr"])
+            self._record_update_norm(param, update_hat, weight_norm, group["lr"])
             if decay is not None:
                 param.mul_(decay)
             param.add_(update, alpha=-group["lr"])
@@ -1307,21 +1298,23 @@ class UsuiTrack(Optimizer):
         if decay is not None:
             work.mul_(decay)
         update = entry.projector.project_back(update_hat.float()) * weight_norm
-        self._record_update_norm(param, update, group["lr"])
+        self._record_update_norm(param, update_hat, weight_norm, group["lr"])
         work.add_(update, alpha=-group["lr"])
         copy_stochastic_(param, work)
 
-    def _record_update_norm(self, param: Tensor, update: Tensor, lr: float) -> None:
+    def _record_update_norm(self, param: Tensor, update_hat: Tensor, weight_norm: Tensor, lr: float) -> None:
         """Accumulate this matrix's contribution to the step's total motion.
 
         Kept as a running square across the step and rooted once in `step()`, so
         the reported number is the norm of the whole step's update rather than a
-        mean over matrices of unrelated sizes.
+        mean over matrices of unrelated sizes. Read in frame coordinates: the
+        lift is an isometry, so `||U|| = ||update_hat|| ||W||` costs a rank-sized
+        norm instead of a pass over the full matrix.
         """
 
         if self._diagnostics_sink() is None:
             return
-        update_sq = update.float().norm().square().detach()
+        update_sq = (torch.linalg.vector_norm(update_hat, dtype=torch.float32) * weight_norm).square().detach()
         contribution = update_sq * lr**2
         self._step_update_norm_sq = (
             contribution if self._step_update_norm_sq is None else self._step_update_norm_sq + contribution
