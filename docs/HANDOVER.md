@@ -1,98 +1,78 @@
 # Handover
 
-Written 2026-10-01 by a session the user released twice: to commit ("you decide
-on commit structure and timing; I can't review today"), and after run 20 to
-carry PLAN D5 through ("complete this quest faithfully"). Orientation only;
-`PLAN.md` carries the questions, `FACTS.md` the insights, `AGENTS.md` how to run
-things. The 2026-09-28 review list is in this file's history at `d334fa2`.
+Written 2026-10-03. Orientation only; `PLAN.md` carries the questions,
+`FACTS.md` the insights, `AGENTS.md` how to run things. The 2026-10-01 review
+list is in this file's history at `0a4d75c`.
 
-## Review first (committed without the user's eyes)
+## The repo split
 
-usuitrack, branch `constant-basis-step`, on `d334fa2`:
+`lab` is the root for experiments, cut from `trust-ratio` (which already
+contained `constant-basis-step`). It carries the LFM harness in `experiments/`,
+the old lab repo's docs frozen in `docs/prerelease/`, and a `lab` dependency
+group that `uv sync` installs by default. `main` takes one squashed release
+commit from `lab` at a time. Once `lab` is pushed, `constant-basis-step`, `trust-ratio`,
+`remove-adafactor` and `study/rotation-clamp-eligibility` close.
 
-- `94bec58` deletes `REORTHOGONALIZE_MOMENT`, the losing control arm.
-- `f74be22` **new defaults**: `beta 0.98`, caution on, no `numel / kept`
-  rescale. `CAUTIOUS` stays a module constant (your call) for the control arm.
-  One test changed for a reason other than the design: `step_gain`'s pair
-  group at lr 1e-1, since beta 0.98 left lr 1e-3's change near fp32 resolution.
-- `e2f814a` FACTS: the ten arms of 2026-10-01.
-- `8b70037` D4's LFM half to ARCHIVE; PLAN D4 is Anima's half; D6 opens.
-- `22dce39` AGENTS: the standard LFM arm is 1k steps at the new defaults.
-- `cd9913d` `caution_kept/<role>`, with a test.
+From the old lab repo, only the harness and its test came over. The fork's
+optimizer, projector and diagnostics tests target the prerelease API (`rank=`)
+and the release suite covers each; its state-bytes check moved into
+`tests/test_optimizer.py`. `test_llm_harness.py` lost the test of
+`FP32StateAdamW`, a class the harness had already deleted, and one stale
+assertion; a stub gained the `reduction` argument the harness now passes. `smoke_usuitrack.py` was a toy on the
+fork's API and did not come over.
 
-Branch **`trust-ratio`**, off `constant-basis-step` at `064e89c` -- the D5 law,
-kept on its own branch so it can be dropped whole:
+## Environment
 
-- `679f68c` **design change**: the step is sized against `||W||_F`. Directions
-  are unit (`1/sqrt(r)`), the moment's norm is the agreement, the lift is
-  scaled by the weight's norm, so `||dW||/||W|| = lr x agreement x caution` in
-  every module. Muon's aspect factor and `sqrt(r)` are gone, and with them
-  `original_shape`. SPEC step 8 rewritten (LAMB citation, why weight norm and
-  not shape, the zero-norm limit), README magnitude sentence. Tests: the
-  first-step test now sizes by `||W||`; the aspect-pinning test is replaced by
-  one that fails on the old code (30x the weight must be 30x the step, and
-  four shapes land at `lr (1-beta)`); the bucket test now keys on projected
-  shape. 48 pass. **Do not resume an old run's optimizer state across it** --
-  the moment is in a different unit.
-- `6b851f2` PLAN D5: the law, inside vs outside, the criteria fixed before any arm.
-- `9386ce8` FACTS: run 20's per-role decomposition and fleet reads; ledger row.
-- `a677283` FACTS/PLAN/ARCHIVE: the LFM veto passed; the aspect closure gets a
-  "superseded" pointer.
-- `1fd11f0` AGENTS standard arm `6.2e-4`, README example `6e-4` (the law's unit).
-
-ai-toolkit `8f2e624`: `caution_kept/<role>` gets its own logging section.
-
-Not pushed. Two decisions here are mine, not yours, and want your eyes:
-**agreement inside** the step (you asked; I chose inside, outside was run as the
-control and does not separate on LFM), and **no floor on `||W||`** (a
-zero-norm matrix never moves; documented as a limit).
-
-## Environment changes
-
-- **rtk hook removed** from `~/.claude/settings.json` at your request. Undo:
-  restore the `PreToolUse` `Bash` hook running `rtk hook claude`.
+- This repo's venv: torch `2.12.0+cu132` and `causal-conv1d 1.6.2.post1`, both
+  pinned to the old lab venv's build. With torch 2.13 or `causal-conv1d` 1.7.0
+  the CUDA extension failed to load (undefined `c10` symbol). `uv run` no
+  longer rebuilds anything; the old `--no-sync` trap is gone.
+- ai-toolkit installs `-e ../usuitrack`, so it runs whichever branch is checked
+  out. **Keep `lab` checked out**; build `main` in a worktree.
+- **GPU power limit 198 W**, set at your request. Undo: `pkexec nvidia-smi -pl 220`.
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`. Undo:
   `uv pip uninstall torchaudio`.
-- The lab venv must run with `uv run --no-sync`, or it rebuilds causal-conv1d.
-- **GPU power limit 198 W** (90% of the 220 W default), set via `pkexec
-  nvidia-smi -pl 198` at your request. Persistence mode is off, so it may revert
-  when the driver unloads. Undo: `pkexec nvidia-smi -pl 220`.
-- ai-toolkit and the lab import this working tree, so **they run whichever
-  branch is checked out** -- `trust-ratio` right now.
 
-## Run 20 -- done, your sample verdict owed
+## Anima: runs 22 and 23
 
-`anima_usuitrack_20_b098_caution_bs8`: bs8, beta 0.98, caution,
-`rank_fraction 0.025`, `lr 9e-4`, 1920 steps. Its relative step was 1.67x run
-18's at half the batch -- I derived its lr from sensor run 19, never
-sample-judged, instead of from run 18, which was; that is my error. Fleet
-`grad_moment_cosine` leaned negative from step 200 and turned positive only in
-the anneal's last bucket (`FACTS.md`, "Run 20 against run 18"). Ledger row
-says "verdict pending".
+Both under D5's law, bs8, `rank_fraction 0.025`. Run 22 (`1.5e-4`) was liked
+but still hot and slowly degrading; stopped at 1130. Run 23 (`beta 0.95`,
+`5e-5`, warmup 100) ran the full 1920: good quality, little change, cosine fine
+to ~768 and negative after. Your conclusion: at bs8 this data wants a larger
+batch (`PLAN.md` D4). Run 20's sample verdict is still owed.
 
-## Run 21 -- stopped at 1099, the law held
+**Withdrawn:** the previous handover's anchor, "run 18's relative step is
+`lr ~1.6e-4` under the law, `~1.1e-4` at bs8", matched per-step ratios across a
+beta change. A moment at beta 0.98 hides ~2.3x the travel per step that beta 0.9
+shows at the same ratio, so it overstated the transfer. The travel derivation
+that replaces it has not been through your review and is not in FACTS.
 
-`anima_usuitrack_21_trust_ratio`: run 20 under the law at run 20's bulk step
-(`3.2e-4`). The distribution changed as designed (non-AdaLN roles within 1.1x,
-waists from 6.5x/4.5x to ~1x); fleet reads stayed identical to run 20's. Your
-read: many well-adapted samples, still many bugs, still too hot. Checkpoints
-384 and 768 kept; no final save.
+## To review
 
-## In flight: run 22, the law at a cooler step
+Committed while you were away, on your release. On `lab`, oldest first:
 
-`ai-toolkit/config/anima_usuitrack_22_trust_lr15e5.yaml` (gitignored): run
-21's config at `lr 1.5e-4` (your pick, between run 18's step scaled to bs8,
-1.1e-4, and unscaled, 1.6e-4), annealed over the whole last epoch
-(`decay_start_ratio 0.8`) to 10% (`min_lr_ratio 0.1`). Launched 2026-10-01
-~20:00 under the 198 W cap, ~4.4 s/step, ~2.5 h. Output
-`/mnt/luna/ai/output/anima_usuitrack_22_trust_lr15e5`, log `run22.log` in the
-session scratchpad. Rank stays at 0.025: under the law rank no longer moves the
-step, and a lower rank at fixed lr concentrates the same change in fewer planes.
+- `ec47769` the old lab repo's docs frozen in `docs/prerelease/`.
+- `8bc49f9` the LFM harness in `experiments/`, the `lab` dependency group and
+  the torch/causal-conv1d pins; `AGENTS.md`'s lanes now run from this repo.
+- `7457781` `cautious` as a constructor argument, default `True`.
+- `38a6263` core telemetry without a full-matrix pass of its own: the update
+  norm read in frame coordinates (the lift isometry, checked on bf16 frames
+  to 5.8e-5), `nonfinite_grads` from the raw norm. +6 ms instead of +11.
+- `36c993f` release references say "on `lab`".
+- `c1e4f3e` runs 22 and 23 in FACTS and PLAN D4/D5.
+- `24a9850` `tangent_effective_planes` removed, as you asked.
+- `14ed31a` PLAN D1 rewritten as "the global lr is open"; README says the
+  constructor's `1e-3` is a placeholder.
+
+On `main`: `0991401`, one squashed commit, package, tests, README and SPEC
+identical to `lab` at `14ed31a`, plus a release-only `AGENTS.md`. The
+message lists what breaks for existing callers. Nothing is pushed.
+
+Open: "fleet keys optional, enabled as an arg" is not built; which keys it
+covers is the question in the session.
 
 ## Next, in your order
 
-Rank per role on a step-free footing (E7) -- the law makes rank a pure subspace
-knob, so rank arms no longer move the step. Then global lr: run 18's relative
-step (1.2e-5) is `lr ~1.6e-4` under the law, `~1.1e-4` scaled to bs8 by
-`sqrt(tokens)` -- derived, not measured.
-Then single overrides; `patch_embed` may need none.
+The batch on Anima. Then rank per role on a step-free footing (E7) and single
+overrides. Parked: the travel unit for lr transfer across beta, an AdaLN
+`linear_1` override, D6's noise floor.
