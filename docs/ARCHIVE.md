@@ -861,6 +861,16 @@ step is not relative. Per-role `relative_step` was not logged, so why
 outside's AdaLN cosine read lower early, while it gave AdaLN less step, is
 unexplained.
 
+## CLOSED -- eta is 0.02
+
+2026-10-03, closes E8. The geodesic step is `0.02` (SPEC). On LFM at 1k it
+ties `0.04` on both losses, moves the frame half as far per update, and lags
+only early: capture 0.750 against 0.760 after warmup, equal from step 600
+(`FACTS.md`). The user read the curves as just as good and more stable.
+Withdrawn: `0.04` as the shipped turn, chosen on the pre-liveness tracker
+("the turn matters only while the aim moves", above). Not measured: whether
+a smaller turn reduces noise in the weights, which loss cannot see (A2).
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)

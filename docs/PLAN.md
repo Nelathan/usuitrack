@@ -146,7 +146,7 @@ further, tied target and forgot 0.015 less. At a small held step on bs16
 controller (D1) may let beta go lower still.
 
 Settled by bs16, beta 0.95 at `3.8e-4`, the lr that matches 0.98's step at
-`6.2e-4`, with the eta that E8 picks -- eta first, since it may flip this.
+`6.2e-4`, at eta `0.02`, the default since E8 closed.
 Then SPEC, README and the constructor default move together.
 
 ### D8. The cautious mask's sign reference
@@ -187,20 +187,6 @@ fraction under a real bs16, against run 17, with lr lowered to match run
 17's per-module step so the comparison reads the subspace and not the step. The
 verdict is samples. Frame and moment in bf16 grow from 0.11 to 0.47 GiB at 0.1;
 the eigh and polar transients at rank 410 are unmeasured.
-
-### E8. `eta` after the liveness fix
-
-E3 closed on `0.04` (`ARCHIVE.md`, "the turn matters only while the aim
-moves"): best early, flat to `0.08`. `0.02` has not run since the liveness fix.
-The user keeps eta on trial: too hot a turn may leave noise in the weights
-even where loss cannot see it. The `grad_capture` trough after warmup (0.760 at
-`6.2e-4`, 0.772 at `6.2e-5`) deepens with lr, which reads as lag, not heat.
-At `0.02` (`FACTS.md`) the prediction held: target tied, the trough 0.010
-deeper, `transport_speed` halved, the frames equal from step 600. Source read
-5.3e-3 better, inside the replicate spread (D6). Loss does not separate the
-two; what is left is the user's concern, noise a hot turn leaves in the
-weights, which needs a read that sees weight noise (A2) or a long run's
-samples. `0.04` stays shipped, and D7 runs on it.
 
 ### E4. Parked: an arrival sensor
 

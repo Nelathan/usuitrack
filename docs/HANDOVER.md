@@ -43,8 +43,8 @@ What is left on the step is your controller (PLAN D1): cosine cuts lr
 slowly on over-travel, lr may rise again but never past the start, with
 constant, cosine, linear and power schedules as controls. Not built; you
 decide when to test it, on a long run. Open beside it: D7 (beta 0.95 as the
-default, because staleness scales with step), D8 (the mask against `polar(g)`),
-E8 (eta on trial; `0.02` ties `0.04` on loss).
+default, because staleness scales with step), D8 (the mask against `polar(g)`).
+Eta is now `0.02` (E8 closed).
 
 **Withdrawn:** "the travel unit" anchor of the previous handover (run 18's
 relative step transferred across a beta change) still stands withdrawn; the
@@ -58,8 +58,8 @@ Scratchpad scripts, each waiting for the previous `.done`:
 - `queue29.sh`: the D8 arm, standard LFM arm with the mask against `direction`
   (`polar_mask_runner.py`, runner patch verified to hand `_cautious` the
   direction). wandb `polarmask-lr6.2e-4`.
-- `queue30.sh`: the D7 arm, bs16 beta 0.95 at `3.8e-4`, eta 0.04. wandb
-  `b095-lr3.8e-4`. Compare against `d5-inside-6.2e-4`.
+- `queue30.sh`: the D7 arm, bs16 beta 0.95 at `3.8e-4`, eta 0.02 (the new
+  default). wandb `b095-lr3.8e-4`. Compare against `eta0.02-lr6.2e-4`.
 - Overnight after 22:00: a long Anima run, to be planned with you.
 
 ## To review
