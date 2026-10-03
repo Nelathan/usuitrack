@@ -63,13 +63,19 @@ Committed while you were away, on your release. On `lab`, oldest first:
 - `24a9850` `tangent_effective_planes` removed, as you asked.
 - `14ed31a` PLAN D1 rewritten as "the global lr is open"; README says the
   constructor's `1e-3` is a placeholder.
+- `937919a` per-role reads by name: `diagnostic_role_reads` (from
+  `ROLE_READS`, empty by default) breaks any per-matrix read out as
+  `<read>/<role>`. `step_gain/<role>` is gone; `update_to_param_ratio` is now
+  `relative_step`. The harness takes `--role-reads`.
 
-On `main`: `0991401`, one squashed commit, package, tests, README and SPEC
-identical to `lab` at `14ed31a`, plus a release-only `AGENTS.md`. The
+In ai-toolkit: `dab36c3` passes `optimizer_params.diagnostic_role_reads`
+through and gives every `<read>/<role>` its own wandb section. **A config that
+wants per-role keys must now name them**, e.g.
+`diagnostic_role_reads: [caution_kept, grad_moment_cosine]`.
+
+On `main`: `d44b1a2`, one squashed commit, package, tests, README and SPEC
+identical to `lab` at `937919a`, plus a release-only `AGENTS.md`. The
 message lists what breaks for existing callers. Nothing is pushed.
-
-Open: "fleet keys optional, enabled as an arg" is not built; which keys it
-covers is the question in the session.
 
 ## Next, in your order
 
