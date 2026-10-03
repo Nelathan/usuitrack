@@ -304,6 +304,47 @@ user's read mid-run: lower loss, degraded samples, not broken. Run
 `anima_usuitrack_20_b098_caution_bs8` and `anima_usuitrack_18_bs16_rf010`,
 `loss_log.db`, 2026-10-01.
 
+### Runs 24 and 25: agreement inside the step against outside
+
+bs16 (offloaded), `beta 0.95`, caution, `rank_fraction 0.025`, one epoch (192
+steps), warmup 20, cosine decay from ~150. Run 24 takes the law's step (agreement
+inside, `lr 7e-5`); run 25 renormalizes the masked moment to unit norm before
+the lift (`scripts/usuitrack_outside_runner.py` in ai-toolkit), at `lr 6.84e-6`,
+run 24's plateau step. Fleet `relative_step` matched to 1.3% through warmup,
+plateau and decay. Means over 30-step bins:
+
+| steps | cosine, 24 | cosine, 25 | `norm1.linear_1`, 24 / 25 | `norm3.linear_1`, 24 / 25 |
+|---|---:|---:|---:|---:|
+| 30-59 | +0.016 | +0.0095 | +0.082 / +0.022 | +0.066 / +0.003 |
+| 60-89 | +0.0044 | -0.0005 | +0.012 / -0.007 | +0.001 / -0.013 |
+| 90-119 | +0.0037 | -0.0018 | +0.013 / -0.013 | +0.003 / -0.013 |
+| 120-149 | -0.0017 | +0.0027 | -0.007 / -0.003 | -0.012 / -0.001 |
+| 180-191 (lr 1.2e-5) | +0.011 | +0.006 | +0.062 / +0.006 | +0.043 / +0.012 |
+
+- At the same fleet step, outside crossed zero at ~60 and inside at ~120, and
+  outside led in every role group, attention and FF included. Spread evenly,
+  the step over-drives the modules whose agreement is at noise.
+- Under the decay, inside's AdaLN `linear_1` recovered its cosine; outside's
+  stayed near zero. Inside keeps the coherent modules coherent.
+- Outside turned positive again at 120-149 at full lr while inside dipped; the
+  data order is shared, so it is each run's own cycle, unexplained.
+- Early (20-59) outside read *lower* AdaLN cosine though it gives AdaLN less
+  step than inside. A hypothesis, unmeasured: AdaLN's gradient depends on every
+  block below it, and outside moves the noisy blocks more. Testing it needs
+  per-role `relative_step`.
+- `grad_capture` 0.77 to 0.81 in both, with no trough: at this step the frame
+  keeps up. `transport_speed` flat at 0.028.
+- In run 24 a decay of lr from `7e-5` to `1.2e-5` took fleet cosine from
+  -0.002 to +0.011 on fresh data: on Anima too, cutting lr restores cosine.
+- `caution_kept` reads 0.556 in both, against 0.601 for an EMA of independent
+  directions at `beta 0.95`; run 20 (`beta 0.98`) read 0.534 against 0.564.
+  LFM sits 0.01-0.02 under the same formula at every beta (0.624, 0.588,
+  0.555, 0.539 at 0.9-0.99). Anima's batch disagrees with the moment's history
+  more than independence would: anti-correlated steps.
+
+Samples, the user's: 25 moved less than 24; read at the end, different rather
+than worse, inside still favoured. `loss_log.db`, 2026-10-03.
+
 ## LFM2.5-350M lane
 
 bs16 x seq1024, seed 1, 1k steps, broad-no-embeddings. Noise floors: target
@@ -686,6 +727,8 @@ Runs `law-lr6.2e-5`, `law-lr2e-4-cos0`, `d5-inside-6.2e-4`,
 | 21 `trust_ratio` | run 20 under D5's law (step relative to `||W||`), `3.2e-4` = run 20's bulk step; waists cut to the bulk's | many well-adapted samples, still many bugs, still too hot (user); stopped at 1099; fleet reads identical to run 20 |
 | 22 `trust_lr15e5` | run 21 at `1.5e-4`, annealed over the last epoch to 10% | liked, but still hot and slowly degrading (user); stopped at 1130; `grad_moment_cosine` negative from ~128 |
 | 23 `b095_lr5e5` | run 22 at `beta 0.95`, `5e-5`, warmup 100 | good quality, little change (user); cosine at or above zero to ~768, negative after; full 1920 |
+| 24 `inside_bs16` | run 23 at a real bs16 (offloaded), `7e-5`, one epoch, cosine decay | moved more than 25; inside favoured (user); cosine zero at ~120, positive again under the decay |
+| 25 `outside_bs16` | run 24 with agreement outside the step, `6.84e-6` = run 24's step | moved less; different rather than worse (user); cosine zero at ~60 |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
