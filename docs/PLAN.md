@@ -65,25 +65,42 @@ by distance.
 
 ## Group D. The step budget: learning rate, fallback, beta
 
-### D1. The global matrix lr is open
+### D1. The global matrix lr, and whether cosine should set it
 
-Under the trust-ratio law (`SPEC.md` step 8) `lr` is the relative step of an agreed direction, the same unit
-in every module. Across models, batches and beta it is not measured. Read so
-far (`FACTS.md`):
+Under the trust-ratio law (`SPEC.md` step 8) `lr` is the relative step of an
+agreed direction, the same unit in every module. Across models, batches and beta
+it is not measured. Read so far (`FACTS.md`):
 
-- LFM2.5-350M, bs16 x 1024 tokens, beta 0.98: `6.2e-4` is the law's best arm;
-  1.4x holds target and loses 0.015 on source.
+- LFM2.5-350M, bs16 x 1024 tokens, beta 0.98: `6.2e-4` is the law's best target;
+  across 10x, lower lr trades target for source, and cosine crosses zero
+  between `2e-4` and `6.2e-4`. At bs32 the `sqrt(tokens)` lr under-steps.
 - Anima, bs8, beta 0.98, `rank_fraction 0.025`: `3.2e-4` (run 21) and
   `1.5e-4` (run 22) ran hot. At beta 0.95, `5e-5` (run 23) was good but
-  changed little, and cosine leaned negative from ~768.
+  changed little. At bs16, `7e-5` (run 24) held cosine to ~60% of the epoch.
 - The constructor's `1e-3` is a placeholder, and README says so.
 
-Transfer: `sqrt(tokens)` held across batch on LFM (D4). Across beta a matched
-per-step ratio does not transfer -- at 0.98 the moment hides ~2.3x the travel
-of 0.9 -- and the travel unit that would carry it is unreviewed (HANDOVER).
-On Anima the batch comes first: at bs8 the lr ran out before the samples
-improved (D4). Settled by a bracket at the larger batch; samples decide,
-cosine is the mechanism read.
+Transfer: `sqrt(tokens)` held from bs16 to bs8 on LFM (D4) and undershoots at
+bs32. Across beta a matched per-step ratio does not transfer -- at 0.98 the
+moment hides ~2.3x the travel of 0.9 -- and the travel unit that would carry it
+is unreviewed (HANDOVER).
+
+**The user's controller, not built.** lr is a ceiling, set at the start.
+When fleet `grad_moment_cosine` falls below zero (over-travel), lr is cut
+slowly; it may rise again, never past the start. Its controls are fixed
+schedules from the same peak: constant, cosine decay, linear, power. All
+harness code, not optimizer arguments.
+- For: cosine falls through every run even at a tenth of the lr, as the data
+  is used up, so holding it at zero anneals the run on its own evidence; a
+  decay restored cosine on both lanes (LFM's low arm, run 24's tail). Late
+  runs wanted less lr.
+- Against or unknown: at bs32 beta 0.95 cosine ended at -0.0037 with no loss
+  cost, so zero is not shown to be the set point. Fleet cosine scatters about
+  0.002 per 30-step bin on Anima, which bounds how fast a cut may react;
+  `moment_persistence` crosses zero with it at a tenth of the size and is the
+  noisier input; `caution_kept` does not see lr.
+- How it is settled: LFM 1k, the controller against the four schedules at the
+  same peak lr; then a long Anima run, samples deciding. The user decides
+  when the controller is ready to test; a long run is the judge, not a probe.
 
 Withdraws "the matrix lr is probably low" (runs 12-13, under the old step
 rule): under the law, runs 20-22 ran hot.
@@ -109,12 +126,42 @@ run 22 had leaned negative from ~128. It then leaned negative too. Beta moved
 with lr, so beta is not separated on Anima. The user's read: run 23 is good
 quality but changed little, so the earlier visible advances were the model
 breaking and repairing, not learning; at bs8 this data wants a larger batch.
+Run 24 then ran a real bs16 at 0.95 and `7e-5` for one epoch; beta is still
+not separated on Anima (D7).
 
 ### D6. LFM run-to-run spread
 
 A same-seed replicate differs by 1.6e-3 target and 5.6e-3 source (`FACTS.md`),
 5x and 3x the floors `AGENTS.md` states. One pair. Settle with three seeds of
 the default arm (~40 min) before another LFM claim below ~2e-3 target.
+
+### D7. Should the default beta move to 0.95?
+
+The user's lean: yes. 0.95 won at bs32 because its moment is 2.5x less stale
+(time constant 20 steps against 50), not because it averages noise better;
+staleness costs step size times memory length, so a large relative step wants
+a short memory. Evidence (`FACTS.md`): at bs32 and one lr, 0.95 stepped 1.64x
+further, tied target and forgot 0.015 less. At a small held step on bs16
+(pre-law, rescaled caution) 0.95 lost 0.004 target to 0.98. A cosine
+controller (D1) may let beta go lower still.
+
+Settled by bs16, beta 0.95 at `3.8e-4`, the lr that matches 0.98's step at
+`6.2e-4`, with the eta that E8 picks -- eta first, since it may flip this.
+Then SPEC, README and the constructor default move together.
+
+### D8. The cautious mask's sign reference
+
+The mask compares the moment's signs with the raw projected gradient's
+(`optimizer.py` `_cautious`), while the moment averages polar directions and
+`grad_moment_cosine` and `moment_persistence` read those. Against the raw
+gradient, every kept coordinate descends on this batch; against `polar(g)`,
+the mask judges the moment in the space it is made of, and `caution_kept`
+gets a floor it can be read against (0.5 + arcsin(sqrt(1 - beta^2)) / pi for
+independent directions). LFM reads 0.01-0.02 under that floor at every beta;
+Anima reads 0.03-0.045 under it (runs 20, 24, 25). Arm queued: LFM standard
+arm with the mask against `direction` (runner patch), against
+`d5-inside-6.2e-4`; target and source veto, kept against its floor and
+cosine are the reads.
 
 ---
 
@@ -140,6 +187,17 @@ fraction under a real bs16, against run 17, with lr lowered to match run
 17's per-module step so the comparison reads the subspace and not the step. The
 verdict is samples. Frame and moment in bf16 grow from 0.11 to 0.47 GiB at 0.1;
 the eigh and polar transients at rank 410 are unmeasured.
+
+### E8. `eta` after the liveness fix
+
+E3 closed on `0.04` (`ARCHIVE.md`, "the turn matters only while the aim
+moves"): best early, flat to `0.08`. `0.02` has not run since the liveness fix.
+The user keeps eta on trial: too hot a turn may leave noise in the weights
+even where loss cannot see it. The `grad_capture` trough after warmup (0.760 at
+`6.2e-4`, 0.772 at `6.2e-5`) deepens with lr, which reads as lag, not heat.
+Arm running: the standard arm at `0.02`. Prediction: target within 2e-3, a
+slightly deeper capture trough, lower `transport_speed`. A shallower trough
+would mean 0.04 admits noise.
 
 ### E4. Parked: an arrival sensor
 
