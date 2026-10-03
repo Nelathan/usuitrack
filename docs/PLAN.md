@@ -151,6 +151,11 @@ At bs16 and a matched step (`FACTS.md`), 0.95 traded 6.8e-3 target for
 on over-travel and may change which memory pays. If 0.95 moves, SPEC, README
 and the constructor default move together.
 
+The user's hypothesis for Anima: its smaller relative step tolerates the
+longer memory, since staleness is step times memory. Loss cannot show it;
+`caution_kept` against its floor, now that the mask reads `O_t`, and
+`moment_persistence` can.
+
 ---
 
 ## Group E. Rank and the frame
@@ -202,7 +207,20 @@ Nothing acts on it until a capped matrix starves.
   largest cost, invisible end to end); `1e-12` floors never audited against
   their dtype -- the lesson of the `1e-6 sigma_max` floor that never fired.
 - **F3. Five device syncs per step** (was P12). One is `eigh`'s convergence
-  check; four unnamed. Low priority: optimizer time is invisible end to end.
+  check, one per rank bucket per step, at step end (layerwise release leaves
+  the basis update bucketed); `torch._linalg_eigh` checks too. Four unnamed.
+  Cost unmeasured; profile first. The user wants a sync-free variant that
+  keeps `eigh`'s stationarity, judged by maths, then on real tangents (no
+  synthetic). Newton-Schulz fails both on paper: the polar tangent needs an
+  exact unit turn on every live plane and a hard cliff at
+  `sqrt(r eps) sigma_max` (`_polar_tangent`), and a fixed polynomial gives a
+  soft ramp in `sigma / ||Delta||`, so the per-plane turn would follow the
+  tangent spectrum as it flattens and half-turn the noise planes that once
+  broke Anima's `eigh`. Candidates, unmeasured: batched Jacobi (same
+  decomposition, many kernels); Newton inverse square root with `inv_ex` plus
+  a matrix-sign cliff (sync-free, exact to roundoff once converged, more
+  machinery, no eigenvalues for the spectrum reads); `eigh` one step late off
+  the main thread (frame lags a step: a design change).
 - **F4. Stratified timesteps within a batch** (was B5). One sample per slice
   of the `t` range; free, and cuts the batch's `t` variance. Not tried.
 
