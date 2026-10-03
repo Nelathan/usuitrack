@@ -54,7 +54,7 @@ class SubspaceProjector:
         `sqrt(r)` norm, the matrix's share of the step. A calibrated per-role
         table on LFM turned out to encode `~0.095 * sqrt(m * n)` for every role
         that reads the residual stream, and this rule at a matched plane count
-        ties it with no calibration run (`docs/FACTS.md`, "Rank is a fraction of
+        ties it with no calibration run (`docs/FACTS.md` on `lab`, "Rank is a fraction of
         the matrix's size"). Matrices of one shape share one rank, so they still
         batch.
 

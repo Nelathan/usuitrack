@@ -1066,7 +1066,7 @@ class UsuiTrack(Optimizer):
         by an attainable ceiling. The shape of that idea is still right: a
         converged frame orbits on batch noise and should stop turning. What has
         never existed is a sensor for it. The two-lag form that would derive the
-        anchor instead of remembering it is falsified in `ARCHIVE.md` -- the
+        anchor instead of remembering it is falsified in `ARCHIVE.md` on `lab` -- the
         aim's persistence *shape* is stationary while its level is not, so the
         ratio holds at ~0.81 and anneals nothing. The ceiling that replaced it is
         `effective_rank / k`, a magnitude functional gating a step this method
@@ -1422,7 +1422,7 @@ class UsuiTrack(Optimizer):
         # fp32, where both references this is ported from run bf16. Measured:
         # the iteration is 1.5-2x faster in bf16 through this call and worth
         # nothing end to end, because the polar map is not a meaningful share of
-        # a training step. See PLAN.md P12.
+        # a training step. See `PLAN.md` F3 on `lab`.
         work = update.float()
         work = work / work.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
         transposed = work.shape[-2] > work.shape[-1]

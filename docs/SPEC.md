@@ -46,7 +46,7 @@ The rank sets the subspace, not the step: the step is sized against the
 weight's own norm (step 8), so `rank_fraction` decides which directions a matrix
 moves in and never how far. On LFM the rule matches or beats a
 per-role rank sized from measured live planes, with no measurement of its own
-(`FACTS.md`, "Rank is a fraction of the matrix's size"). Matrices of one shape
+(`FACTS.md` on `lab`, "Rank is a fraction of the matrix's size"). Matrices of one shape
 share one rank, so they batch.
 
 The cap has two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
@@ -211,7 +211,7 @@ whole purpose is to be magnitude-free, and on Anima it annealed the turn by 1.21
 over 2100 steps while on LFM it looked like it worked. The anchor-free two-lag
 form that would replace the ceiling is separately falsified -- the aim's
 persistence *shape* is stationary while its level is not, so the ratio holds near
-0.81 and anneals nothing (`ARCHIVE.md`).
+0.81 and anneals nothing (`ARCHIVE.md` on `lab`).
 
 The shape of the idea remains right: a converged frame orbits on batch noise and
 should stop turning. What does not exist is a sensor that can tell arrival from
@@ -234,7 +234,7 @@ moves as the model does, fastest early. `eta` sets the trade between lag (a long
 memory holds where the gradient was) and noise (a short one follows each
 batch). The energy aim is a low-variance target, so lag dominates at small
 `eta`: on LFM capture and loss improve steadily from `0.005` to `0.04` and are
-flat to `0.08`, and the gain holds at 1k steps (`FACTS.md`). Once the aim
+flat to `0.08`, and the gain holds at 1k steps (`FACTS.md` on `lab`). Once the aim
 settles the turn stops mattering -- a smaller late turn buys nothing -- so a
 schedule would add a term and no gain, and there is none: with a constant
 step, frame motion is one quantity that `transport_speed` reads directly, and
@@ -499,7 +499,7 @@ wins for a long time: at Anima's `update_to_param_ratio` of `3.7e-6` it is
 several times the fp32 travel after 350 steps, and ~90% of matrix coordinates do
 not move at all in a 50-step window. **Distance from base weights on a bf16 model is
 therefore a read of the walk, not of learning**, until the update approaches a
-ulp. `docs/FACTS.md` carries the measurement.
+ulp. `docs/FACTS.md` on `lab` carries the measurement.
 
 ## Two-phase execution
 
