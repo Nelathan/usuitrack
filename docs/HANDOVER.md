@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-04, morning. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-04, midday. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things. The 2026-10-01 review
 list is in this file's history at `0a4d75c`.
 
@@ -36,19 +36,14 @@ fork's API and did not come over.
 ## Where things stand
 
 D5 closed (agreement inside), E8 closed (eta 0.02), D8 closed: the cautious
-mask reads the step's direction `O_t`; loss-neutral, and `caution_kept` now
-sits on its independence floor. D7: beta stays 0.98 until re-read under the
-controller.
+mask reads the step's direction `O_t`. The cosine lr controller is closed
+(`ARCHIVE.md`): it did not free the ceiling, and what stays is that a decaying
+lr beat constant on target. D1 is now the schedule; D7 waits on it.
 
-The controller (PLAN D1) lives on branch `cosine-controller`, worktree
-`~/Projects/usuitrack-controller`, rebased on `lab`. Runs reach it through
-`PYTHONPATH=/home/djg/Projects/usuitrack-controller`, so `lab` stays checked
-out. Current form (`1540605`): `lr_scale` is the EMA at `(1+beta)/2` of the
-fraction of matrices whose batch confirms the moment. On LFM it won (FACTS),
-but a fraction with no signal tends to a half, and on Anima the vote sits at
-zero from step ~100: there it is a fixed half of the ceiling. Next is a better
-translation from the fraction to lr, designed with you, then E9 (per-role
-travel over run 26).
+Branch `cosine-controller` (`f9c50fd`, rebased on `lab` at `92fc559`) keeps
+the code, the four forms and every arm's numbers. Not merged and not to be
+merged; worktree `~/Projects/usuitrack-controller`. Next candidates: the
+schedule controls (D1), and E9 (per-role step, from run 26's reads).
 
 **Withdrawn:** "the travel unit" anchor (run 18's relative step across a beta
 change) still stands withdrawn. Also withdrawn, never written to the docs:
@@ -56,24 +51,22 @@ change) still stands withdrawn. Also withdrawn, never written to the docs:
 
 ## Runs since the last handover
 
-Run 26 `anima_usuitrack_26_controller` (5 epochs, the `exp` form) and the LFM
-arm `controller3-confirmed-lr1e-3` are done and read (FACTS). Run 26's five
-checkpoints are on `/mnt/luna`, 20 GB; E9 reads them.
+Run 26 (Anima, 5 epochs) and the LFM controller arms are done and read.
+Run 26's five checkpoints are on `/mnt/luna`, 20 GB, kept for E9.
 
 ## To review
 
 On `lab`, this session, oldest first: `9cbdc3f`, `deede3c`, `c2a138e`,
 `36bc436`, `5c24907`, `c187f8c`, `80c2587` (eta 0.02 default), `446354c`,
 `5d29a7a`, `ba15e51` (mask against `O_t`: code, SPEC, README), `89c7e6d`,
-`85a4237`, and the commit carrying this file. On `cosine-controller`:
-`8e8a209`, `2602806`, `0ef0a8b`, `1540605`, the code to review before the
-controller can merge. On `lab`, 2026-10-04: `e4ebe36` (FACTS), `fc4b30b`
-(PLAN), and the commit carrying this file.
+`85a4237`, `e4ebe36`, `fc4b30b`, `92fc559`, `f85ed10` (the controller's closure) and
+the commit carrying this file. On `cosine-controller`, for the record only:
+`5099784` .. `f9c50fd`.
 
 Earlier and still unreviewed: `ec47769` .. `1700c3c` (this file at `1700c3c`
 lists them). In ai-toolkit: `dab36c3` and `6a6c0c2` (the outside runner). The
 run 24/25 configs are local; ai-toolkit ignores `config/`.
 
-On `main`: `d44b1a2`, the squashed release. Nothing is pushed. After you push
-`lab`, the branches `constant-basis-step`, `trust-ratio`, `remove-adafactor`
+On `main`: `d44b1a2`, the squashed release. `lab` is pushed (2026-10-04);
+`main` and `cosine-controller` are not. With `lab` pushed, the branches `constant-basis-step`, `trust-ratio`, `remove-adafactor`
 and `study/rotation-clamp-eligibility` close.
