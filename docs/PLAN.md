@@ -84,24 +84,27 @@ bs32. Across beta a matched per-step ratio does not transfer -- at 0.98 the
 moment hides ~2.3x the travel of 0.9 -- and the travel unit that would carry it
 is unreviewed (HANDOVER).
 
-**The user's controller, built on branch `cosine-controller`** (constructor
-flag `lr_controller`, off by default). lr is a ceiling. The fleet votes each
-step with `sign(<O_t, M_{t-1}>)`; the vote's EMA at twice the moment's memory
-is read directly, `lr_scale = exp(10 min(s, 0))`. Its gain is unmeasured, and
-the user finds the formula too complex: it works and is parked for redesign.
-- For: cosine falls through every run even at a tenth of the lr, as the data
-  is used up, so holding it at zero anneals the run on its own evidence; a
-  decay restored cosine on both lanes (LFM's low arm, run 24's tail). On LFM
-  both forms tried found the hand-tuned lr on their own (`FACTS.md`).
-- Against or unknown: on LFM both forms bought 5.5e-3 target and paid ~0.02
-  source against constant `6.2e-4`; the cost is the early travel at the
-  ceiling, so the ceiling, not the reaction speed, is the open knob. At bs32
-  beta 0.95 cosine ended at -0.0037 with no loss cost, so zero is not shown
-  to be the set point. Fleet cosine scatters about 0.002 per 30-step bin on
-  Anima. The schedule controls (cosine, linear, power from the same peak) are
-  not run.
-- How it is settled: run 26 (Anima, 5 epochs, ceiling `1.4e-4`), samples
-  deciding; then the formula with the user.
+**The user's controller, on branch `cosine-controller`** (constructor flag
+`lr_controller`, off by default). lr is a ceiling. `lr_scale` is the EMA, at
+twice the moment's memory, of the fraction of matrices whose batch confirms the
+moment (`<O_t, M_{t-1}> > 0`). The form is the user's. It is smooth, but it does
+not yet set lr.
+- For: cosine falls through every run, even at a tenth of the lr, as the data
+  is used up, so reading it anneals the run on its own evidence. A decay
+  restored cosine on both lanes (LFM's low arm, run 24's tail). On LFM the
+  confirmed fraction at a `1e-3` ceiling beat constant `6.2e-4` on target and
+  held source within noise, where the earlier forms paid ~0.02 source
+  (`FACTS.md`).
+- Against: once the batch neither confirms nor opposes the moment, the fraction
+  tends to a half, so the lr tends to half the ceiling, whatever the ceiling
+  is. On Anima the vote sat at -0.01 to -0.06 from step ~100 through all 5
+  epochs of run 26, so there the controller is a fixed halving and the ceiling
+  is still a hand-set lr. At bs32 beta 0.95 cosine ended at -0.0037 with no
+  loss cost, so zero is not shown to be the set point. The schedule controls
+  (cosine, linear, power from the same peak) are not run.
+- Open: a translation from the confirmed fraction to lr that does not pin
+  lr at half the ceiling. Designing it with the user is next. Its test is
+  Anima, where the vote is near zero almost all run.
 
 Withdraws "the matrix lr is probably low" (runs 12-13, under the old step
 rule): under the law, runs 20-22 ran hot.
@@ -166,8 +169,9 @@ longer memory, since staleness is step times memory. Loss cannot show it;
 `rank_fraction 0.1` is the LFM measurement (`ARCHIVE.md`, "rank is a fraction of
 the matrix's size"); Anima has never run it. At 0.1 its roles get ranks 205
 (2048²), 145 (2048x1024), 410 (the ff pair), 34 and 32 (the patch projections),
-and the per-step update rises 1.4-3x over run 17's table at the same lr, because
-rank sets the step (SPEC).
+and the per-step update rose 1.4-3x over run 17's table at the same lr, because
+rank set the step under the rule of the time; under the law it sets only the
+subspace (SPEC).
 
 The AdaLN linears now train here too, at 72 (`linear_1`, 256x2048) and 125
 (`linear_2`, 6144x256), against a per-step gradient of rank at most the batch
@@ -181,6 +185,18 @@ fraction under a real bs16, against run 17, with lr lowered to match run
 17's per-module step so the comparison reads the subspace and not the step. The
 verdict is samples. Frame and moment in bf16 grow from 0.11 to 0.47 GiB at 0.1;
 the eigh and polar transients at rank 410 are unmeasured.
+
+### E9. Which roles move, and should step or rank follow them?
+
+The trust-ratio law gives every matrix the same relative step, and rank no
+longer scales the step, so a low-rank AdaLN linear steps as far as a rank-410
+ff matrix. The user's hypothesis: the high-rank roles, ff and attention, carry
+the finetune and want more step; AdaLN, whose gradient is sparse and low rank,
+should barely move, and the law is known to fit AdaLN poorly. Some roles may be
+walking more than learning.
+- Read first: per-role total travel and per-role cosine over run 26, from its
+  checkpoints and `loss_log.db`, with the bf16 walk (A2) in mind.
+- Then, if it holds: step or rank per role class, an arm against run 26.
 
 ### E4. Parked: an arrival sensor
 
