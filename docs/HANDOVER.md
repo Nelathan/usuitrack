@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-03, late evening. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-04, morning. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things. The 2026-10-01 review
 list is in this file's history at `0a4d75c`.
 
@@ -43,20 +43,22 @@ controller.
 The controller (PLAN D1) lives on branch `cosine-controller`, worktree
 `~/Projects/usuitrack-controller`, rebased on `lab`. Runs reach it through
 `PYTHONPATH=/home/djg/Projects/usuitrack-controller`, so `lab` stays checked
-out. Current form: vote EMA at `(1+beta)/2`, `lr_scale = exp(10 min(s, 0))`.
-You find the formula too complex; parked for tomorrow.
+out. Current form (`1540605`): `lr_scale` is the EMA at `(1+beta)/2` of the
+fraction of matrices whose batch confirms the moment. On LFM it won (FACTS),
+but a fraction with no signal tends to a half, and on Anima the vote sits at
+zero from step ~100: there it is a fixed half of the ceiling. Next is a better
+translation from the fraction to lr, designed with you, then E9 (per-role
+travel over run 26).
 
 **Withdrawn:** "the travel unit" anchor (run 18's relative step across a beta
 change) still stands withdrawn. Also withdrawn, never written to the docs:
 "target and source trade along total travel".
 
-## Running overnight, 2026-10-03
+## Runs since the last handover
 
-Run 26 `anima_usuitrack_26_controller` (config local; ai-toolkit ignores
-`config/`): run 24 with the controller, ceiling `1.4e-4`, constant schedule,
-no warmup, beta 0.95, polar mask, 960 steps = 5 epochs, samples and a
-checkpoint every epoch, all kept, on `/mnt/luna`. Read it from `loss_log.db`.
-Started 22:45, ends about 02:30.
+Run 26 `anima_usuitrack_26_controller` (5 epochs, the `exp` form) and the LFM
+arm `controller3-confirmed-lr1e-3` are done and read (FACTS). Run 26's five
+checkpoints are on `/mnt/luna`, 20 GB; E9 reads them.
 
 ## To review
 
@@ -64,8 +66,9 @@ On `lab`, this session, oldest first: `9cbdc3f`, `deede3c`, `c2a138e`,
 `36bc436`, `5c24907`, `c187f8c`, `80c2587` (eta 0.02 default), `446354c`,
 `5d29a7a`, `ba15e51` (mask against `O_t`: code, SPEC, README), `89c7e6d`,
 `85a4237`, and the commit carrying this file. On `cosine-controller`:
-`8e8a209`, `2602806`, `0ef0a8b`, the code to review before the controller
-can merge.
+`8e8a209`, `2602806`, `0ef0a8b`, `1540605`, the code to review before the
+controller can merge. On `lab`, 2026-10-04: `e4ebe36` (FACTS), `fc4b30b`
+(PLAN), and the commit carrying this file.
 
 Earlier and still unreviewed: `ec47769` .. `1700c3c` (this file at `1700c3c`
 lists them). In ai-toolkit: `dab36c3` and `6a6c0c2` (the outside runner). The
