@@ -345,12 +345,12 @@ plateau and decay. Means over 30-step bins:
 Samples, the user's: 25 moved less than 24; read at the end, different rather
 than worse, inside still favoured. `loss_log.db`, 2026-10-03.
 
-### Run 26: the controller's vote carries almost nothing on Anima
+### Run 26: the fleet vote sits at zero from step ~100
 
 Run 24's setup (bs16, `beta 0.95`, `rank_fraction 0.025`) with the polar mask
-and the controller's second form (`lr_scale = exp(10 min(s, 0))`, vote EMA at
-`beta`), ceiling `1.4e-4`, constant, no warmup, 960 steps = 5 epochs. Means
-over 48-step bins (a quarter epoch):
+and the lr controller's second form (branch `cosine-controller`, `ARCHIVE.md`),
+ceiling `1.4e-4`, no warmup, 960 steps = 5 epochs. Means over 48-step bins
+(a quarter epoch):
 
 | steps | vote | `lr_scale` (min) | `relative_step` |
 |---|---:|---:|---:|
@@ -362,16 +362,15 @@ over 48-step bins (a quarter epoch):
 
 - The vote is positive only in the first quarter epoch, then sits between
   -0.01 and -0.06 for the rest of the run. After the first bin, fleet
-  `grad_moment_cosine` stays within ±0.0022 of zero in every bin. After ~100 steps the batch neither
-  confirms nor opposes the moment, by much. That is the same point where
-  run 24's cosine crossed zero.
-- The lr swings ±20% inside a bin. Gain 10 in the exponent turns vote noise of
-  about ±0.02 into that swing, so the swing is noise, not control (user, wandb).
-- A confirmed fraction is `(1 + vote) / 2`, so this vote is 0.47-0.50 of the
-  fleet. Under the third form (LFM, below) `lr_scale` would hold flat near
-  0.49: a fixed half of the ceiling, smooth and uninformative. Once the vote
-  sits at zero, half the ceiling is what any ceiling buys. The LFM arm landing
-  near the hand-tuned lr was that coincidence (user).
+  `grad_moment_cosine` stays within ±0.0022 of zero in every bin: after ~100
+  steps the batch neither confirms nor opposes the moment, by much, where
+  run 24's cosine crossed zero too.
+- Per role, only `proj_out` (+0.009 to +0.019), `norm_out.linear_1` from
+  step ~200 (+0.015 to +0.032) and early `norm3.linear_1` (+0.032) hold a
+  clearly positive cosine; `patch_embed` stays negative (-0.006 to -0.019);
+  attention and ff sit within ±0.004. `moment_persistence` orders the roles
+  the same way, at 0.006 or below.
+  Not normalised by rank, so not a per-role signal read yet (PLAN E9).
 - `caution_kept` 0.592 against its floor of 0.601, under runs 24-25's 0.556:
   the polar mask moved it toward the floor, as on LFM.
 - Fleet step averaged ~1.1e-5 for 960 steps, against run 24's 6.84e-6 for 192.
@@ -726,7 +725,8 @@ persistence are the last logged interval. 2026-10-03.
   does not move with lr (0.555 in all three).
 - Cosine falls through every run, even the low arm's (0.265 early, 0.126
   mid-run, 0.021 at the end): part of the decline is the data being used up, not
-  over-travel. A controller holding cosine at zero would cut lr through a run.
+  over-travel. Decaying lr beat constant on target (`ARCHIVE.md`, "the cosine
+  lr controller").
 - `grad_capture` dips after warmup and recovers slowly; the trough deepens with
   lr (0.772 at `6.2e-5`, 0.760 at `6.2e-4`, steps 75-125). The frame lags the
   step it is asked to follow. The fleet step peaks at step 75 in both, where
@@ -794,55 +794,6 @@ the trade "Beta buys target at a held step" already reads, not a win: unlike
 bs32, the step here is too small for staleness to dominate. Runs
 `b095-lr3.8e-4`, `eta0.02-lr6.2e-4`.
 
-### The cosine lr controller, first two forms
-
-Standard arm (bs16, 1k, `beta 0.98`, eta `0.02`, polar mask); controller arms
-start at a `1.24e-3` ceiling with no warmup, on branch `cosine-controller`.
-The vote is the fleet mean of `sign(<O_t, M_{t-1}>)`. 2026-10-03.
-
-| arm | target | source |
-|---|---:|---:|
-| constant `6.2e-4`, warmup 50 | 1.659873 | 3.063877 |
-| integrator: vote EMA at `(1+beta)/2`, log-lr integrates it | 1.654286 | 3.085022 |
-| direct: vote EMA at `beta`, `lr_scale = exp(10 min(s, 0))` | 1.654680 | 3.082949 |
-
-Both controllers buy 5.5e-3 target and pay ~0.02 source, past the noise
-floor on both. The integrator's vote crossed zero ~100 steps after cosine
-(~450 against ~350) and its lr kept falling while the vote sat slightly
-negative, settling near `0.5x` the ceiling, i.e. near the hand-tuned
-`6.2e-4`. The direct read was reactive but spiky (user, wandb). Reacting
-faster did not recover source: the cost is in the early travel at the
-ceiling while agreement is still positive, not in the late cut. The
-polar-mask baseline ties the raw-mask one (1.659738 / 3.059932). Runs
-`polarbase-lr6.2e-4`, `controller-lr1.24e-3`, `controller2-lr1.24e-3`.
-
-### The controller's third form: the confirmed fraction
-
-`lr_scale` is the EMA at `(1+beta)/2` of the fraction of matrices whose batch
-confirms the moment (`<O_t, M_{t-1}> > 0`), so `lr = ceiling x lr_scale`.
-The ceiling is `1e-3`; otherwise the arm is the standard one. Branch
-`cosine-controller` at `1540605`, 2026-10-04.
-
-| arm | target | source |
-|---|---:|---:|
-| constant `6.2e-4`, warmup 50 | 1.659873 | 3.063877 |
-| confirmed fraction, ceiling `1e-3` | 1.655784 | 3.068637 |
-
-- Against the constant arm, target is better by 4.1e-3, 2.5x the replicate's
-  spread. Source is worse by 4.8e-3, inside that spread (5.6e-3). The first
-  two forms paid ~0.02 source for 5.5e-3 target.
-- The cut starts on step one, because a confirmed fraction begins near 0.84
-  rather than 1. That supports the reading above: the source cost was early
-  travel at the ceiling.
-- `lr_scale` ended at 0.52, so the lr was ~5.2e-4 (`relative_step` 4.2e-5,
-  against the constant arm's 4.9e-5). The user's read on wandb: it adapted
-  smoothly, and cosine read better than the earlier forms.
-- Read with run 26 (Anima lane), the 0.52 is the vote sitting at zero, not a
-  found lr. Once the batch stops confirming, the fraction tends to a half, so
-  this form converges to half of whatever ceiling it is given. That it landed
-  near `6.2e-4` came from choosing `1e-3` (user). Run
-  `controller3-confirmed-lr1e-3`.
-
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
@@ -864,7 +815,7 @@ The ceiling is `1e-3`; otherwise the arm is the standard one. Branch
 | 23 `b095_lr5e5` | run 22 at `beta 0.95`, `5e-5`, warmup 100 | good quality, little change (user); cosine at or above zero to ~768, negative after; full 1920 |
 | 24 `inside_bs16` | run 23 at a real bs16 (offloaded), `7e-5`, one epoch, cosine decay | moved more than 25; inside favoured (user); cosine zero at ~120, positive again under the decay |
 | 25 `outside_bs16` | run 24 with agreement outside the step, `6.84e-6` = run 24's step | moved less; different rather than worse (user); cosine zero at ~60 |
-| 26 `controller` | run 24 with the polar mask and the controller (`exp` form), ceiling `1.4e-4`, constant, 960 steps = 5 epochs | very stable, barely changed, arguably above base (user); vote ~0 from ~100, lr noisy at 0.5-1x |
+| 26 `controller` | run 24 with the polar mask and the lr controller (`exp` form, closed), ceiling `1.4e-4`, 960 steps = 5 epochs | very stable, barely changed, arguably above base (user); vote ~0 from ~100 |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from

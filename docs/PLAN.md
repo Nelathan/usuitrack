@@ -65,7 +65,7 @@ by distance.
 
 ## Group D. The step budget: learning rate, fallback, beta
 
-### D1. The global matrix lr, and whether cosine should set it
+### D1. The global matrix lr, and its schedule
 
 Under the trust-ratio law (`SPEC.md` step 8) `lr` is the relative step of an
 agreed direction, the same unit in every module. Across models, batches and beta
@@ -84,27 +84,12 @@ bs32. Across beta a matched per-step ratio does not transfer -- at 0.98 the
 moment hides ~2.3x the travel of 0.9 -- and the travel unit that would carry it
 is unreviewed (HANDOVER).
 
-**The user's controller, on branch `cosine-controller`** (constructor flag
-`lr_controller`, off by default). lr is a ceiling. `lr_scale` is the EMA, at
-twice the moment's memory, of the fraction of matrices whose batch confirms the
-moment (`<O_t, M_{t-1}> > 0`). The form is the user's. It is smooth, but it does
-not yet set lr.
-- For: cosine falls through every run, even at a tenth of the lr, as the data
-  is used up, so reading it anneals the run on its own evidence. A decay
-  restored cosine on both lanes (LFM's low arm, run 24's tail). On LFM the
-  confirmed fraction at a `1e-3` ceiling beat constant `6.2e-4` on target and
-  held source within noise, where the earlier forms paid ~0.02 source
-  (`FACTS.md`).
-- Against: once the batch neither confirms nor opposes the moment, the fraction
-  tends to a half, so the lr tends to half the ceiling, whatever the ceiling
-  is. On Anima the vote sat at -0.01 to -0.06 from step ~100 through all 5
-  epochs of run 26, so there the controller is a fixed halving and the ceiling
-  is still a hand-set lr. At bs32 beta 0.95 cosine ended at -0.0037 with no
-  loss cost, so zero is not shown to be the set point. The schedule controls
-  (cosine, linear, power from the same peak) are not run.
-- Open: a translation from the confirmed fraction to lr that does not pin
-  lr at half the ceiling. Designing it with the user is next. Its test is
-  Anima, where the vote is near zero almost all run.
+**The schedule.** Every lr that decayed beat constant `6.2e-4` on LFM target,
+and the cosine controller that decayed it is closed: it did not free the
+ceiling, which decides source (`ARCHIVE.md`, "the cosine lr controller").
+Open: which decay, and from which peak. The schedule controls (cosine, linear,
+power from the same peak) are not run on either lane; on LFM the controller
+arms give their targets to beat.
 
 Withdraws "the matrix lr is probably low" (runs 12-13, under the old step
 rule): under the law, runs 20-22 ran hot.
@@ -146,13 +131,12 @@ The user's lean: yes. 0.95 won at bs32 because its moment is 2.5x less stale
 staleness costs step size times memory length, so a large relative step wants
 a short memory. Evidence (`FACTS.md`): at bs32 and one lr, 0.95 stepped 1.64x
 further, tied target and forgot 0.015 less. At a small held step on bs16
-(pre-law, rescaled caution) 0.95 lost 0.004 target to 0.98. A cosine
-controller (D1) may let beta go lower still.
+(pre-law, rescaled caution) 0.95 lost 0.004 target to 0.98.
 
 At bs16 and a matched step (`FACTS.md`), 0.95 traded 6.8e-3 target for
 0.020 source: the beta trade, not a win. The default stays 0.98 (user,
-2026-10-03) until beta is re-read under the controller (D1), which cuts lr
-on over-travel and may change which memory pays. If 0.95 moves, SPEC, README
+2026-10-03) until beta is re-read under a decaying lr (D1), which cuts the
+late over-travel and may change which memory pays. If 0.95 moves, SPEC, README
 and the constructor default move together.
 
 The user's hypothesis for Anima: its smaller relative step tolerates the

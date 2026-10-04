@@ -884,6 +884,36 @@ gains a floor to read against. Withdrawn: the coordinate-wise descent
 guarantee for `Z_t`; it now holds for `O_t`. The Anima reads 0.03-0.045
 under the floor were taken against `Z_t`.
 
+## CLOSED -- the cosine lr controller; progress wants a decaying lr
+
+2026-10-04, closes the controller in D1. The user's controller scaled lr
+below a ceiling by the fleet's vote, `sign(<O_t, M_{t-1}>)`, in four forms:
+an integrator, a direct `exp` read, the EMA of the fraction of matrices the
+batch confirms, and that EMA with an integral around one half. On LFM at 1k
+(bs16, `beta 0.98`), against constant `6.2e-4` (1.659873 / 3.063877):
+
+- Every form that decayed beat constant lr on target, by 4.1e-3 to 5.6e-3,
+  2.5-3.5x the replicate's spread. Cosine falls through every run as the data
+  is used up, so a constant lr is over-travel late. That is the lesson that
+  stays: the schedule should decay (D1).
+- None freed the ceiling. Source pays for travel at a hot lr while agreement
+  is still positive, early and on the way down: ~0.02 at a `1.24e-3` ceiling
+  (first two forms) and at `2e-3` (third and fourth), within noise only at
+  `1e-3` (third form, 3.068637). The fourth form's integral brought a `2e-3`
+  run's final lr to 6.1e-4, the hand-tuned value, and source did not move
+  (3.0918 against the third form's 3.0924). Where the lr ends does not decide
+  source; the path does.
+- The confirmed fraction does fall when the run is hotter, but weakly: a
+  doubled ceiling ran 1.56x hotter at the end.
+- On Anima (run 26, second form, 5 epochs) the vote sat at -0.01 to -0.06
+  from step ~100 to the end, and the `exp` read turned its noise into ±20% lr
+  swings. Samples were very stable and barely changed (user).
+
+Not merged. The code, the four forms and every arm's numbers are on branch
+`cosine-controller` (`f9c50fd`, its `docs/FACTS.md`). Withdrawn: "a
+controller holding cosine at zero would cut lr through a run" as a design;
+the observation under it stands.
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
