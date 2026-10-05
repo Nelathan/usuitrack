@@ -23,10 +23,13 @@ fork's API and did not come over.
 
 ## Environment
 
-- This repo's venv: torch `2.12.0+cu132` and `causal-conv1d 1.6.2.post1`, both
-  pinned to the old lab venv's build. With torch 2.13 or `causal-conv1d` 1.7.0
-  the CUDA extension failed to load (undefined `c10` symbol). `uv run` no
-  longer rebuilds anything; the old `--no-sync` trap is gone.
+- This repo's venv: Python 3.14 (a local, gitignored `.python-version`), torch `2.14.1+cu132`, and
+  `causal-conv1d 1.7.0+cu.13.2.torch.2.14`, a prebuilt wheel from
+  `wheels.astral.sh/simple/cu132`. The wheel names its torch minor, so torch is
+  held to `2.14.*`; moving torch means picking the matching wheel. Python 3.15
+  waits on a cp315 pyarrow wheel. flash-attn is not installed: SDPA already
+  dispatches to its flash backend here; the gain, unmeasured, would be packed
+  varlen batches.
 - ai-toolkit installs `-e ../usuitrack`, so it runs whichever branch is checked
   out. **Keep `lab` checked out**; build `main` in a worktree.
 - **GPU power limit 198 W**, set at your request. Undo: `pkexec nvidia-smi -pl 220`.
