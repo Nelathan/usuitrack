@@ -144,14 +144,15 @@ against (`pyproject.toml`). Standard arm:
 ```bash
 uv run python experiments/llm_synth_smoke.py \
   --max-steps 1000 --batch-size 16 --eval-every 500 --wandb-log-every 25 \
-  --seed 1 --usuitrack-lr 6.2e-4 --beta 0.98 \
+  --seed 1 --usuitrack-lr 1e-4 --beta 0.95 --lr-final-ratio 0.2 \
   --basis-lag-diagnostic --basis-lag-interval 10 --no-final-sample \
   --wandb-run <name>
 ```
 
 Every LFM table in `docs/FACTS.md` is at 1k steps; a shorter arm compares
-against nothing there. The harness's own `--beta` default is not the release's,
-so always pass it. `--rank-fraction` sets the optimizer's `rank_fraction`
+against nothing there. Pass `--beta`, the lr and `--lr-final-ratio` explicitly,
+so a log names its own arm; tables before the 2026-10-05 moment-first change ran
+at a constant lr (`--lr-final-ratio 1`). `--rank-fraction` sets the optimizer's `rank_fraction`
 (default 0.1). Roughly 0.8 s/step at bs16 and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
 are the `usuitrack_final_val_loss` (target) and
 `usuitrack_final_retention_val_loss` (source) lines at the end of the log, plus

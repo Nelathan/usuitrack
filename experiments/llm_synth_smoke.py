@@ -933,10 +933,20 @@ def optimizer_base_lrs(optimizer: torch.optim.Optimizer) -> list[float]:
     return [float(group["lr"]) for group in optimizer.param_groups]
 
 
-def apply_lr_warmup(optimizer: torch.optim.Optimizer, base_lrs: Sequence[float], optimizer_step: int, warmup_steps: int) -> float:
-    if warmup_steps <= 0:
-        return 1.0
-    scale = min(1.0, optimizer_step / warmup_steps)
+def apply_lr_schedule(
+    optimizer: torch.optim.Optimizer,
+    base_lrs: Sequence[float],
+    optimizer_step: int,
+    warmup_steps: int,
+    total_steps: int,
+    final_ratio: float,
+) -> float:
+    """Linear warmup, then a linear decay to `final_ratio` of the peak at `total_steps`."""
+    if optimizer_step < warmup_steps:
+        scale = optimizer_step / warmup_steps
+    else:
+        progress = min(1.0, (optimizer_step - warmup_steps) / max(total_steps - warmup_steps, 1))
+        scale = 1.0 - (1.0 - final_ratio) * progress
     for group, base_lr in zip(optimizer.param_groups, base_lrs, strict=True):
         group["lr"] = base_lr * scale
     return scale
@@ -1094,9 +1104,9 @@ def run_optimizer(
 
     for step in range(args.warmup_steps):
         batch_index = step * args.grad_accum_steps
-        apply_lr_warmup(optimizer, base_lrs, step + 1, args.lr_warmup_steps)
+        apply_lr_schedule(optimizer, base_lrs, step + 1, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio)
         if fallback_optimizer is not None:
-            apply_lr_warmup(fallback_optimizer, fallback_base_lrs, step + 1, args.lr_warmup_steps)
+            apply_lr_schedule(fallback_optimizer, fallback_base_lrs, step + 1, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio)
         train_step(
             model,
             optimizer,
@@ -1123,9 +1133,9 @@ def run_optimizer(
     for step in range(args.max_steps):
         batch_index = (args.warmup_steps + step) * args.grad_accum_steps
         global_step = step + 1
-        apply_lr_warmup(optimizer, base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps)
+        apply_lr_schedule(optimizer, base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio)
         if fallback_optimizer is not None:
-            apply_lr_warmup(fallback_optimizer, fallback_base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps)
+            apply_lr_schedule(fallback_optimizer, fallback_base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio)
         if args.eigh_refit_interval > 0 and global_step > 1 and (global_step - 1) % args.eigh_refit_interval == 0:
             drop_bases_for_refit(optimizer)
         should_log_train = args.wandb_log_every > 0 and global_step % args.wandb_log_every == 0
@@ -1262,6 +1272,7 @@ def run_optimizer(
         "side_policy_right_tensors": policy_stats["side_policy_right_tensors"] if optimizer_name == "usuitrack" else 0,
         "basis_update_interval": args.basis_update_interval if optimizer_name == "usuitrack" else 0,
         "lr_warmup_steps": args.lr_warmup_steps,
+        "lr_final_ratio": args.lr_final_ratio,
         "consume_grad": (not args.keep_grads_after_step) if optimizer_name == "usuitrack" else False,
         "release_matrix_grads": args.release_matrix_grads if optimizer_name == "usuitrack" else False,
         "fallback_lr": fallback_lr if optimizer_name in {"usuitrack", "lora"} and fallback_params else 0.0,
@@ -1353,6 +1364,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-lr", type=float, default=2e-4)
     parser.add_argument("--lora-grad-clip-norm", type=float, default=1.0, help="global gradient clip for LoRA adapter parameters")
     parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
+    parser.add_argument("--lr-final-ratio", type=float, default=0.2, help="after warmup, decay learning rates linearly to this fraction of the peak at the last step; 1 holds them constant")
     parser.add_argument("--beta", type=float, default=0.95)
     parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from UsuiTrack.ROLE_READS")
     parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="clip the raw gradient per tensor before Adafactor, Oja, and projection; must be positive for usuitrack, where the clip protects Adafactor's second-moment memory and has no off switch")
@@ -1463,6 +1475,8 @@ def main() -> None:
         raise ValueError("basis_update_interval must be positive")
     if args.lr_warmup_steps < 0:
         raise ValueError("lr_warmup_steps must be non-negative")
+    if not 0 < args.lr_final_ratio <= 1:
+        raise ValueError("lr_final_ratio must be in (0, 1]")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")

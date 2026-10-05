@@ -9,7 +9,7 @@ import torch
 from usuitrack import UsuiTrack
 
 from experiments.llm_synth_smoke import BackwardMemoryTrace, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK, DEFAULT_MODEL, DEFAULT_SOURCE_HF_DATASET, build_parser, build_usuitrack_param_groups, install_state_matched_lora, maybe_compile_training_model, packed_text_limit, partition_usuitrack_params, repair_lfm2_gradient_checkpointing, select_trainable_params, validate_gradient_release_contract, validate_lora_optimizer_state_dtype, wandb_log
-from experiments.llm_synth_smoke import cce_causal_lm_loss, gradient_norm_statistics, make_packed_batches, make_right_padded_batches, synth_masked_examples
+from experiments.llm_synth_smoke import apply_lr_schedule, cce_causal_lm_loss, gradient_norm_statistics, make_packed_batches, make_right_padded_batches, synth_masked_examples
 
 
 def assert_param_membership(test_case, param, params, expected: bool) -> None:
@@ -183,6 +183,7 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.lora_lr, 2e-4)
         self.assertEqual(args.lora_grad_clip_norm, 1.0)
         self.assertEqual(args.lr_warmup_steps, 50)
+        self.assertEqual(args.lr_final_ratio, 0.2)
         self.assertEqual(args.beta, 0.95)
         self.assertEqual(args.role_reads, [])
         self.assertEqual(args.basis_update_interval, 1)
@@ -201,6 +202,20 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertFalse(build_parser().parse_args(["--no-release-matrix-grads"]).release_matrix_grads)
         self.assertFalse(args.trace_backward_memory)
         self.assertFalse(hasattr(args, "shadow_target_probe"))
+
+    def test_lr_schedule_warms_up_then_decays_linearly_to_the_final_ratio(self):
+        param = torch.nn.Parameter(torch.zeros(1))
+        optimizer = torch.optim.SGD([param], lr=1.0)
+
+        def lr_at(step, final_ratio=0.2):
+            apply_lr_schedule(optimizer, [1e-4], step, 50, 1050, final_ratio)
+            return optimizer.param_groups[0]["lr"]
+
+        self.assertAlmostEqual(lr_at(25), 5e-5)
+        self.assertAlmostEqual(lr_at(50), 1e-4)
+        self.assertAlmostEqual(lr_at(550), 6e-5)
+        self.assertAlmostEqual(lr_at(1050), 2e-5)
+        self.assertAlmostEqual(lr_at(1050, final_ratio=1.0), 1e-4)
 
     def test_gradient_release_rejects_incompatible_harness_contracts(self):
         validate_gradient_release_contract(build_parser().parse_args([]))
