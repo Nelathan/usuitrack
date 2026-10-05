@@ -647,7 +647,7 @@ default; each selected read adds one key per role.
 | `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized, counted from `raw_grad_norm` |
 | `transport_lag` | net distance a sampled frame covered over `diagnostics_lag_interval` basis updates, same unit as the speed. Also the projected moment's smear: set the interval to `1/(1-beta)` and it reads how far the moment's own history has drifted from the coordinates it was accumulated in |
 | `transport_curve` | `1 - lag / path`: the fraction of that window's travel which cancelled. Zero is a straight drift, approaching one is a frame churning in place |
-| `transport_spin` | `||skew(Q_old^T Q_now)||_F / sqrt(r)`: rotation of the frame's columns *within* their own span. Moves the subspace not at all; scrambles the projected moment one-for-one, because transport is the identity in these coordinates |
+| `transport_spin` | `||skew(Q_old^T Q_now)||_F / sqrt(r)`: rotation of the frame's columns *within* their own span over the window. Moves the subspace not at all: the path's holonomy plus storage rounding. The moment is turned with the stored frame every step, so spin does not scramble it |
 | `transport_correction` | `||skew(R_s)||_F / sqrt(r)`, same unit as spin: the in-span rotation the moment is turned by on this step, from the stored frame's overlap (step 6's correction). Zero when the frame is stored exactly |
 
 `transport_lag`, `transport_curve` and `transport_spin` need the frame snapshot
@@ -658,10 +658,10 @@ curve with low speed is a frame sitting on its fixed point. High speed *and*
 high curve is churn: the tracker working hard, going nowhere, and integrating
 batch noise into the frame while it does. Low speed with low curve is ambiguous
 between settled and starved, and spin separates them -- a settled frame is still
-in every sense, a spinning one is renaming the moment's coordinates underneath
-it. A single Grassmann geodesic along a horizontal tangent has `Q_old^T Q_now =
-V cos(theta) V^T`, exactly symmetric, so spin is zero for one ideal step and
-what accumulates over a window is holonomy plus retraction and rounding error.
+in every sense, a spinning one is still rotating its own coordinates. A single
+Grassmann geodesic along a horizontal tangent has `Q_old^T Q_now = V cos(theta)
+V^T`, exactly symmetric, so spin is zero for one ideal step and what accumulates
+over a window is holonomy plus retraction and rounding error.
 
 `transport_speed` is measured from the written frames, not from the eigenvalues
 the geodesic was handed. Those agree only while nothing stands between the aim

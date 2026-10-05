@@ -329,10 +329,12 @@ class UsuiTrack(Optimizer):
             ``diagnostics_lag_interval`` basis updates: the fraction of that
             travel which cancelled, zero for a straight drift and approaching
             one for a frame churning in place. ``transport_spin`` is rotation of
-            the frame's columns *within* the span they already had -- motion
-            that moves the subspace not at all and scrambles the projected
-            moment one-for-one, since transport is the identity in these
-            coordinates.
+            the frame's columns *within* the span they already had, accumulated
+            over the same window -- motion that moves the subspace not at all.
+            It is holonomy of the path plus storage rounding; the moment is
+            turned with the stored frame on every step, so spin does not
+            scramble it. ``transport_correction`` is that per-step turn, the
+            in-span rotation the moment actually receives.
 
             How to read them. High speed is fine if curve is low: the frame is
             travelling, and it will slow as the aim converges. High curve is
@@ -342,8 +344,7 @@ class UsuiTrack(Optimizer):
             batch noise into the frame while it does. Low speed and low curve is
             ambiguous between a settled frame and a starved one, and spin is
             what separates them: a settled frame is still in every sense, while
-            a frame with spin is quietly rotating its own coordinates under a
-            moment that assumes they are fixed.
+            a frame with spin is still rotating its own coordinates.
 
             ``transport_curve`` and ``transport_spin`` need the frame snapshot
             and so appear only at ``diagnostics = "full"``. ``transport_speed``
@@ -935,12 +936,12 @@ class UsuiTrack(Optimizer):
                     # rounding exists to stop a sub-ulp *update* vanishing, and
                     # the frame has no sub-ulp update to lose -- the geodesic
                     # moves it by a real angle every time. What bf16 storage
-                    # costs the frame is `transport_spin`, in-span rotation that
-                    # scrambles the projected moment's coordinates for no
-                    # subspace progress, and that is variance rather than bias:
-                    # measured, stochastic rounding here makes it `sqrt(2)` times
-                    # worse at every window, which is exactly the extra variance
-                    # of a full-ulp uniform draw over a half-ulp bound.
+                    # costs the frame is in-span rotation for no subspace
+                    # progress, `transport_correction` per step, and that is
+                    # variance rather than bias: measured on `transport_spin`,
+                    # stochastic rounding here made it `sqrt(2)` times worse at
+                    # every window, which is exactly the extra variance of a
+                    # full-ulp uniform draw over a half-ulp bound.
                     entry.projector.basis = basis.to(
                         device=entry.projector.basis.device,
                         dtype=entry.projector.basis.dtype,
@@ -962,8 +963,8 @@ class UsuiTrack(Optimizer):
         coordinates carry over untouched. What is not exact is the frame that
         actually gets stored. Rounding the geodesic's result into bf16 rotates
         the frame's columns *inside* the span they already had -- motion that
-        advances the subspace not at all and scrambles the moment one-for-one.
-        `transport_spin` has always measured it; nothing corrected it.
+        advances the subspace not at all and would scramble the moment
+        one-for-one if the moment were not turned with it.
 
         So read the overlap from the frames as they are **stored**, not as they
         were computed -- the rounding is the whole quantity being chased -- and
@@ -1176,15 +1177,14 @@ class UsuiTrack(Optimizer):
         orbit.
 
         `transport_spin` is rotation of the frame's columns *inside* the span
-        they already had, which moves the subspace not at all and scrambles the
-        moment one-for-one, since transport is the identity in these
-        coordinates. It is the skew part of `C`: a single Grassmann geodesic
-        along a horizontal tangent gives `C = V cos(theta) V^T`, exactly
-        symmetric, so a nonzero skew is either genuine holonomy -- the product
-        of several such symmetric steps need not be symmetric -- or retraction
-        and rounding error. Both break identity transport, so this is the
-        measurement that says whether the moment's coordinates still mean what
-        they meant, rather than an argument that they should.
+        they already had, which moves the subspace not at all. It is the skew
+        part of `C`: a single Grassmann geodesic along a horizontal tangent
+        gives `C = V cos(theta) V^T`, exactly symmetric, so a nonzero skew is
+        either genuine holonomy -- the product of several such symmetric steps
+        need not be symmetric -- or retraction and rounding error. It reads the
+        path's curvature, not damage to the moment: the stored frame's rotation
+        is taken out of the moment on every step (`_record_frame_rotation`),
+        and `transport_correction` is what that step-by-step turn amounts to.
 
         Sampled over `diagnostics_lag_matrices` parameters, not carried per
         parameter: this is the only diagnostic that costs persistent bytes
