@@ -230,14 +230,13 @@ def test_kernel_matches_a_hand_rolled_step():
     assert torch.allclose(projected, gradient @ basis.mT, atol=1e-6)
 
 
-def test_the_moment_integrates_orthogonalized_directions():
-    """The polar map runs before the average, and the average is the update.
+def test_the_moment_averages_unit_gradients_and_the_step_is_its_polar_factor():
+    """The average runs on gradients, and the polar map runs once, on the average.
 
     Written out at the integration site, because that is where the order lives:
-    one step from a zero moment must leave `(1 - beta)` of the *orthogonalized*
-    projected gradient in state, not `(1 - beta)` of the gradient itself, and the
-    weight must move by that moment rather than by a re-orthogonalized copy of
-    it.
+    one step from a zero moment must leave `(1 - beta)` of the projected
+    gradient at unit norm in state -- not of its polar factor -- and the weight
+    must move by the polar factor of that moment at unit norm, not by the moment.
     """
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
@@ -251,41 +250,41 @@ def test_the_moment_integrates_orthogonalized_directions():
     state = optimizer.state[weight]
     basis = state["basis"]
     projected = gradient @ basis.mT
-    direction = UsuiTrack._orthogonalize_update(projected, UsuiTrack._unit_direction_scale(tuple(projected.shape)))
 
-    torch.testing.assert_close(state["projected_exp_avg"].float(), 0.1 * direction, atol=1e-4, rtol=0)
+    torch.testing.assert_close(state["projected_exp_avg"].float(), 0.1 * projected / projected.norm(), atol=1e-6, rtol=0)
     # The frame does not move on the step that fits it, so the update lifts
     # through the same basis the moment lives in, sized by the weight it lands on.
-    expected_step = (0.1 * direction) @ basis
-    torch.testing.assert_close((before - weight.detach()) / (0.1 * before.norm()), expected_step, atol=1e-4, rtol=0)
+    direction = UsuiTrack._orthogonalize_update(projected, UsuiTrack._unit_direction_scale(tuple(projected.shape)))
+    torch.testing.assert_close((before - weight.detach()) / (0.1 * before.norm()), direction @ basis, atol=1e-4, rtol=0)
 
 
-def test_a_contested_direction_takes_a_smaller_step_than_an_agreed_one():
-    """Disagreement costs step size, which is the whole point of ortho-first.
+def test_a_contested_direction_steps_as_far_as_an_agreed_one():
+    """The moment decides where the step points, never how far it goes.
 
-    Both arms hand the moment a unit-spectrum direction of identical size every
-    step; only the sign pattern differs. `G` and `-G` share `G^T G`, so a frame
-    fitted on either is a fixed point of both streams and the frame contributes
-    nothing to the difference. Under the old order -- average, then
-    orthogonalize -- the two arms would take steps of exactly the same size,
-    because the polar map restored whatever magnitude the cancellation removed.
+    Both arms feed the moment gradients of identical size; only the sign pattern
+    differs, so one moment grows to full length and the other cancels toward
+    the white floor. `G` and `-G` share `G^T G`, so a frame fitted on either is
+    a fixed point of both streams and the frame contributes nothing to the
+    difference. The polar map discards the moment's length, so both arms move
+    their weight by `lr` of its norm.
     """
 
-    def final_step_norm(signs: list[int]) -> float:
+    lr = 0.01
+
+    def final_relative_step(signs: list[int]) -> float:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-        optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
+        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
         gradient = torch.randn(ROWS, COLS)
         for sign in signs:
             before = weight.detach().clone()
             weight.grad = gradient * sign
             optimizer.step()
-            motion = float((weight.detach() - before).norm())
+            motion = float((weight.detach() - before).norm() / before.norm())
         return motion
 
-    agreed = final_step_norm([1] * 8)
-    contested = final_step_norm([1, -1] * 4)
-    assert contested < 0.5 * agreed, (contested, agreed)
+    assert final_relative_step([1] * 8) == pytest.approx(lr, rel=0.1)
+    assert final_relative_step([1, -1] * 4) == pytest.approx(lr, rel=0.1)
 
 
 def test_moment_persistence_reads_zero_on_an_independent_stream():
@@ -317,9 +316,8 @@ def test_moment_persistence_reads_zero_on_an_independent_stream():
 def test_the_update_is_invariant_to_gradient_scale():
     """Why there is no gradient clip: nothing downstream can see the magnitude.
 
-    The polar map runs on each step's projected gradient before it enters the
-    moment, so a per-step rescale -- which is exactly what a clip is -- cannot
-    reach the average. The aim is scale-free for its own reason: `action` and
+    Each step's projected gradient enters the moment at unit norm, so a per-step
+    rescale -- which is exactly what a clip is -- cannot reach the average. The aim is scale-free for its own reason: `action` and
     `rayleigh` are both quadratic in `G`, so their ratio cancels the factor.
     A 180x blip is the case the clip existed for, and it is included here.
     """
@@ -444,19 +442,19 @@ def test_role_reads_partition_the_fleet_read_only_when_asked_for():
     _run(all_params, optimizer, 1)
     assert not [key for key in optimizer.pop_diagnostics() if "/" in key]
 
-    optimizer.diagnostic_role_reads = {"caution_kept", "grad_moment_cosine"}
+    optimizer.diagnostic_role_reads = {"grad_capture", "grad_moment_cosine"}
     _run(all_params, optimizer, 1)
 
     diagnostics = optimizer.pop_diagnostics()
     assert sorted(key for key in diagnostics if "/" in key) == [
-        "caution_kept/lone",
-        "caution_kept/pair",
+        "grad_capture/lone",
+        "grad_capture/pair",
         "grad_moment_cosine/lone",
         "grad_moment_cosine/pair",
     ]
-    pair, single = diagnostics["caution_kept/pair"], diagnostics["caution_kept/lone"]
+    pair, single = diagnostics["grad_capture/pair"], diagnostics["grad_capture/lone"]
     assert 0.0 < pair < 1.0 and 0.0 < single < 1.0
-    assert diagnostics["caution_kept"] == pytest.approx((2 * pair + single) / 3, rel=1e-6)
+    assert diagnostics["grad_capture"] == pytest.approx((2 * pair + single) / 3, rel=1e-6)
     pair, single = diagnostics["grad_moment_cosine/pair"], diagnostics["grad_moment_cosine/lone"]
     assert diagnostics["grad_moment_cosine"] == pytest.approx((2 * pair + single) / 3, rel=1e-5, abs=1e-7)
 
@@ -464,7 +462,7 @@ def test_role_reads_partition_the_fleet_read_only_when_asked_for():
 def test_role_reads_reject_an_unknown_read():
     _, optimizer = _two_matrix_optimizer()
     with pytest.raises(ValueError, match="diagnostic_role_reads"):
-        optimizer.diagnostic_role_reads = {"caution_kep"}
+        optimizer.diagnostic_role_reads = {"grad_captur"}
 
 
 def test_relative_step_reads_the_whole_step_against_the_whole_weight():
@@ -798,26 +796,26 @@ def test_compiled_and_eager_kernels_produce_the_same_update():
     torch.testing.assert_close(trained[0], trained[1], rtol=1e-5, atol=1e-6)
 
 
-def test_lr_is_the_relative_step_of_an_agreed_direction_in_every_module():
-    """The step's unit (SPEC step 8): `||dW|| / ||W||` is `lr` times agreement.
+def test_lr_is_the_relative_step_in_every_module():
+    """The step's unit (SPEC step 8): `||dW|| / ||W||` is `lr`.
 
     Shape, rank and the weight's size used to set how hard a module was pushed
     -- Muon's aspect factor and the polar factor's `sqrt(r)` -- which on Anima
     spread one `lr` 80x across roles and gave the network's two narrowest
-    matrices its largest relative steps. Now none of them enters: one step from
-    a zero moment carries agreement `1 - beta` exactly, so every module, tall,
-    wide or scaled, moves by `lr (1 - beta)` of its own norm. The polar map's
-    singular values are not exactly one, hence a tolerance on the shapes; the
-    weight's scale enters exactly.
+    matrices its largest relative steps. None of them enters: the step is the
+    moment's polar factor at unit norm, so every module, tall, wide or scaled,
+    moves by `lr` of its own norm. The polar map's singular values are not
+    exactly one, hence a tolerance on the shapes; the weight's scale enters
+    exactly.
     """
 
-    lr, beta = 1e-2, 0.9
+    lr = 1e-2
 
     def relative_step(shape: tuple[int, int], weight_scale: float) -> float:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(weight_scale * torch.randn(*shape))
         before = weight.detach().clone()
-        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, beta=beta, weight_decay=0.0, cautious=False)
+        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, weight_decay=0.0)
         weight.grad = torch.randn(*shape)
         optimizer.step()
         return ((before - weight.detach()).norm() / before.norm()).item()
@@ -825,7 +823,7 @@ def test_lr_is_the_relative_step_of_an_agreed_direction_in_every_module():
     reference = relative_step((ROWS, COLS), 1.0)
     assert relative_step((ROWS, COLS), 30.0) == pytest.approx(reference, rel=1e-5)
     for shape in ((ROWS, COLS), (COLS, ROWS), (512, 32), (32, 512)):
-        assert relative_step(shape, 1.0) == pytest.approx(lr * (1.0 - beta), rel=0.1)
+        assert relative_step(shape, 1.0) == pytest.approx(lr, rel=0.1)
 
 
 def test_matrices_sharing_a_projected_shape_but_not_a_shape_still_bucket_correctly():
@@ -862,29 +860,3 @@ def test_matrices_sharing_a_projected_shape_but_not_a_shape_still_bucket_correct
     # every other batched-vs-solo comparison in this file already carries.
     for shape in shapes:
         torch.testing.assert_close(together[shape], separate[shape], rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.parametrize("cautious", [False, True])
-def test_cautious_step_descends_on_a_gradient_that_contradicts_the_moment(cautious):
-    """A moment built on `G` steps uphill when the batch turns to `-G`; the
-    in-frame mask, judging against the batch's direction, must turn the
-    realised change into a descent direction for that batch."""
-
-    torch.manual_seed(0)
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=1e-2, rank_fraction=RANK_FRACTION, side="right", cautious=cautious)
-    grad = torch.randn(ROWS, COLS)
-    for _ in range(10):
-        weight.grad = grad + 0.1 * torch.randn(ROWS, COLS)
-        optimizer.step()
-
-    turned = -grad + 0.1 * torch.randn(ROWS, COLS)
-    before = weight.detach().clone()
-    weight.grad = turned
-    optimizer.step()
-    descent = float(((weight.detach() - before) * turned).sum())
-
-    if cautious:
-        assert descent <= 0.0
-    else:
-        assert descent > 0.0

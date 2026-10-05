@@ -57,7 +57,7 @@ embedding_params = {id(p) for m in model.modules() if isinstance(m, nn.Embedding
 matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
 other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
 
-matrix_opt = UsuiTrack(matrix_params, lr=6e-4)
+matrix_opt = UsuiTrack(matrix_params, lr=1e-4)
 other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
 
 loss = model(**batch).loss
@@ -73,7 +73,7 @@ it's consumed instead of holding the whole backward's gradients in memory at
 once:
 
 ```python
-matrix_opt = UsuiTrack(matrix_params, lr=6e-4, release_matrix_grads=True)
+matrix_opt = UsuiTrack(matrix_params, lr=1e-4, release_matrix_grads=True)
 ```
 
 This requires one backward per `step()` call, no gradient accumulation, and
@@ -86,9 +86,9 @@ integration, and a full-finetune run through Unsloth's `FastModel` loader
 
 There is no gradient clipping, and nothing to configure: every consumer of the
 gradient is insensitive to its magnitude. The basis tracker divides one
-quadratic in `G` by another, and the update orthogonalizes each step before it
-enters the moment, so a bad batch contributes one unit-spectrum direction
-weighted like any other step. Non-finite entries are still zeroed.
+quadratic in `G` by another, and the update normalizes each step's gradient to
+unit norm before it enters the moment, so a bad batch contributes one unit of
+weight like any other step. Non-finite entries are still zeroed.
 
 ### Is the tracker actually tracking?
 
@@ -166,20 +166,16 @@ a leverage-balancing row rescale
 ([Aurora](https://github.com/tilde-research/aurora-release), from Tilde
 Research), then a Newton-Schulz polar map that does the orthogonalizing, using
 the per-step-tuned quintic schedule from the Muon lineage (see `docs/SPEC.md`
-step 7 for provenance). The polar map runs on each step's projected gradient,
-before the moment averages it. Magnitude is relative to the weight it lands
-on: `lr` is the fraction of `||W||` a matrix moves per step when every step
-agrees, the same in every module whatever its shape or rank (LAMB's trust
-ratio), and the moment's agreement scales it down from there; see
-`docs/SPEC.md` step 8.
-No `lr` is a measured recommendation yet; the constructor's `1e-3` is a
-placeholder. `6.2e-4` was best finetuning a 350M LLM at 16 x 1024 tokens per
-step; a 2B image DiT at batch 8 ran too hot at `1.5e-4` and changed little at
-`5e-5` (beta 0.95).
-Before the lift, the step drops every coordinate where the moment's sign
-contradicts this batch's orthogonalized direction (a cautious update, in frame
-coordinates), so each step moves only where the batch agrees with the moment and
-a matrix the batch disputes more steps less. `cautious=False` turns the mask off.
+step 7 for provenance). The moment averages each step's projected gradient at
+unit norm, and the polar map runs once, on the moment, so a batch's strong
+planes weight the average and its noise planes stay small. Magnitude is
+relative to the weight it lands on: `lr` is the fraction of `||W||` a matrix
+moves per step, the same in every module whatever its shape or rank (LAMB's
+trust ratio); see `docs/SPEC.md` step 8. That puts it on LoRA's scale. The
+default `1e-4` was set on a 350M LLM at 16 x 1024 tokens per step, under a
+linear decay to a fifth of it over the run, which beat a constant `lr`; decay
+your `lr` the same way. On a 2B image DiT at batch 8 the best relative step
+measured so far is about `1.3e-5`.
 For bf16 weights the update is accumulated in fp32 and written back with
 stochastic rounding, because an orthogonalized step is often a fraction of a
 bf16 ulp and round-to-nearest would discard it outright; `StochasticAdamW` is

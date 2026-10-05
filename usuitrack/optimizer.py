@@ -48,13 +48,13 @@ class MatrixUpdate:
 
     param: Tensor
     projector: SubspaceProjector
-    # `polar(projected grad)` -- see `_orthogonalized_directions`.
+    # The projected gradient at unit Frobenius norm -- see `_unit_gradients`.
     direction: Tensor
     projected_grad_norm: Tensor
     oja_tangent: Tensor | None = None
     raw_grad_norm: Tensor | None = None
-    # Filled by `_integrate_step`, which is where the averaged direction enters
-    # the moment; `_commit_moments` rounds it into state.
+    # Filled by `_integrate_step`, which is where the direction enters the
+    # moment; `_commit_moments` rounds it into state.
     projected_exp_avg: Tensor | None = None
     transport_speed: Tensor | None = None
     # The in-span rotation between the frame this step's moment was measured in
@@ -76,8 +76,8 @@ class UsuiTrack(Optimizer):
     def __init__(
         self,
         params: Iterable[Tensor],
-        lr: float = 1e-3,
-        beta: float = 0.98,
+        lr: float = 1e-4,
+        beta: float = 0.95,
         eps: float = 1e-8,
         weight_decay: float = 0.0,
         rank_fraction: float = 0.1,
@@ -87,7 +87,6 @@ class UsuiTrack(Optimizer):
         release_matrix_grads: bool = False,
         compile_tensor_kernels: bool = False,
         stochastic_rounding: bool = True,
-        cautious: bool = True,
     ) -> None:
         if lr <= 0:
             raise ValueError(f"lr must be positive, got {lr}")
@@ -164,7 +163,6 @@ class UsuiTrack(Optimizer):
         self._matrix_param_groups: dict[Tensor, dict] = {}
         self.release_matrix_grads = release_matrix_grads
         self.stochastic_rounding = stochastic_rounding
-        self.cautious = cautious
         for group in self.param_groups:
             for param in group["params"]:
                 if param.ndim == 2:
@@ -248,7 +246,6 @@ class UsuiTrack(Optimizer):
 
     # Every read sampled once per matrix, which is what a role can split.
     ROLE_READS = (
-        "caution_kept",
         "grad_capture",
         "grad_moment_cosine",
         "moment_persistence",
@@ -379,13 +376,9 @@ class UsuiTrack(Optimizer):
             ``p (1 - w^2) + w^2`` with ``w^2 = (1 - beta)/(1 + beta)``.
         ``relative_step``
             The whole step's ``||dW||_F`` over all matrices against their
-            current ``||W||_F``: the final ratio, ``lr`` times agreement times
-            caution, and the read that compares across models. The update
+            current ``||W||_F``: the final ratio, ``lr`` whenever every matrix
+            stepped, and the read that compares across models. The update
             before rounding, so the stochastic-rounding walk is not in it.
-        ``caution_kept``
-            Fraction of frame coordinates the cautious mask keeps, averaged over
-            matrices. Without a rescale, a role kept less steps less, so its
-            spread across roles is the step the mask redistributes.
         ``<read>/<role>``
             Each read named in ``diagnostic_role_reads`` (one of
             ``ROLE_READS``), again per ``diagnostic_roles`` class.
@@ -577,12 +570,12 @@ class UsuiTrack(Optimizer):
             prepared.append(self._pending_matrix_updates.pop(p))
         if not prepared:
             return []
-        directions = self._orthogonalized_directions(prepared)
+        directions = self._unit_gradients(prepared)
         return [
             MatrixUpdate(
                 param=entry.param,
                 projector=entry.projector,
-                direction=direction.float(),
+                direction=direction,
                 projected_grad_norm=entry.projected_grad.float().norm(),
                 oja_tangent=None if entry.oja_tangent is None else entry.oja_tangent.float(),
                 raw_grad_norm=None if entry.raw_grad_norm is None else entry.raw_grad_norm.float(),
@@ -609,14 +602,14 @@ class UsuiTrack(Optimizer):
         # which fits the frame rather than moving it, and a step where the basis
         # update is not due under basis_update_interval > 1.
         #
-        # There is no gradient clipping, because with the polar map ahead of the
-        # average there is nothing left for it to protect. Every consumer of the
-        # gradient is now insensitive to its magnitude: the aim divides a
-        # quadratic by a quadratic, and the update orthogonalizes each step
-        # before it enters the moment, so a blip contributes one unit-spectrum
-        # direction weighted like any other step. A clip is exercised on every
-        # step of a real run and changes the trajectory by float noise
-        # (`test_the_update_is_invariant_to_gradient_scale`). Under the old order
+        # There is no gradient clipping, because with each step normalized ahead
+        # of the average there is nothing left for it to protect. Every consumer
+        # of the gradient is now insensitive to its magnitude: the aim divides a
+        # quadratic by a quadratic, and the projected gradient enters the moment
+        # at unit Frobenius norm, so a blip contributes one unit of weight like
+        # any other step. A clip is exercised on every step of a real run and
+        # changes the trajectory by float noise
+        # (`test_the_update_is_invariant_to_gradient_scale`). Over raw gradients
         # it was load-bearing -- the moment absorbed a 180x gradient at full
         # size, and one step-54 blip collapsed alignment for the back half of a
         # 100-step run. Sanitizing non-finite gradients is a different job and
@@ -700,8 +693,7 @@ class UsuiTrack(Optimizer):
         # ratio never approaches zero and cannot be compared across beta. Writing
         # `d = mu + n`, `||M||^2 = ||mu||^2 + (1 - ||mu||^2) w^2`, so this inverts
         # to the mean's share of the direction's energy: 0 is a white stream, 1 a
-        # direction held throughout, and negative is anti-correlated, which is
-        # what the raw gradient stream reads before the polar map.
+        # direction held throughout, and negative is anti-correlated.
         #
         # It bounds the mean's *energy*, not its worth. A mean far too small to
         # move this read still decides where a thousand accumulated steps land,
@@ -737,8 +729,8 @@ class UsuiTrack(Optimizer):
         Both consumers -- the Oja tangent that steers the basis and the
         projected gradient that becomes the update -- read the same sanitized
         gradient, so the held-frame projection is computed once and shared. The
-        moment is not built here: it integrates orthogonalized directions, and
-        the polar map that produces them is batched across matrices.
+        moment is not built here: it integrates unit-norm gradients, and the
+        polar map that turns it into a step is batched across matrices.
         """
 
         grad, raw_grad_norm = UsuiTrack._sanitize_grad_tensors(grad)
@@ -785,22 +777,27 @@ class UsuiTrack(Optimizer):
         raw_grad_norm = torch.linalg.vector_norm(grad, dtype=torch.float32).detach()
         return torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0), raw_grad_norm
 
-    def _orthogonalized_directions(self, prepared: list[PreparedGrad]) -> list[Tensor]:
-        """The polar map over one step's projected gradients.
+    @staticmethod
+    def _unit_gradients(prepared: list[PreparedGrad]) -> list[Tensor]:
+        """Each projected gradient at unit Frobenius norm, in fp32.
 
-        **The polar map runs before the moment's average, not after.** Every
-        contribution enters with a flat spectrum, so one
-        batch's dominant plane cannot own the memory by being large, the same
-        reordering that fixed the aim where a directional burst used to own the
-        turn. What the averages keep is magnitude as agreement: planes that
-        persist stay long, planes that oscillate cancel toward zero, and the
-        step shrinks where the direction is contested instead of being restored
-        to full size by a second polar map. Under the old order that restoration
-        was unconditional, which is why a moment that had cancelled to a
-        fifteenth of the gradient still took a full-sized step.
+        **The moment averages gradients, and the polar map runs once, on the
+        average.** A gradient's spectrum is information the average needs: the
+        planes a batch carries strongly are the ones the true gradient carries,
+        and the noise planes are small. Averaging first keeps that weighting, so
+        the moment estimates the expected gradient; a polar map ahead of it
+        would hand every noise plane of every batch full length, and the
+        average of polar factors is not the polar factor of the average. The
+        normalization takes only the batch's overall size out, so no one batch
+        owns the memory by being large -- the role a clip used to play -- and
+        the moment's norm stays a pure agreement read on a constant-norm stream.
         """
 
-        return self._bucketed_polar([entry.projected_grad for entry in prepared])
+        unit = []
+        for entry in prepared:
+            grad = entry.projected_grad.float()
+            unit.append(grad / grad.norm().clamp_min(1e-12))
+        return unit
 
     def _bucketed_polar(self, tensors: list[Tensor]) -> list[Tensor]:
         """One Newton-Schulz call per group of entries sharing shape and scale.
@@ -827,7 +824,7 @@ class UsuiTrack(Optimizer):
         return mapped  # type: ignore[return-value]
 
     def _integrate_step(self, entries: list[MatrixUpdate], group: dict) -> None:
-        """Blend this step's averaged direction into the moment and move the weights."""
+        """Blend this step's gradient into the moment and step on the moment's polar factor."""
 
         if not entries:
             return
@@ -854,24 +851,12 @@ class UsuiTrack(Optimizer):
             entry.projected_exp_avg = moment
             self._record_projection_diagnostics(diagnostics, entry, moment, beta, self.diagnostic_roles.get(entry.param))
 
-        for entry in entries:
-            update_hat = entry.projected_exp_avg
-            if self.cautious:
-                role = self.diagnostic_roles.get(entry.param)
-                update_hat = self._cautious(update_hat, entry.direction, diagnostics, role)
+        # One unit-norm direction per matrix, whatever the moment's agreement:
+        # the step's size is `lr` against `||W||`, never the gradient's or the
+        # moment's.
+        steps = self._bucketed_polar([entry.projected_exp_avg for entry in entries])
+        for entry, update_hat in zip(entries, steps, strict=True):
             self._apply_matrix_update(entry, update_hat, group)
-
-    @staticmethod
-    def _cautious(
-        update_hat: Tensor, direction: Tensor, diagnostics: DiagnosticsAccumulator | None, role: str | None
-    ) -> Tensor:
-        """Zero the frame coordinates this step's direction contradicts (SPEC step 8)."""
-
-        agree = ~(update_hat.signbit() ^ direction.signbit())
-        if diagnostics is not None:
-            kept = agree.sum() / agree.numel()
-            diagnostics.add("caution_kept", kept, role=role)
-        return update_hat * agree
 
     def _orthogonalize_bucket(self, tensors: list[Tensor], scale: float) -> list[Tensor]:
         if len(tensors) == 1:
@@ -1258,10 +1243,9 @@ class UsuiTrack(Optimizer):
     def _apply_matrix_update(self, entry: MatrixUpdate, update_hat: Tensor, group: dict) -> None:
         """Lift the step and scale it by the weight's own norm (SPEC step 8).
 
-        `update_hat` has norm at most one -- unit directions, averaged, masked --
-        and the lift is an isometry, so `||U|| / ||W||` is `lr` times the
-        agreement: `lr` is the relative change per step of a fully agreed
-        direction, in every module, whatever its shape, rank or size.
+        `update_hat` is the moment's polar factor at unit norm and the lift is an
+        isometry, so `||U|| / ||W||` is `lr`: the relative change per step, in
+        every module, whatever its shape, rank or size.
         """
 
         param = entry.param
@@ -1328,11 +1312,10 @@ class UsuiTrack(Optimizer):
     def _unit_direction_scale(projected_shape: tuple[int, ...]) -> float:
         """`1/sqrt(r)`: the polar factor of a `[d, r]` projection has norm `sqrt(r)`.
 
-        Every direction the moment averages is then a unit, so the moment's norm
-        is the agreement between steps and nothing else -- no shape, no rank.
-        The step's size per module is set where it lands, against `||W||`
-        (`_apply_matrix_update`). `r` is the short side: the rank cap keeps it
-        at most half the parameter's smaller dimension, below `d`.
+        Every step is then a unit, with no shape or rank in its size, which is
+        set where it lands, against `||W||` (`_apply_matrix_update`). `r` is
+        the short side: the rank cap keeps it at most half the parameter's
+        smaller dimension, below `d`.
         """
 
         return 1.0 / math.sqrt(min(projected_shape[-2:]))

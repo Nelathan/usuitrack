@@ -1024,7 +1024,6 @@ def run_optimizer(
             usuitrack_param_groups,
             lr=args.usuitrack_lr,
             beta=args.beta,
-            cautious=args.cautious,
             basis_update_interval=args.basis_update_interval,
             consume_grad=not args.keep_grads_after_step,
             release_matrix_grads=args.release_matrix_grads,
@@ -1346,7 +1345,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retention-val-blocks", type=int, default=8, help="number of source validation batches/blocks to build")
     parser.add_argument("--batching", choices=("synth_right_padded_no_mask", "eos_packed_no_mask"), default="synth_right_padded_no_mask", help="batch construction policy; default is faithful SYNTH diagnostics; choose eos_packed_no_mask explicitly for throughput")
     parser.add_argument("--rank-fraction", type=float, default=0.1, help="UsuiTrack rank_fraction: each matrix's rank is this times sqrt(rows * cols)")
-    parser.add_argument("--usuitrack-lr", type=float, default=4e-4)
+    parser.add_argument("--usuitrack-lr", type=float, default=1e-4)
     parser.add_argument("--fallback-lr", type=float, default=DEFAULT_FALLBACK_LR, help="Non-matrix AdamW LR")
     parser.add_argument("--adamw-lr", type=float, default=2e-5)
     parser.add_argument("--lora-rank", type=int, default=DEFAULT_LORA_RANK)
@@ -1356,7 +1355,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
     parser.add_argument("--beta", type=float, default=0.95)
     parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from UsuiTrack.ROLE_READS")
-    parser.add_argument("--cautious", action=argparse.BooleanOptionalAction, default=True, help="UsuiTrack cautious mask; --no-cautious for the control arm")
     parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="clip the raw gradient per tensor before Adafactor, Oja, and projection; must be positive for usuitrack, where the clip protects Adafactor's second-moment memory and has no off switch")
     parser.add_argument("--random-basis-init", action="store_true", help="start from a random orthonormal frame instead of the EIGH fit; asks whether Oja's equilibrium is a property of the aim or of its starting point")
     parser.add_argument("--eigh-refit-interval", type=int, default=0, help="discard and refit every frame by EIGH every N measured steps; 0 disables. The fallback if geodesic tracking cannot hold a fit")
