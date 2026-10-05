@@ -67,82 +67,41 @@ by distance.
 
 ### D1. The global matrix lr, and its schedule
 
-Under the trust-ratio law (`SPEC.md` step 8) `lr` is the relative step of an
-agreed direction, the same unit in every module. Across models, batches and beta
-it is not measured. Read so far (`FACTS.md`):
+`lr` is the relative step itself (`SPEC.md` step 8): the step is the moment's
+polar factor at unit size, so `||dW|| / ||W||` is `lr` in every module.
+Default `1e-4` under a linear decay to a fifth of the peak, the LoRA scale.
+Read so far (`FACTS.md`):
 
-- LFM2.5-350M, bs16 x 1024 tokens, beta 0.98: `6.2e-4` is the law's best target;
-  across 10x, lower lr trades target for source, and cosine crosses zero
-  between `2e-4` and `6.2e-4`. At bs32 the `sqrt(tokens)` lr under-steps.
-- Anima, bs8, beta 0.98, `rank_fraction 0.025`: `3.2e-4` (run 21) and
-  `1.5e-4` (run 22) ran hot. At beta 0.95, `5e-5` (run 23) was good but
-  changed little. At bs16, `7e-5` (run 24) held cosine to ~60% of the epoch.
-- The constructor's `1e-3` is a placeholder, and README says so.
+- LFM2.5-350M, bs16 x 1024 tokens: linear decay from `1e-4` to 20% beat
+  constant lr by 0.007-0.012 target in both designs ("Moment first"). Only one
+  peak and one decay shape are measured.
+- Anima, bs16, `rank_fraction 0.025`: run 27 (polar-first, beta 0.95) peaked
+  at a relative step of ~1.3e-5 and the samples improved. Run 28 (moment-first,
+  `1.3e-5`, stable then cosine over the last 20% to 10%) transfers that peak
+  and travels ~1.6x run 27's total, which averaged ~7.3e-6. Unmeasured.
 
-Transfer: `sqrt(tokens)` held from bs16 to bs8 on LFM (D4) and undershoots at
-bs32. Across beta a matched per-step ratio does not transfer -- at 0.98 the
-moment hides ~2.3x the travel of 0.9 -- and the travel unit that would carry it
-is unreviewed (HANDOVER).
+Open: the peak on each lane, and which decay. Transfer across batch:
+`sqrt(tokens)` held from bs16 to bs8 on LFM and undershot at bs32 (pre-change
+step rule). Across beta the step's size no longer moves with the moment;
+whether the best lr does is unmeasured.
 
-**The schedule.** Every lr that decayed beat constant `6.2e-4` on LFM target,
-and the cosine controller that decayed it is closed: it did not free the
-ceiling, which decides source (`ARCHIVE.md`, "the cosine lr controller").
-Open: which decay, and from which peak. The schedule controls (cosine, linear,
-power from the same peak) are not run on either lane; on LFM the controller
-arms give their targets to beat.
+### D4. Does beta 0.95, moment-first, hold on Anima?
 
-Withdraws "the matrix lr is probably low" (runs 12-13, under the old step
-rule): under the law, runs 20-22 ran hot.
+Settled on LFM (`ARCHIVE.md`, "the moment averages gradients"). Run 28 is the
+test: bs16, `rank_fraction 0.025`, verdict on the samples against run 27.
+Loss cannot rank them. The reads to watch are `moment_persistence` against
+its white floor and `grad_moment_cosine` per role: whether the step drains the
+moment (cosine near zero) or overshoots it (negative).
 
-### D4. Does beta 0.98 with caution hold on Anima?
-
-Settled on LFM (`ARCHIVE.md`, "beta 0.98 with caution"). Anima has run neither.
-Run 20 is the test: bs8, `rank_fraction` 0.025, warmup only, verdict on the
-samples. lr is a transfer, not a measurement: the `sqrt(tokens)` rule held on
-LFM (bs8 at the same lr lost on both losses), and the unrescaled mask wants
-~1.4x the rescaled lr there, so ~9e-4 against the 6.5e-4 rule. `caution_kept`
-per role is unread on Anima; on LFM it is uniform, so the unrescaled mask only
-redistributes step where it is not.
-
-Why bs8 and not bs16 on this lane: the dataset was curated for bs4, so bs16
-pads partial buckets with duplicates (same image, new timestep and noise),
-and bs8 avoids nested attention. LFM's 0.012 for doubling the batch is an upper
-bound here. Reopens with the 1024 px dataset.
-
-Runs 22 and 23 (`FACTS.md` ledger) moved the bs8 answer. At `5e-5`, a third of
-run 22's lr, run 23 held `grad_moment_cosine` at or above zero to ~768, where
-run 22 had leaned negative from ~128. It then leaned negative too. Beta moved
-with lr, so beta is not separated on Anima. The user's read: run 23 is good
-quality but changed little, so the earlier visible advances were the model
-breaking and repairing, not learning; at bs8 this data wants a larger batch.
-Run 24 then ran a real bs16 at 0.95 and `7e-5` for one epoch; beta is still
-not separated on Anima (D7).
+Why bs16 here: the dataset was curated for bs4, so bs16 pads partial buckets
+with duplicates (same image, new timestep and noise). Run 23 at bs8 was good
+quality but changed little (user); this data wants the larger batch.
 
 ### D6. LFM run-to-run spread
 
 A same-seed replicate differs by 1.6e-3 target and 5.6e-3 source (`FACTS.md`),
 5x and 3x the floors `AGENTS.md` states. One pair. Settle with three seeds of
 the default arm (~40 min) before another LFM claim below ~2e-3 target.
-
-### D7. Should the default beta move to 0.95?
-
-The user's lean: yes. 0.95 won at bs32 because its moment is 2.5x less stale
-(time constant 20 steps against 50), not because it averages noise better;
-staleness costs step size times memory length, so a large relative step wants
-a short memory. Evidence (`FACTS.md`): at bs32 and one lr, 0.95 stepped 1.64x
-further, tied target and forgot 0.015 less. At a small held step on bs16
-(pre-law, rescaled caution) 0.95 lost 0.004 target to 0.98.
-
-At bs16 and a matched step (`FACTS.md`), 0.95 traded 6.8e-3 target for
-0.020 source: the beta trade, not a win. The default stays 0.98 (user,
-2026-10-03) until beta is re-read under a decaying lr (D1), which cuts the
-late over-travel and may change which memory pays. If 0.95 moves, SPEC, README
-and the constructor default move together.
-
-The user's hypothesis for Anima: its smaller relative step tolerates the
-longer memory, since staleness is step times memory. Loss cannot show it;
-`caution_kept` against its floor, now that the mask reads `O_t`, and
-`moment_persistence` can.
 
 ---
 
@@ -253,7 +212,9 @@ Nothing acts on it until a capped matrix starves.
 - **Turning only the top planes.** Worse on target; the leading plane's
   magnitude was the problem, which the polar tangent fixes.
 - **A fresh eigendecomposition mid-training** in place of the tracked frame.
-- **Re-polaring the moment before the lift.** Trades target for source at the
-  held step and fails at twice the step: noise planes get full length.
+- **A second polar map over a moment of polar factors.** Trades target for
+  source at the held step and fails at twice the step: noise planes get full
+  length. Not a verdict on one polar map over a moment of gradients, which is
+  the shipped order (`ARCHIVE.md`, "the moment averages gradients").
 - **Rescaling caution by `numel / kept`.** A uniform lr multiplier on LFM, and
   worse source at equal target.

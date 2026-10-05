@@ -815,6 +815,9 @@ about twice as far (`a` ~0.003, `k=4`). The step's unit is D5's question.
 
 ## CLOSED -- beta 0.98 with caution, unrescaled, is the default
 
+*Superseded 2026-10-05 ("the moment averages gradients", below): the mask is
+removed and the default beta is 0.95.*
+
 2026-10-01, closes D4 on LFM. The release default is `beta 0.98` with a
 cautious mask in frame coordinates and no `numel / kept` rescale (SPEC steps 5
 and 8). Evidence (`FACTS.md`, "Beta buys target" and "Caution: where it
@@ -836,6 +839,9 @@ Withdrawn: `0.9` as "the measured optimum" of the variance-staleness trade
 twice the step); the rescale. Open on Anima, in PLAN D4.
 
 ## CLOSED -- the step is relative to the weight, with agreement inside
+
+*Partly superseded 2026-10-05 ("the moment averages gradients", below): the
+relative law stands; agreement no longer enters the step, which is `lr` itself.*
 
 2026-10-03, closes D5. A matrix moves `lr x agreement x caution` of its
 Frobenius norm per step (LAMB's trust ratio, SPEC step 8), replacing the Muon
@@ -872,6 +878,9 @@ Withdrawn: `0.04` as the shipped turn, chosen on the pre-liveness tracker
 a smaller turn reduces noise in the weights, which loss cannot see (A2).
 
 ## CLOSED -- the cautious mask reads the step's direction
+
+*Superseded 2026-10-05 ("the moment averages gradients", below): the mask is
+removed.*
 
 2026-10-03, closes D8. The mask compares the moment's signs with `O_t`,
 the polar direction the moment averages, not the raw projected gradient
@@ -913,6 +922,44 @@ Not merged. The code, the four forms and every arm's numbers are on branch
 `cosine-controller` (`f9c50fd`, its `docs/FACTS.md`). Withdrawn: "a
 controller holding cosine at zero would cut lr through a run" as a design;
 the observation under it stands.
+
+
+## CLOSED -- the moment averages gradients; one polar map, no mask, beta 0.95
+
+2026-10-05, closes D7 and the ordering question under it. The moment averages
+each projected gradient at unit Frobenius norm and the step is `polar(M_t)` at
+unit size, `lr` of `||W||` (SPEC step 5, step 8, Decision 7). There is no
+cautious mask and nothing scales the step by `||M||`. The defaults are `beta
+0.95` and `lr 1e-4` under a linear decay to a fifth of the peak. Evidence
+(`FACTS.md`, "Moment first"):
+- On LFM at 1k the order does not decide target: under the same linear decay,
+  two-seed means are 1.652809 (moment-first, 0.95) and 1.653093 (polar-first
+  with the mask, 0.98); at a matched constant step they sit 2.1e-3 apart. The
+  order is chosen for the estimate: the average of polar factors is not the
+  polar factor of the average, and polar-first gave every noise plane of every
+  batch full length where averaging first lets the batch's spectrum weight it.
+- The decay is the gain: linear to 20% beat constant lr on target by 6.8e-3
+  (polar-first) and 0.012 (moment-first).
+- Beta 0.95 buys the source: under the decay it holds target against 0.98 and
+  keeps 0.034 more source, where at a constant matched step it lost 6.8e-3
+  target. Against the old default the new one keeps 0.028 more source; at
+  0.98, one seed, moment-first forgot 7.8e-3 more than polar-first, so the gain
+  is beta's.
+- The mask went on principle, not on loss (user): before the polar map it
+  bends the moment, against the unpolared `Z_t` it judges in the wrong space,
+  and judging against `polar(Z_t)` costs a second Newton-Schulz per step.
+  Scaling the step by `||M||` tied target and lost 0.015 source; the user cut
+  it for a lean design and accepts a mild loss regression.
+- On Anima, run 27 (polar-first, mean of this and the last polar where signs
+  agree, beta 0.95) improved the samples (user). Moment-first at beta 0.95 is
+  run 28.
+
+Withdrawn: "magnitude as agreement" (the moment's norm setting the step);
+agreement inside the step ("the step is relative to the weight", above, keeps
+only the relative law); the cautious mask and `caution_kept` ("beta 0.98 with
+caution", "the cautious mask reads the step's direction"); beta 0.98 as the
+default; the "Already tried" entry on re-polaring the moment as a verdict on
+this order (it was a second polar map over averaged polar factors).
 
 ---
 
