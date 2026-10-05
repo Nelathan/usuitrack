@@ -224,6 +224,15 @@ Nothing acts on it until a capped matrix starves.
   the main thread (frame lags a step: a design change).
 - **F4. Stratified timesteps within a batch** (was B5). One sample per slice
   of the `t` range; free, and cuts the batch's `t` variance. Not tried.
+- **F5. BFD packing on LFM.** Padding costs VRAM, and the max sequence length
+  caps how much coherent text a sample carries. Best-fit-decreasing packing of
+  whole documents into one sequence plus a per-token sequence index removes
+  both, if attention and the short convolution respect document boundaries:
+  flash-attn's varlen kernel for attention (not installed; SDPA already uses its
+  flash backend for the unpacked case), and causal-conv1d's `seq_idx`, which
+  transformers' LFM2 passes through (`modeling_lfm2.py`, read 2026-10-05).
+  Unmeasured: throughput and memory against the current batches, and whether a
+  packed batch's token mix moves the FACTS baselines.
 
 ---
 
