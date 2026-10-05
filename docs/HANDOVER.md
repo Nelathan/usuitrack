@@ -1,25 +1,8 @@
 # Handover
 
-Written 2026-10-04, midday. Orientation only; `PLAN.md` carries the questions,
-`FACTS.md` the insights, `AGENTS.md` how to run things. The 2026-10-01 review
-list is in this file's history at `0a4d75c`.
-
-## The repo split
-
-`lab` is the root for experiments, cut from `trust-ratio` (which already
-contained `constant-basis-step`). It carries the LFM harness in `experiments/`,
-the old lab repo's docs frozen in `docs/prerelease/`, and a `lab` dependency
-group that `uv sync` installs by default. `main` takes one squashed release
-commit from `lab` at a time. Once `lab` is pushed, `constant-basis-step`, `trust-ratio`,
-`remove-adafactor` and `study/rotation-clamp-eligibility` close.
-
-From the old lab repo, only the harness and its test came over. The fork's
-optimizer, projector and diagnostics tests target the prerelease API (`rank=`)
-and the release suite covers each; its state-bytes check moved into
-`tests/test_optimizer.py`. `test_llm_harness.py` lost the test of
-`FP32StateAdamW`, a class the harness had already deleted, and one stale
-assertion; a stub gained the `reduction` argument the harness now passes. `smoke_usuitrack.py` was a toy on the
-fork's API and did not come over.
+Written 2026-10-05, late. Orientation only; `PLAN.md` carries the questions,
+`FACTS.md` the insights, `AGENTS.md` how to run things. The 2026-10-04 review
+list is in this file's history at `b7b2cd5`.
 
 ## Environment
 
@@ -29,47 +12,68 @@ fork's API and did not come over.
   held to `2.14.*`; moving torch means picking the matching wheel. Python 3.15
   waits on a cp315 pyarrow wheel. flash-attn is not installed: SDPA already
   dispatches to its flash backend here; the gain, unmeasured, would be packed
-  varlen batches.
+  varlen batches (PLAN F5).
 - ai-toolkit installs `-e ../usuitrack`, so it runs whichever branch is checked
-  out. **Keep `lab` checked out**; build `main` in a worktree.
+  out. **Keep `lab` checked out while run 28 trains**; build elsewhere in a
+  worktree.
 - **GPU power limit 198 W**, set at your request. Undo: `pkexec nvidia-smi -pl 220`.
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`. Undo:
   `uv pip uninstall torchaudio`.
 
 ## Where things stand
 
-D5 closed (agreement inside), E8 closed (eta 0.02), D8 closed: the cautious
-mask reads the step's direction `O_t`. The cosine lr controller is closed
-(`ARCHIVE.md`): it did not free the ceiling, and what stays is that a decaying
-lr beat constant on target. D1 is now the schedule; D7 waits on it.
+**Moment-first is the design on `lab`** (`ARCHIVE.md`, "the moment averages
+gradients"). The moment averages unit-Frobenius projected gradients, the step
+is `polar(M)` at unit size, `lr` is the relative step itself. No mask, no
+`||M||` scaling, `cautious` and `caution_kept` deleted. Defaults `lr 1e-4`,
+`beta 0.95`; the harness decays linearly to a fifth (`--lr-final-ratio 0.2`).
+D7 closed. On LFM it ties the old design on target under the same decay and,
+at 0.95, keeps 0.028 more source; that gain is beta's (FACTS, "Moment first").
 
-Branch `cosine-controller` (`f9c50fd`, rebased on `lab` at `92fc559`) keeps
-the code, the four forms and every arm's numbers. Not merged and not to be
-merged; worktree `~/Projects/usuitrack-controller`. Next candidates: the
-schedule controls (D1), and E9 (per-role step, from run 26's reads).
+Prediction stated before the controls, and how it came out: lab under the
+decay at 1.650-1.655 target / 3.08-3.10 source (got 1.6525 / 3.0862 and
+1.6537 / 3.0845); moment-first seed 2 within ±2e-3 of seed 1 (1.0e-3).
 
-**Withdrawn:** "the travel unit" anchor (run 18's relative step across a beta
-change) still stands withdrawn. Also withdrawn, never written to the docs:
-"target and source trade along total travel".
+The branch commit reproduces the runner arm it replaced: `mf-branch-verify-s1`
+1.652199 / 3.058867 against 1.652291 / 3.060419.
 
-## Runs since the last handover
+## Running
 
-Run 26 (Anima, 5 epochs) and the LFM controller arms are done and read.
-Run 26's five checkpoints are on `/mnt/luna`, 20 GB, kept for E9.
+**Anima run 28** (`config/anima_usuitrack_28_moment_first.yaml`, gitignored):
+run 27's data and shape, moment-first, beta 0.95, `lr 1.3e-5` flat after a
+50-step warmup, cosine over the last epoch (from step 768) to 10%. 960 steps,
+five epochs, a checkpoint and samples each epoch. Output and log under
+`/mnt/luna/ai/output/anima_usuitrack_28_moment_first*`. The lr is a transfer,
+unmeasured: run 27's measured peak `relative_step` (~1.3e-5), which is now
+`lr` itself; total travel ~1.6x run 27's. Verdict is yours, on the samples
+against run 27. Reads: per-role `grad_moment_cosine`, `moment_persistence`,
+`grad_capture` in `loss_log.db`.
 
 ## To review
 
-On `lab`, this session, oldest first: `9cbdc3f`, `deede3c`, `c2a138e`,
-`36bc436`, `5c24907`, `c187f8c`, `80c2587` (eta 0.02 default), `446354c`,
-`5d29a7a`, `ba15e51` (mask against `O_t`: code, SPEC, README), `89c7e6d`,
-`85a4237`, `e4ebe36`, `fc4b30b`, `92fc559`, `f85ed10` (the controller's closure) and
-the commit carrying this file. On `cosine-controller`, for the record only:
-`5099784` .. `f9c50fd`.
+On `lab`, oldest first:
+- `0b3aa99`, `39e6ca6`: transport correction and spin reads.
+- `d5e2e58`: torch 2.14 / CUDA 13.2 / causal-conv1d 1.7.0. Reference arm
+  inside the noise floor of the torch 2.11 one.
+- `ac68bdc`: PLAN F5, BFD packing.
+- `27e09de`: **the design change** -- optimizer, tests, SPEC, README, harness
+  `--cautious` removal, the `lr`/`beta` defaults. Read SPEC steps 5, 7, 8 and
+  Decision 7 first.
+- `647b382`: harness linear decay, `--lr-final-ratio`, AGENTS standard arm.
+- `6332c7b`: FACTS, "Moment first".
+- `1c279b1`: D7's closure; superseded markers on three earlier closures; D1
+  and D4 rewritten; the "Already tried" re-polar entry rescoped.
+- The commit carrying this file.
 
-Earlier and still unreviewed: `ec47769` .. `1700c3c` (this file at `1700c3c`
-lists them). In ai-toolkit: `dab36c3` and `6a6c0c2` (the outside runner). The
-run 24/25 configs are local; ai-toolkit ignores `config/`.
+Not pushed. `main` is untouched.
 
-On `main`: `d44b1a2`, the squashed release. `lab` is pushed (2026-10-04);
-`main` and `cosine-controller` are not. With `lab` pushed, the branches `constant-basis-step`, `trust-ratio`, `remove-adafactor`
-and `study/rotation-clamp-eligibility` close.
+## Found, not done
+
+- `examples/*.py` call `UsuiTrack(..., rank=...)` at `lr=4e-4`: the prerelease
+  API, broken before this session, and the lr is now 4x the default's meaning.
+- Worktree `~/Projects/usuitrack-moment-first` (branch `moment-first`, merged
+  into `lab`) can go: `git worktree remove ../usuitrack-moment-first && git
+  branch -d moment-first`. Same for `~/Projects/usuitrack-controller` if
+  `cosine-controller` is done with.
+- LFM throughput is ~1.12 s/step at bs16 on torch 2.14 with the basis-lag
+  diagnostic, against the 0.8 AGENTS states; not investigated.
