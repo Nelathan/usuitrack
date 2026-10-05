@@ -416,6 +416,8 @@ def test_core_diagnostics_read_sane_values():
     assert all(value == value for value in diagnostics.values()), diagnostics
 
     assert diagnostics["transport_speed"] > 0
+    # fp32 frames store the geodesic exactly, so there is no in-span turn to correct.
+    assert 0.0 <= diagnostics["transport_correction"] < 1e-4
     assert 1.0 / RANK <= diagnostics["tangent_concentration"] <= 1.0
     # Capture is a fraction of the gradient the frame holds, so it cannot exceed one.
     assert 0.0 < diagnostics["grad_capture"] <= 1.0 + 1e-6

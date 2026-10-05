@@ -971,6 +971,11 @@ class UsuiTrack(Optimizer):
         is already handled by identity transport; the rotation is the residue.
         An ideal step gives the identity here, so this is a no-op exactly when
         transport was already right.
+
+        `transport_correction` is the size of that rotation, the skew of `R_s`
+        per plane, at every tier but off: the in-span motion the moment is
+        actually turned by on this step, where `transport_spin` is the frame's
+        in-span rotation accumulated over a whole window.
         """
 
         new_frames = torch.stack([entry.projector.canonical_basis() for entry in entries])
@@ -978,6 +983,12 @@ class UsuiTrack(Optimizer):
         rotation = SubspaceProjector.polar_factor(overlap)
         for entry, matrix in zip(entries, rotation.unbind(0), strict=True):
             entry.frame_rotation = matrix
+        diagnostics = self._diagnostics_sink()
+        if diagnostics is not None:
+            # Same unit as `transport_spin`, so the window's in-span rotation
+            # can be held against the per-step share the moment is turned by.
+            skew = (rotation - rotation.mT).flatten(1).norm(dim=-1) / (2.0 * math.sqrt(rotation.shape[-1]))
+            diagnostics.add("transport_correction", skew.sum(), count=len(entries))
 
     @torch.no_grad()
     def _commit_moments(self, entries: list[MatrixUpdate]) -> None:
