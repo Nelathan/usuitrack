@@ -794,6 +794,64 @@ the trade "Beta buys target at a held step" already reads, not a win: unlike
 bs32, the step here is too small for staleness to dominate. Runs
 `b095-lr3.8e-4`, `eta0.02-lr6.2e-4`.
 
+### Moment first: the order ties on loss, the decay and beta 0.95 are the gain
+
+Standard arm (bs16, 1k, eta `0.02`), torch 2.14. *Polar-first* is the design
+before 2026-10-05: the moment averages `polar(Z_t)`, the cautious mask compares
+it with `O_t`, and the step is `lr` times the masked moment. *Moment-first*
+averages `Z_t / ||Z_t||` and steps `polar(M_t)`, so `relative_step` is `lr`.
+Variants ran by runner patch. 2026-10-05.
+
+Constant lr, step matched to the reference's:
+
+| arm | beta | lr | target | source | `relative_step` |
+|---|---:|---:|---:|---:|---:|
+| polar-first + mask (reference) | 0.98 | `6.2e-4` | 1.659890 | 3.062551 | 4.9e-5 |
+| moment-first | 0.98 | `4.8e-5` | 1.662030 | 3.065155 | 4.8e-5 |
+| moment-first, mask before the polar map | 0.98 | `4.8e-5` | 1.662979 | 3.049522 | 4.8e-5 |
+| moment-first, mask after the polar map | 0.98 | `4.8e-5` | 1.666439 | 3.036927 | 3.8e-5 |
+| moment-first, step times `\|\|M\|\|` | 0.98 | `4.8e-4` | 1.659971 | 3.078005 | 4.7e-5 |
+| moment-first | 0.98 | `3.4e-5` | 1.665105 | 3.043454 | 3.4e-5 |
+| polar-first, `O_t` masked by `M` | 0.98 | `6.4e-5` | 1.669565 | 3.031216 | 5.1e-5 |
+
+Linear decay to 20% of the peak after warmup (`--lr-final-ratio 0.2`):
+
+| arm | beta | peak lr | seed | target | source | final `relative_step` |
+|---|---:|---:|---:|---:|---:|---:|
+| polar-first + mask | 0.98 | `1.24e-3` | 1 | 1.652506 | 3.086228 | 2.1e-5 |
+| polar-first + mask | 0.98 | `1.24e-3` | 2 | 1.653680 | 3.084472 | 2.1e-5 |
+| moment-first | 0.98 | `1e-4` | 1 | 1.650362 | 3.094063 | 2.1e-5 |
+| moment-first | 0.95 | `1e-4` | 1 | 1.652291 | 3.060419 | 2.1e-5 |
+| moment-first | 0.95 | `1e-4` | 2 | 1.653326 | 3.055182 | 2.1e-5 |
+
+The peak `1.24e-3` puts polar-first's late step on moment-first's: both end at
+2.1e-5. Seeds differ by 1.2e-3 target and 1.8e-3 source (polar-first) and
+1.0e-3 and 5.2e-3 (moment-first), inside the replicate pair's spread.
+
+- **The order does not decide target.** Two-seed means under the decay:
+  moment-first at 0.95 1.652809, polar-first with the mask at 0.98 1.653093.
+  At a matched constant step the two sit 2.1e-3 apart, at the edge of the
+  spread.
+- **The decay is the gain.** Linear to 20% beats each design's constant arm
+  on target, by 6.8e-3 (polar-first, two-seed mean) and 0.012 (moment-first
+  at 0.98, one seed).
+- **Beta 0.95 buys the source.** Under the decay it holds target against 0.98
+  (+1.9e-3, one seed) and keeps 0.034 more source, where at a constant matched
+  step it lost 6.8e-3 target ("`beta 0.95` against `0.98`"). On one seed at
+  0.98, moment-first forgot 7.8e-3 more than polar-first with the mask; the
+  0.028 source gain over the old default is beta's, not the order's.
+- **What the cut variants did.** The mask before the polar map kept 0.016 more
+  source at equal target, which is the lr trade's direction. After it, it
+  shortened the step to 3.8e-5 and landed where a lower lr does (the `3.4e-5`
+  row). Scaling by `||M||` tied the reference's target and lost 0.015 source. Stepping `O_t`
+  masked by the moment was worst on target.
+- **The late moment.** Under the decay `grad_moment_cosine` ends at +0.007 and
+  `moment_persistence` at +0.001; at constant lr both are negative (-0.009,
+  -0.0008). A decaying step stops overshooting what the moment holds.
+
+Runs `lab-ref-torch2.14`, `moment-first-mask-*-b098-lr4.8e-5`, `mf-none-*`,
+`ema-judge-b098-lr6.4e-5`, `lab-lin1.24e-3-b098-s{1,2}`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
