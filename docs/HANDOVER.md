@@ -14,7 +14,7 @@ list is in this file's history at `b7b2cd5`.
   dispatches to its flash backend here; the gain, unmeasured, would be packed
   varlen batches (PLAN F5).
 - ai-toolkit installs `-e ../usuitrack`, so it runs whichever branch is checked
-  out. **Keep `lab` checked out while run 28 trains**; build elsewhere in a
+  out. **Keep `lab` checked out**; build elsewhere in a
   worktree.
 - **GPU power limit 198 W**, set at your request. Undo: `pkexec nvidia-smi -pl 220`.
 - ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`. Undo:
@@ -37,17 +37,20 @@ decay at 1.650-1.655 target / 3.08-3.10 source (got 1.6525 / 3.0862 and
 The branch commit reproduces the runner arm it replaced: `mf-branch-verify-s1`
 1.652199 / 3.058867 against 1.652291 / 3.060419.
 
-## Running
+## Run 28, done
 
-**Anima run 28** (`config/anima_usuitrack_28_moment_first.yaml`, gitignored):
-run 27's data and shape, moment-first, beta 0.95, `lr 1.3e-5` flat after a
-50-step warmup, cosine over the last epoch (from step 768) to 10%. 960 steps,
-five epochs, a checkpoint and samples each epoch. Output and log under
-`/mnt/luna/ai/output/anima_usuitrack_28_moment_first*`. The lr is a transfer,
-unmeasured: run 27's measured peak `relative_step` (~1.3e-5), which is now
-`lr` itself; total travel ~1.6x run 27's. Verdict is yours, on the samples
-against run 27. Reads: per-role `grad_moment_cosine`, `moment_persistence`,
-`grad_capture` in `loss_log.db`.
+**Anima run 28** (`config/anima_usuitrack_28_moment_first.yaml`, gitignored)
+finished 2026-10-06 02:58: run 27's data and shape on moment-first, beta 0.95,
+`lr 1.3e-5` flat after a 50-step warmup, cosine over the last epoch to 10%.
+Five checkpoints and the samples under
+`/mnt/luna/ai/output/anima_usuitrack_28_moment_first/`, ~23 GB. **Verdict is
+yours, on the samples against run 27.** Reads in FACTS' ledger.
+
+Open from it: on the plateau `relative_step` is 1.15e-5, 12% under `lr`,
+where on LFM it equals `lr`. Some ~12% of the fleet's norm is not stepping,
+or the read aggregates differently here; not looked into. The lr was a
+transfer of run 27's peak, so with the deficit run 28 travelled ~1.45x run
+27, not the ~1.6x planned.
 
 ## To review
 
@@ -63,7 +66,7 @@ On `lab`, oldest first:
 - `6332c7b`: FACTS, "Moment first".
 - `1c279b1`: D7's closure; superseded markers on three earlier closures; D1
   and D4 rewritten; the "Already tried" re-polar entry rescoped.
-- The commit carrying this file.
+- `5f745d3` and the commit carrying this file: HANDOVER, run 28's ledger row.
 
 Not pushed. `main` is untouched.
 

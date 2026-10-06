@@ -874,6 +874,8 @@ Runs `lab-ref-torch2.14`, `moment-first-mask-*-b098-lr4.8e-5`, `mf-none-*`,
 | 24 `inside_bs16` | run 23 at a real bs16 (offloaded), `7e-5`, one epoch, cosine decay | moved more than 25; inside favoured (user); cosine zero at ~120, positive again under the decay |
 | 25 `outside_bs16` | run 24 with agreement outside the step, `6.84e-6` = run 24's step | moved less; different rather than worse (user); cosine zero at ~60 |
 | 26 `controller` | run 24 with the polar mask and the lr controller (`exp` form, closed), ceiling `1.4e-4`, 960 steps = 5 epochs | very stable, barely changed, arguably above base (user); vote ~0 from ~100 |
+| 27 `last_polar` | bs16, `beta 0.95`, polar-first with the mean of this and the last polar where signs agree (branch `last-polar`), `2.8e-5`, cosine to 10%, 960 steps | improved (user); `relative_step` peaked ~1.3e-5, averaged 7.3e-6 |
+| 28 `moment_first` | run 27's shape on moment-first (`lab` `27e09de`), `1.3e-5` flat, cosine over the last epoch to 10% | samples pending (user); `relative_step` 1.15e-5 on the plateau, 12% under `lr`, against LFM's exact match -- unexplained; fleet cosine -0.04 to +0.03, persistence within 0.003, capture 0.785 to 0.828; 3.2 h, no OOM |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
