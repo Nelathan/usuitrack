@@ -11,6 +11,33 @@ run yet; each "how to settle" is a proposal, not an agreed arm.
 
 ---
 
+## Group L. Scale
+
+### L1. Does `lr` transfer from LFM2.5-350M to LFM3-1.7B?
+
+`lr` is a relative step (SPEC step 8), so the claim is that one value means the
+same dynamics at any size. The 1e-4 default pushed for loss and overshot:
+`grad_moment_cosine` stayed negative until late in the run. Arms (user,
+2026-10-28): constant `5e-5` and `2e-5` at both sizes, the standard arm
+otherwise, LFM3 pinned to revision `545fc8f`, `o_proj` on the output side like
+LFM2.5's `out_proj`. A 20-step LFM3 probe reads step time and peak memory
+(headroom).
+
+Read: mechanism decides, at equal `lr` across sizes -- `relative_step`,
+`grad_moment_cosine`'s level and sign, `grad_capture` and
+`tangent_live_fraction` (does `rank_fraction 0.1` transfer too). Loss vetoes:
+target gain against forgetting, each from that model's own initial losses.
+
+Predictions, written before the runs: `relative_step` equals `lr` at both
+sizes. Cosine sits nearer zero at `5e-5` and positive at `2e-5`, and the same
+`lr` gives the same sign at both sizes if transfer holds. Capture and live
+fraction land within a few points of the 350M's 0.77 and 0.83, since rank is
+the same fraction of each square side. `2e-5` gains less target and forgets
+less than `5e-5` at both sizes. Unknowns: whether bs16 fits at 1.7B (estimate
+~6-8 GB peak), and its step time (estimate ~5 s).
+
+---
+
 ## Group N. Weight norm
 
 ### N1. Can the step force an ideal weight norm?
