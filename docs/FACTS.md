@@ -858,11 +858,54 @@ Runs `lab-ref-torch2.14`, `moment-first-mask-*-b098-lr4.8e-5`, `mf-none-*`,
 0.2`, seed 1), on the restructured package with the compiled kernels and every
 fallback path removed: `release-clean-s1` 1.652230 target / 3.057482 source
 against `mf-branch-verify-s1`'s 1.652199 / 3.058867, inside the noise floor on
-both. 1.133 s/step at step 1000, inside the 1.11-1.13 every arm has read since
-2026-10-05 on torch 2.14: the compiled kernels bought nothing measurable. Peak
-3.15 GB allocated. Last logged reads: `grad_capture` 0.768,
+both. 1.133 s/step and 3.15 GB peak allocated, the harness's old checkpointing
+repair (inside the compiled layer) included. With HF checkpointing outside it
+(`b0aade0`), `release-trainmode-s1` reads 1.652065 / 3.059957 (inside the noise
+floor), 0.840 s/step, 2.66 GB backward peak; why the old placement was 35%
+slower is unmeasured. Last logged reads: `grad_capture` 0.768,
 `tangent_live_fraction` 0.828, `grad_moment_cosine` 0.007, `relative_step`
 2.1e-5 (the decayed lr).
+
+### Constant lr at 350M: the plateau cosine changes sign between 2e-5 and 5e-5
+
+2026-10-28, standard arm at `--lr-final-ratio 1` (PLAN L1's 350M half), seed 1;
+initial losses 2.297055 target / 2.917386 source. `grad_moment_cosine` as bin
+means over steps (wandb history):
+
+| arm | 0-100 | 100-250 | 250-500 | 500-750 | 750-1000 | target | source |
+|---|---|---|---|---|---|---|---|
+| `lfm25-c5e5-s1` | +0.475 | +0.056 | +0.0018 | -0.0051 | -0.0066 | 1.664033 | 3.041894 |
+| `lfm25-c2e5-s1` | +0.604 | +0.176 | +0.034 | +0.0083 | +0.0017 | 1.692191 | 3.010912 |
+| `release-clean-s1` (1e-4, decay 0.2) | +0.351 | +0.017 | -0.004 | -0.003 | +0.0002 | 1.652230 | 3.057482 |
+
+At 5e-5 the step overshoots the moment from step ~500 on, as 1e-4 does before
+its decay brings it back; at 2e-5 the moment leads throughout. Loss orders the
+same way: 2e-5 gains 0.028 less target and forgets 0.031 less source than 5e-5.
+`relative_step` reads `lr` on both (2e-5 reads 1.37e-5 in the first bin, the
+warmup). `grad_capture` ~0.77 and `tangent_live_fraction` 0.81 at the end on
+both: neither depends on lr. 1.12 s/step.
+
+## LFM3-1.7B lane
+
+### bs16 sits on the edge of a 12 GB card, and the polar step is the peak
+
+2026-10-29, `LiquidAI/LFM3-1.7B-Base` at revision `545fc8f`, the harness at
+`b0aade0`, bs16, seq 1024, compile on, `release_matrix_grads`,
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. A 20-step probe
+(`lfm3-probe3`) ran: 4.04 s/step, 4053 tok/s, matrix state 702 MB. Peak
+allocated: 4.19 GB baseline, 7.29 GB forward, 7.58 GB backward, **9.03 GB
+(8.41 GiB) in `optimizer.step`**. The ~1.45 GB above backward is the step's
+transient, and every failure below died in `unit_polar`, which stacks
+same-shaped moments into one Newton-Schulz call: a transient that grows with
+the number of same-shaped matrices, so with depth, not with batch.
+
+With the allocator setting, two later attempts failed in that call, on step 1:
+`lfm3-c5e5-s1` at 8.10 GiB allocated and a one-step rerun at 7.86 GiB, each
+asking 560 MiB more -- at or below the probe's peak. Not a leak: the initial
+eval leaves 7 MB. The card holds 2678 MiB with no run (nvidia-smi, 00:15;
+Discord 597, zapzap 486, Zed 294, the rest the desktop), so whether bs16 fits
+depends on what those hold at that moment. Without the setting (`lfm3-probe2`),
+1.30 GiB sat reserved but unallocated at the failure.
 
 ## Run ledger (Anima)
 
