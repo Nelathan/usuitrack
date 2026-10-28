@@ -1,82 +1,77 @@
 # Handover
 
-Written 2026-10-05, late. Orientation only; `PLAN.md` carries the questions,
-`FACTS.md` the insights, `AGENTS.md` how to run things. The 2026-10-04 review
-list is in this file's history at `b7b2cd5`.
+Written 2026-10-28. Orientation only; `PLAN.md` carries the questions,
+`FACTS.md` the insights, `AGENTS.md` how to run things.
 
-## Environment
+## Where it stands
 
-- This repo's venv: Python 3.14 (a local, gitignored `.python-version`), torch `2.14.1+cu132`, and
-  `causal-conv1d 1.7.0+cu.13.2.torch.2.14`, a prebuilt wheel from
-  `wheels.astral.sh/simple/cu132`. The wheel names its torch minor, so torch is
-  held to `2.14.*`; moving torch means picking the matching wheel. Python 3.15
-  waits on a cp315 pyarrow wheel. flash-attn is not installed: SDPA already
-  dispatches to its flash backend here; the gain, unmeasured, would be packed
-  varlen batches (PLAN F5).
-- ai-toolkit installs `-e ../usuitrack`, so it runs whichever branch is checked
-  out. **Keep `lab` checked out**; build elsewhere in a
-  worktree.
-- **GPU power limit 198 W**, set at your request. Undo: `pkexec nvidia-smi -pl 220`.
-- ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`. Undo:
-  `uv pip uninstall torchaudio`.
+The release cleanup is on `lab`: one optimizer with a minimal surface, its
+maths in `docs/SPEC.md`, history moved to `docs/NOTES.md` and `docs/ARCHIVE.md`.
+PLAN holds only the questions you brought next (norm, subspace gradients, side)
+and a one-line index of the parked ones.
 
-## Where things stand
+- **Package:** `frame.py` (fit, Oja aim, constant-angle turn, retraction),
+  `polar.py` (balanced Newton-Schulz), `optimizer.py`, `diagnostics.py`,
+  `stochastic.py`. Left is right on the transpose; state per matrix is `frame`
+  and `moment`. **Old checkpoints do not load** (a `left` moment is now
+  `[n,r]`).
+- **Surface:** `lr`, `beta`, `weight_decay`, `rank_fraction`, `side`,
+  `release_matrix_grads`, `diagnostics`. Accumulation works without release,
+  raises with it. The lr schedule is the trainer's.
+- **Telemetry:** on/off, six self-describing reads (`READS`). Transport,
+  concentration, persistence and role breakouts are `LabDiagnostics`, installed
+  by the harness.
+- **Fixed:** fp16 targets were stochastically rounded on bf16's grid; a stale
+  group index after `load_state_dict`; hooks missing on later param groups;
+  `pop()` making two transfers; a NaN gradient turning `grad_capture` NaN; lab
+  frame-motion reads sampling only the first param group.
+- **Verified:** 69 tests; golden trajectories from the old code reproduced to
+  ~5e-6 relative; `release-clean-s1`, the standard arm: 1.652230 / 3.057482 against the
+  reference 1.652199 / 3.058867, 1.133 s/step (FACTS).
+  `examples/train_pytorch.py` and `train_hf_trainer.py` run in both modes.
+  **Not verified:** `examples/train_unsloth.py` (unsloth not installed).
 
-**Moment-first is the design on `lab`** (`ARCHIVE.md`, "the moment averages
-gradients"). The moment averages unit-Frobenius projected gradients, the step
-is `polar(M)` at unit size, `lr` is the relative step itself. No mask, no
-`||M||` scaling, `cautious` and `caution_kept` deleted. Defaults `lr 1e-4`,
-`beta 0.95`; the harness decays linearly to a fifth (`--lr-final-ratio 0.2`).
-D7 closed. On LFM it ties the old design on target under the same decay and,
-at 0.95, keeps 0.028 more source; that gain is beta's (FACTS, "Moment first").
+## Release
 
-Prediction stated before the controls, and how it came out: lab under the
-decay at 1.650-1.655 target / 3.08-3.10 source (got 1.6525 / 3.0862 and
-1.6537 / 3.0845); moment-first seed 2 within ±2e-3 of seed 1 (1.0e-3).
+`main` is reset to `origin/main`. The release is one squashed commit of `lab`'s
+release files onto it, prepared locally after your review; you push.
 
-The branch commit reproduces the runner arm it replaced: `mf-branch-verify-s1`
-1.652199 / 3.058867 against 1.652291 / 3.060419.
+## Next
 
-## Run 28, done
-
-**Anima run 28** (`config/anima_usuitrack_28_moment_first.yaml`, gitignored)
-finished 2026-10-06 02:58: run 27's data and shape on moment-first, beta 0.95,
-`lr 1.3e-5` flat after a 50-step warmup, cosine over the last epoch to 10%.
-Five checkpoints and the samples under
-`/mnt/luna/ai/output/anima_usuitrack_28_moment_first/`, ~23 GB. **Verdict is
-yours, on the samples against run 27.** Reads in FACTS' ledger.
-
-Open from it: on the plateau `relative_step` is 1.15e-5, 12% under `lr`,
-where on LFM it equals `lr`. Some ~12% of the fleet's norm is not stepping,
-or the read aggregates differently here; not looked into. The lr was a
-transfer of run 27's peak, so with the deficit run 28 travelled ~1.45x run
-27, not the ~1.6x planned.
+- Packages upgraded around torch, which stays `2.14.*`: `causal-conv1d` has no
+  torch 2.15 wheel yet (2026-10-28). Revisit when astral publishes one.
+- LFM3-1.7B (`LiquidAI/LFM3-1.7B-Base`) as the bigger run: which question it
+  asks -- transfer of the default arm, headroom, or baselines -- is open.
 
 ## To review
 
-On `lab`, oldest first:
-- `0b3aa99`, `39e6ca6`: transport correction and spin reads.
-- `d5e2e58`: torch 2.14 / CUDA 13.2 / causal-conv1d 1.7.0. Reference arm
-  inside the noise floor of the torch 2.11 one.
-- `ac68bdc`: PLAN F5, BFD packing.
-- `27e09de`: **the design change** -- optimizer, tests, SPEC, README, harness
-  `--cautious` removal, the `lr`/`beta` defaults. Read SPEC steps 5, 7, 8 and
-  Decision 7 first.
-- `647b382`: harness linear decay, `--lr-final-ratio`, AGENTS standard arm.
-- `6332c7b`: FACTS, "Moment first".
-- `1c279b1`: D7's closure; superseded markers on three earlier closures; D1
-  and D4 rewritten; the "Already tried" re-polar entry rescoped.
-- `5f745d3` and the commit carrying this file: HANDOVER, run 28's ledger row.
+On `lab`, oldest first, each read by a review subagent:
+- `8e226b1` release surface: package, tests, lab diagnostics, harness.
+- `fcb0562` README and examples.
+- `58ef76b` SPEC corrected to the code; NOTES.
+- the commit carrying this file: PLAN emptied into ARCHIVE (two closures, the
+  parked block), FACTS row for the arm, AGENTS throughput, this handover.
 
-Not pushed. `main` is untouched.
+ai-toolkit, uncommitted: `toolkit/optimizers/usuitrack.py` ported (bool
+diagnostics, no role classes, always `StochasticAdamW` for the fallback, reads
+`_pending`). Its config is gitignored, so the record is here:
+`config/train_full_fine_tune_anima_usuitrack.yaml` lost `rank: 64` and
+`compile_tensor_kernels: true`, and `diagnostics: full` became `true`. It now runs
+at the default `rank_fraction` 0.1; runs 27 and 28 used 0.025. **Set it before
+the next Anima run.** The numbered run configs keep their dead keys as records.
 
-## Found, not done
+## Open, not in PLAN
 
-- `examples/*.py` call `UsuiTrack(..., rank=...)` at `lr=4e-4`: the prerelease
-  API, broken before this session, and the lr is now 4x the default's meaning.
-- Worktree `~/Projects/usuitrack-moment-first` (branch `moment-first`, merged
-  into `lab`) can go: `git worktree remove ../usuitrack-moment-first && git
-  branch -d moment-first`. Same for `~/Projects/usuitrack-controller` if
-  `cosine-controller` is done with.
-- LFM throughput is ~1.12 s/step at bs16 on torch 2.14 with the basis-lag
-  diagnostic, against the 0.8 AGENTS states; not investigated.
+- Run 28 read `relative_step` 12% under `lr` on its plateau, where LFM reads
+  `lr`. That is what the read exists to catch; not looked into.
+- The Anima lane has no lab reads now (PLAN T1).
+
+## Environment
+
+- Python 3.14 (gitignored `.python-version`), torch `2.14.1+cu132`,
+  `causal-conv1d 1.7.0+cu.13.2.torch.2.14` from `wheels.astral.sh/simple/cu132`;
+  torch is held to `2.14.*` by that wheel.
+- ai-toolkit installs `-e ../usuitrack`: it runs whatever this tree holds.
+- **GPU power limit 198 W.** Undo: `pkexec nvidia-smi -pl 220`.
+- ai-toolkit venv: `torchaudio==2.11.0+cpu` installed `--no-deps`. Undo:
+  `uv pip uninstall torchaudio`.

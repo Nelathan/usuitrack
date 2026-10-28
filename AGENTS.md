@@ -153,7 +153,7 @@ Every LFM table in `docs/FACTS.md` is at 1k steps; a shorter arm compares
 against nothing there. Pass `--beta`, the lr and `--lr-final-ratio` explicitly,
 so a log names its own arm; tables before the 2026-10-05 moment-first change ran
 at a constant lr (`--lr-final-ratio 1`). `--rank-fraction` sets the optimizer's `rank_fraction`
-(default 0.1). Roughly 0.8 s/step at bs16 and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
+(default 0.1). Roughly 1.13 s/step at bs16 (3.2 GB peak) and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
 are the `usuitrack_final_val_loss` (target) and
 `usuitrack_final_retention_val_loss` (source) lines at the end of the log, plus
 the `usuitrack_last_logged_*` telemetry block.

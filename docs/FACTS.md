@@ -852,6 +852,18 @@ The peak `1.24e-3` puts polar-first's late step on moment-first's: both end at
 Runs `lab-ref-torch2.14`, `moment-first-mask-*-b098-lr4.8e-5`, `mf-none-*`,
 `ema-judge-b098-lr6.4e-5`, `lab-lin1.24e-3-b098-s{1,2}`.
 
+### The release cleanup reproduces the reference arm
+
+2026-10-28, standard arm (`--beta 0.95 --usuitrack-lr 1e-4 --lr-final-ratio
+0.2`, seed 1), on the restructured package with the compiled kernels and every
+fallback path removed: `release-clean-s1` 1.652230 target / 3.057482 source
+against `mf-branch-verify-s1`'s 1.652199 / 3.058867, inside the noise floor on
+both. 1.133 s/step at step 1000, inside the 1.11-1.13 every arm has read since
+2026-10-05 on torch 2.14: the compiled kernels bought nothing measurable. Peak
+3.15 GB allocated. Last logged reads: `grad_capture` 0.768,
+`tangent_live_fraction` 0.828, `grad_moment_cosine` 0.007, `relative_step`
+2.1e-5 (the decayed lr).
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

@@ -961,6 +961,266 @@ caution", "the cautious mask reads the step's direction"); beta 0.98 as the
 default; the "Already tried" entry on re-polaring the moment as a verdict on
 this order (it was a second polar map over averaged polar factors).
 
+
+## CLOSED -- moment-first at beta 0.95 holds on Anima, run 28
+
+2026-10-28, closes D4. Run 28 (moment-first, beta 0.95, bs16, `rank_fraction
+0.025`, peak relative step `1.3e-5`) read better than run 27 on the samples
+(user): noticeable, not large, and converging steadily on one look. Loss did not
+rank them and was not asked to.
+
+## CLOSED -- the release surface
+
+2026-10-28, the cleanup before the first `main` release from `lab`. Decisions,
+each the user's:
+
+- **The lr schedule is the trainer's.** The optimizer owns no schedule and no
+  per-role step; the harness's linear decay to a fifth is a harness default.
+- **Gradient accumulation works without `release_matrix_grads`** (both phases
+  run in `step()` on the accumulated gradient) **and raises with it**: release
+  is a memory feature, not the core, and a second gradient for a pending matrix
+  cannot be folded into rank-sized work. Subspace accumulation under release is
+  a PLAN question. This corrects "accumulation is removed" above where it reads
+  as "accumulation is unsupported": what was removed is the in-optimizer
+  micro-batch fold.
+- **`side` stays a per-group override** (`auto`/`left`/`right`), so Anima keeps
+  a hardcoded table; the residual-facing policy leaves SPEC as a rule and stays
+  as one measured option. Anima under `auto` is a PLAN question.
+- **Telemetry is on or off**, six reads, each carrying its own reading guide
+  (`usuitrack.diagnostics.READS`). Transport, concentration, persistence and
+  role breakouts are lab reads (`experiments/lab_diagnostics.py`): under a
+  constant turn the transport reads answer to `eta` and batch size, persistence
+  lags and drains at a large lr, and role breakouts serve fleet debugging.
+- **Fallbacks are a mask or a loud error.** Liveness masking removed the
+  ill-conditioned failures the fallbacks existed for; `nan_to_num` plus the
+  `nonfinite_grads` count stays, the `eigh` jitter retries, `eps`, the compiled
+  kernels, `basis_update_interval`, `consume_grad` and the `stochastic_rounding`
+  flag go.
+- **Kept:** `weight_decay` and `StochasticAdamW`.
+
+Two bugs fixed on the way: `copy_stochastic_` wrote fp16 targets on bf16's grid,
+and `load_state_dict` left the group index stale. One layout change: a
+`left` matrix's moment is stored `[n,r]`, so checkpoints from before do not load.
+
+Withdrawn: SPEC's residual-facing recommendation and decision 2, the diagnostics
+tiers and `diagnostic_roles`, `prepare()` as API, the jitter retry in the fit.
+
+## PARKED at release -- the PLAN of 2026-10-28, verbatim
+
+Open, not closed: these were the live questions when the release was cut, moved
+here whole so the next PLAN starts from the questions the user brought next.
+PLAN keeps one line per question pointing here; reopen by moving the text back.
+D4 is closed above. Code names here (`eps`, `AURORA_PP_*`, `_polar_tangent`) are
+the pre-release code's.
+
+### Group A. Weight precision: the rounding walk
+
+#### A1. Does the bf16 stochastic-rounding walk harm the model?
+
+**Established (`FACTS.md`).** Every Anima write is stochastically rounded into
+bf16, and at a per-step relative update of `3.7e-6` the weights walk: checkpoint
+increments are uncorrelated with prior motion (cosine 0.002) and grow as
+`sqrt(steps)` (ratio 0.378 against the walk's 0.378), for matrices and fallback
+alike. A toy on a real Anima weight reproduces the magnitude and puts rounding
+error at ~7x the fp32 travel. So distance from base on this lane reads the walk.
+
+**Open: is the walk harmful, or only noisy telemetry?** It is isotropic noise of
+relative size ~2e-3 on every weight, growing `sqrt(N)`, with nothing pulling it
+back. Two user observations fit a harmful walk and are not yet evidence for one:
+long runs "drowned in noise", and run 12 went stable but bland. Unbiased rounding
+also means the expected path is intact, so the harm could be zero.
+
+**How to settle.**
+- *Walk-only control* -- **run 2026-09-14.** Base weights plus a simulated walk
+  matched per role to run 13 @550, sampled with run 13's prompts and seed. The
+  walk alone moves samples 0.018-0.041 pixel RMS from base on four prompts
+  against run 13 @550's 0.116-0.211; on the armored-warrior prompt 0.146 against
+  0.175. Looked at: it shifts composition on sensitive prompts, keeps base's style,
+  shows no visible degradation; run 13's style and lighting shift is not in it.
+  **So at run 13's scale the visible learning is not the walk**, and the walk is
+  a composition perturbation rather than obvious damage. Not ruled out: harm that
+  accumulates over longer runs (walk grows `sqrt(N)`), or subtler quality loss
+  the user's eye would catch. Samples:
+  `/mnt/luna/ai/output/anima_walk_only_control/samples` (step 0) against
+  `anima_usuitrack_13_acc4/samples` steps 0 and 550.
+- *Walk-free arm*: run 13 again with the walk removed. Options, none built:
+  fp32 master weights on the CPU (the 2B model is 8 GB in fp32 against 31 GB
+  RAM; the update is already formed in fp32 on the GPU, so per step it costs an
+  8 GB download, a CPU add and a 4 GB bf16 upload -- ~1.5 s at the measured
+  12 GB/s pinned PCIe and ~0.06 s/GB CPU add, +8% at `k=4`, no VRAM); an error-feedback residual (a bf16 residual is +4 GB and does not fit
+  at bs4 x k4, an int8 one is +2 GB and might); or simply a larger step, since
+  walk grows as `sqrt(lr)` and travel as `lr`.
+
+**Prior:** P14's old question "does stochastic rounding on the weight write
+cause source degradation" (on LFM) is the same question and was never run.
+
+#### A2. Displacement needs a walk-aware read
+
+`scripts/usuitrack_base_distance.py` is still the only read of travel and it now
+measures mostly noise at this step size. Candidates: the increment-correlation
+read used above (`cos(w_t2 - w_t1, w_t1 - base)`), which separates coherent
+travel from walk with two checkpoints; or the fp32 expectation, if a walk-free
+arm exists. Decide which becomes the standard read before the next run is judged
+by distance.
+
+---
+
+### Group D. The step budget: learning rate, fallback, beta
+
+#### D1. The global matrix lr, and its schedule
+
+`lr` is the relative step itself (`SPEC.md` step 8): the step is the moment's
+polar factor at unit size, so `||dW|| / ||W||` is `lr` in every module.
+Default `1e-4` under a linear decay to a fifth of the peak, the LoRA scale.
+Read so far (`FACTS.md`):
+
+- LFM2.5-350M, bs16 x 1024 tokens: linear decay from `1e-4` to 20% beat
+  constant lr by 0.007-0.012 target in both designs ("Moment first"). Only one
+  peak and one decay shape are measured.
+- Anima, bs16, `rank_fraction 0.025`: run 27 (polar-first, beta 0.95) peaked
+  at a relative step of ~1.3e-5 and the samples improved. Run 28 (moment-first,
+  `1.3e-5`, stable then cosine over the last 20% to 10%) transfers that peak
+  and travels ~1.6x run 27's total, which averaged ~7.3e-6. Unmeasured.
+
+Open: the peak on each lane, and which decay. Transfer across batch:
+`sqrt(tokens)` held from bs16 to bs8 on LFM and undershot at bs32 (pre-change
+step rule). Across beta the step's size no longer moves with the moment;
+whether the best lr does is unmeasured.
+
+#### D4. Does beta 0.95, moment-first, hold on Anima?
+
+Settled on LFM (`ARCHIVE.md`, "the moment averages gradients"). Run 28 is the
+test: bs16, `rank_fraction 0.025`, verdict on the samples against run 27.
+Loss cannot rank them. The reads to watch are `moment_persistence` against
+its white floor and `grad_moment_cosine` per role: whether the step drains the
+moment (cosine near zero) or overshoots it (negative).
+
+Why bs16 here: the dataset was curated for bs4, so bs16 pads partial buckets
+with duplicates (same image, new timestep and noise). Run 23 at bs8 was good
+quality but changed little (user); this data wants the larger batch.
+
+#### D6. LFM run-to-run spread
+
+A same-seed replicate differs by 1.6e-3 target and 5.6e-3 source (`FACTS.md`),
+5x and 3x the floors `AGENTS.md` states. One pair. Settle with three seeds of
+the default arm (~40 min) before another LFM claim below ~2e-3 target.
+
+---
+
+### Group E. Rank and the frame
+
+#### E7. Anima's `rank_fraction`
+
+`rank_fraction 0.1` is the LFM measurement (`ARCHIVE.md`, "rank is a fraction of
+the matrix's size"); Anima has never run it. At 0.1 its roles get ranks 205
+(2048²), 145 (2048x1024), 410 (the ff pair), 34 and 32 (the patch projections),
+and the per-step update rose 1.4-3x over run 17's table at the same lr, because
+rank set the step under the rule of the time; under the law it sets only the
+subspace (SPEC).
+
+The AdaLN linears now train here too, at 72 (`linear_1`, 256x2048) and 125
+(`linear_2`, 6144x256), against a per-step gradient of rank at most the batch
+(16): their input is one timestep embedding per sample. Most of their planes
+carry no signal on a given step, and Newton-Schulz lifts whatever the moment holds
+there to unit scale. Whether that matters has no read yet beyond the per-role cosine: runs 24 and
+25 put AdaLN `linear_1` at 5-10x attention's (`FACTS.md`); the verdict is the
+samples. The
+verdict so far is 19 finite steps (`ARCHIVE.md`). Arm: 0.1 against a lower
+fraction under a real bs16, against run 17, with lr lowered to match run
+17's per-module step so the comparison reads the subspace and not the step. The
+verdict is samples. Frame and moment in bf16 grow from 0.11 to 0.47 GiB at 0.1;
+the eigh and polar transients at rank 410 are unmeasured.
+
+#### E9. Which roles move, and should step or rank follow them?
+
+The trust-ratio law gives every matrix the same relative step, and rank no
+longer scales the step, so a low-rank AdaLN linear steps as far as a rank-410
+ff matrix. The user's hypothesis: the high-rank roles, ff and attention, carry
+the finetune and want more step; AdaLN, whose gradient is sparse and low rank,
+should barely move, and the law is known to fit AdaLN poorly. Some roles may be
+walking more than learning.
+- Read first: per-role total travel and per-role cosine over run 26, from its
+  checkpoints and `loss_log.db`, with the bf16 walk (A2) in mind.
+- Then, if it holds: step or rank per role class, an arm against run 26.
+
+#### E4. Parked: an arrival sensor
+
+A converged frame orbits on batch noise and a constant turn keeps integrating it.
+No sensor exists; the one candidate, `micro_batch_agreement`, left with
+accumulation. The user judges this not worth pursuing on this lane now.
+Its premise that orbiting costs found no cost on LFM at `0.04` (`ARCHIVE.md`,
+"the turn matters only while the aim moves").
+
+#### E5. The `min(m,n)/2` cap
+
+Binds only on matrices whose short side is under `4 c^2` of their long side
+(1/25 at `rank_fraction 0.1`; Anima's patch_embed asks 37 and runs at 34).
+Nothing acts on it until a capped matrix starves.
+
+---
+
+### Group F. Engineering, parked
+
+- **F1. Per-matrix lr from the overshoot meter** (was P15). Decide by first
+  logging `grad_moment_cosine` spread across matrices by role; if flat, it is a
+  global schedule in costume. Family prior is poor (closed P2).
+- **F2. Magic numbers** (was P5). Rank cap (E5); `eps`;
+  `AURORA_PP_*` inherited and cheap; Newton-Schulz coefficients (5 steps, the
+  largest cost, invisible end to end); `1e-12` floors never audited against
+  their dtype -- the lesson of the `1e-6 sigma_max` floor that never fired.
+- **F3. Five device syncs per step** (was P12). One is `eigh`'s convergence
+  check, one per rank bucket per step, at step end (layerwise release leaves
+  the basis update bucketed); `torch._linalg_eigh` checks too. Four unnamed.
+  Cost unmeasured; profile first. The user wants a sync-free variant that
+  keeps `eigh`'s stationarity, judged by maths, then on real tangents (no
+  synthetic). Newton-Schulz fails both on paper: the polar tangent needs an
+  exact unit turn on every live plane and a hard cliff at
+  `sqrt(r eps) sigma_max` (`_polar_tangent`), and a fixed polynomial gives a
+  soft ramp in `sigma / ||Delta||`, so the per-plane turn would follow the
+  tangent spectrum as it flattens and half-turn the noise planes that once
+  broke Anima's `eigh`. Candidates, unmeasured: batched Jacobi (same
+  decomposition, many kernels); Newton inverse square root with `inv_ex` plus
+  a matrix-sign cliff (sync-free, exact to roundoff once converged, more
+  machinery, no eigenvalues for the spectrum reads); `eigh` one step late off
+  the main thread (frame lags a step: a design change).
+- **F4. Stratified timesteps within a batch** (was B5). One sample per slice
+  of the `t` range; free, and cuts the batch's `t` variance. Not tried.
+- **F5. BFD packing on LFM.** Padding costs VRAM, and the max sequence length
+  caps how much coherent text a sample carries. Best-fit-decreasing packing of
+  whole documents into one sequence plus a per-token sequence index removes
+  both, if attention and the short convolution respect document boundaries:
+  flash-attn's varlen kernel for attention (not installed; SDPA already uses its
+  flash backend for the unpacked case), and causal-conv1d's `seq_idx`, which
+  transformers' LFM2 passes through (`modeling_lfm2.py`, read 2026-10-05).
+  Unmeasured: throughput and memory against the current batches, and whether a
+  packed batch's token mix moves the FACTS baselines.
+
+---
+
+### Already tried. Do not repeat.
+
+- **Normalizing the rotation angle by `sigma_max`**, or bare ortho of the same
+  family. Forces a constant top angle, re-inflates the residual tail.
+- **Per-step Frobenius normalization of the gradient inside the basis update.**
+  A good basis and a garbage basis read identically.
+- **Clamping the rotation angle to a fixed ceiling.** Eats acquisition.
+- **A magnitude cap on the tangent, and a full-rank zero-tangent branch.** Added
+  to a path no default configuration reached.
+- **Overlap reprojection of the moment through frame motion.** Charges a cosine
+  tax on rotated directions; identity transport instead.
+- **Per-matrix agreement ceilings.** Worse spread than no per-matrix term.
+- **Stochastic rounding on the basis write.** Worse by `sqrt(2)`: the geodesic
+  moves the frame by a real angle every step. Scoped to the basis only.
+- **Turning only the top planes.** Worse on target; the leading plane's
+  magnitude was the problem, which the polar tangent fixes.
+- **A fresh eigendecomposition mid-training** in place of the tracked frame.
+- **A second polar map over a moment of polar factors.** Trades target for
+  source at the held step and fails at twice the step: noise planes get full
+  length. Not a verdict on one polar map over a moment of gradients, which is
+  the shipped order (`ARCHIVE.md`, "the moment averages gradients").
+- **Rescaling caution by `numel / kept`.** A uniform lr multiplier on LFM, and
+  worse source at equal target.
+
 ---
 
 # Investigation log (the former PLAN, 2026-08-20 to 2026-09-03)
