@@ -47,7 +47,8 @@ class ToyModel(nn.Module):
 def build_optimizers(model: nn.Module, release_matrix_grads: bool) -> tuple[UsuiTrack, torch.optim.AdamW]:
     matrix_params = [p for p in model.parameters() if p.ndim == 2]
     other_params = [p for p in model.parameters() if p.ndim != 2]
-    matrix_opt = UsuiTrack(matrix_params, lr=4e-4, rank=16, release_matrix_grads=release_matrix_grads)
+    # lr is the relative step, ||dW|| / ||W||, so it does not scale with a matrix's shape.
+    matrix_opt = UsuiTrack(matrix_params, lr=1e-4, release_matrix_grads=release_matrix_grads, diagnostics=True)
     other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
     return matrix_opt, other_opt
 
@@ -56,6 +57,9 @@ def train(release_matrix_grads: bool, steps: int = 50) -> float:
     torch.manual_seed(0)
     model = ToyModel()
     matrix_opt, other_opt = build_optimizers(model, release_matrix_grads)
+    # The schedule is the training loop's: any torch scheduler drives both optimizers.
+    decay = lambda step: 1.0 - 0.8 * step / steps
+    schedulers = [torch.optim.lr_scheduler.LambdaLR(opt, decay) for opt in (matrix_opt, other_opt)]
 
     loss = torch.tensor(float("nan"))
     for _ in range(steps):
@@ -70,7 +74,12 @@ def train(release_matrix_grads: bool, steps: int = 50) -> float:
         other_opt.step()
         matrix_opt.zero_grad()
         other_opt.zero_grad()
+        for scheduler in schedulers:
+            scheduler.step()
 
+    # Means since the last call; usuitrack.diagnostics.READS says how to read each.
+    for name, value in sorted(matrix_opt.pop_diagnostics().items()):
+        print(f"  {name:24s} {value:.4g}")
     return float(loss.detach())
 
 

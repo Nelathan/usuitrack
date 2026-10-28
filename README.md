@@ -46,7 +46,13 @@ maps, and belong in the fallback. `docs/SPEC.md` has the reasoning.
 
 Rank is not configured per matrix: `rank_fraction` (default `0.1`) sizes each
 matrix at `rank_fraction * sqrt(m * n)`, capped at half its smaller side, so a
-1024x1024 projection runs at 102 and a 4608x1024 MLP matrix at 217.
+1024x1024 projection runs at 102 and a 4608x1024 MLP matrix at 217. The tracked
+side defaults to `side="auto"`, the shorter one; a param group can fix it with
+`side="left"` or `"right"` where you know better.
+
+`lr` is the relative step, `||dW|| / ||W||` per matrix, so the default `1e-4`
+means the same in every module. Schedule it like any optimizer's: a trainer's or
+torch's scheduler drives it, and the optimizer has no schedule of its own.
 
 ```python
 import torch
@@ -76,8 +82,10 @@ once:
 matrix_opt = UsuiTrack(matrix_params, lr=1e-4, release_matrix_grads=True)
 ```
 
-This requires one backward per `step()` call, no gradient accumulation, and
-it isn't transactional: see `examples/` and `docs/SPEC.md` for the exact
+This takes one backward per `step()`: a second gradient before `step()` raises,
+so accumulate with it off. Since the matrix gradients are gone by the time
+`backward()` returns, a trainer's gradient clipping and logged gradient norm see
+only the fallback parameters. `docs/SPEC.md`, "Two-phase execution", has the
 contract.
 
 See [`examples/`](examples) for a plain-PyTorch loop, an HF `Trainer`
@@ -90,57 +98,30 @@ quadratic in `G` by another, and the update normalizes each step's gradient to
 unit norm before it enters the moment, so a bad batch contributes one unit of
 weight like any other step. Non-finite entries are still zeroed.
 
-### Is the tracker actually tracking?
+### Diagnostics
 
-Optional telemetry, off by default, that answers that without assuming any
-particular trainer -- it is a plain dict of floats, so it drops straight into
-whatever logging you already have:
+Off by default. With `diagnostics=True` the optimizer accumulates a few reads
+on-device and hands them back as a plain dict of floats, for whatever logger you
+already have:
 
 ```python
-matrix_opt.diagnostics = "core"   # or "full"; "off" is the default
+matrix_opt = UsuiTrack(matrix_params, diagnostics=True)
 ...
-if step % 10 == 0:
+if step % 25 == 0:
     for key, value in matrix_opt.pop_diagnostics().items():
         my_logger.log(f"usuitrack/{key}", value, step=step)
 ```
 
-Measurements accumulate on-device every step and are read back once per
-`pop_diagnostics()` call, so a logged point is the mean over the interval since
-the last read rather than a sample of one step, and the hot path stays free of
-device syncs. Call it on your logging cadence, not every step. An empty dict
-means nothing has happened since the last read and is safe to skip.
+Each value is the mean since the last call (`nonfinite_grads` is a count), so call it on your logging cadence:
+it is the one device-to-host transfer. `usuitrack.diagnostics.READS` says how to
+read each key. The two that tell you the most about a new setup are
+`tangent_live_fraction` (does the rank fit what the gradient carries at this batch
+size?) and `grad_capture` (how much of the gradient does the frame hold?).
 
-Two tiers, split by cost rather than by usefulness. `"core"` is everything that
-falls out of tensors the step already formed, so it can stay on for a whole run
-without a decision. `"full"` adds the three reads that need a frame snapshot,
-which is a fixed cost over a fixed sample of matrices.
-
-The one that answers the title question is `transport_speed`: how far the frame
-moved in one update, as an RMS angle per tracked plane. Switch to `"full"` and
-`transport_curve` answers the follow-up -- how much of that motion actually went
-anywhere, rather than cancelling.
-
-`tangent_concentration` answers a different question, and it is the more
-interesting one over a long run: how structured the space being tracked still
-is. It is the leading direction's share of the tangent's energy, so it falls as
-the gradient's principal subspace flattens and the easy structure gets used up.
-Measured on a 1k finetune it reads `0.79` early and `0.68` by the end. It says
-how much anisotropy is left to track, not whether the frame is chasing noise;
-speed, curve and spin are what answer that.
-
-`pop_diagnostics()`'s docstring documents the rest.
-
-UsuiTrack is built for full-parameter training; LoRA is the comparison
-point above, not a mode of operation. It also runs fine on LoRA adapter
-matrices themselves (they're plain 2D tensors), but expect it unoptimized
-there: dedicated orthogonalized-update work on LoRA already exists and
-does that job with less machinery than UsuiTrack carries. Whether tracking
-a moving subspace helps a LoRA adapter stay useful over a much longer run,
-where a fixed low-rank parameterization tends to overfit, is an open
-question we haven't tested. If you try it, the residual-facing `side`
-policy was tuned for full weight storage conventions and we have no idea
-whether it transfers to adapter matrices; `side="auto"` is the safer
-starting point there.
+UsuiTrack is built for full-parameter training; LoRA is the comparison point
+above, not a mode of operation. Because the step is relative to `||W||`, **a
+matrix initialized to zero never moves**, and that includes LoRA's `B` matrix.
+Give such weights a non-zero init or the fallback optimizer.
 
 ## How it works
 
@@ -154,14 +135,10 @@ In short: each matrix keeps a small orthonormal basis (`r` columns, sized by `ra
 projected first moment in that basis. The basis moves via an exact
 Grassmann-geodesic step driven by an Oja covariance tangent, so momentum
 transports through basis motion as a rigid rotation instead of being
-re-projected and losing energy. Every tracked plane turns by the same angle --
-the tangent's magnitudes decide only how motion is split between planes, and on
-a single batch they are the least trustworthy thing in it -- and how large that
-angle is comes from how much this step's aim agrees with the previous step's. A
-frame that is still skewed keeps re-measuring its own lag, so its aim repeats and
-it turns; a fitted frame sees uncorrelated batch noise and slows. Both ends of
-that meter are geometry rather than tuning, so the tracker carries no fitted
-constant beyond the step size itself. Direction comes from two steps kept apart:
+re-projected and losing energy. Every tracked plane the gradient resolves turns
+by the same constant angle per step -- the tangent's magnitudes would only decide
+how motion is split between planes, and on a single batch they are the least
+trustworthy thing in it. Direction comes from two steps kept apart:
 a leverage-balancing row rescale
 ([Aurora](https://github.com/tilde-research/aurora-release), from Tilde
 Research), then a Newton-Schulz polar map that does the orthogonalizing, using
@@ -173,9 +150,8 @@ relative to the weight it lands on: `lr` is the fraction of `||W||` a matrix
 moves per step, the same in every module whatever its shape or rank (LAMB's
 trust ratio); see `docs/SPEC.md` step 8. That puts it on LoRA's scale. The
 default `1e-4` was set on a 350M LLM at 16 x 1024 tokens per step, under a
-linear decay to a fifth of it over the run, which beat a constant `lr`; decay
-your `lr` the same way. On a 2B image DiT at batch 8 the best relative step
-measured so far is about `1.3e-5`.
+linear decay to a fifth of it over the run, which beat a constant `lr`. On a 2B
+image DiT at batch 8 the best relative step measured so far is about `1.3e-5`.
 For bf16 weights the update is accumulated in fp32 and written back with
 stochastic rounding, because an orthogonalized step is often a fraction of a
 bf16 ulp and round-to-nearest would discard it outright; `StochasticAdamW` is
@@ -191,11 +167,11 @@ This is an early release. The core algorithm is measured (see above); the
 generic-PyTorch integration surface is not yet fully swept:
 
 - Tested on a single GPU. No DDP, FSDP, or other distributed testing.
-- `release_matrix_grads` requires exactly one backward per `step()`. Plain
-  gradient accumulation (no release, multiple `backward()` calls before one
-  `step()`) is tested and works.
-- Not tested under `autocast`/`GradScaler`, `torch.compile`'s `capturable`/
-  differentiable modes, or exotic tensor subclasses.
+- Gradient accumulation works without `release_matrix_grads`, not with it.
+- Not tested under `autocast`/`GradScaler`, `torch.compile` of the optimizer
+  step, or exotic tensor subclasses.
+- Checkpoints from before this release's state layout (`frame`, `moment`) do not
+  load.
 - Minimum PyTorch version (`2.1`) is inferred from the API surface used
   (`register_post_accumulate_grad_hook`), not empirically swept across
   versions.

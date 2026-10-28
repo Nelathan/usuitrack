@@ -32,7 +32,7 @@ def build_optimizers(model: nn.Module, release_matrix_grads: bool) -> tuple[Usui
     matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
     other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
 
-    matrix_opt = UsuiTrack(matrix_params, lr=4e-4, rank=32, release_matrix_grads=release_matrix_grads)
+    matrix_opt = UsuiTrack(matrix_params, lr=1e-4, release_matrix_grads=release_matrix_grads)
     other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
     return matrix_opt, other_opt
 
