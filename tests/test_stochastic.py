@@ -26,13 +26,26 @@ def test_copy_stochastic_is_unbiased_for_sub_ulp_values():
     assert torch.isclose(target.float().mean(), source, rtol=0, atol=float(ulp) * 0.02)
 
 
-def test_sub_ulp_updates_accumulate_instead_of_vanishing():
+def test_round_into_fp16_keeps_fp16_precision():
+    """Stochastic rounding is bf16's bit layout; an fp16 target is rounded to
+    its own grid, not to bf16's eight-times coarser one."""
+    from usuitrack.stochastic import round_into
+
+    source = torch.full((1000,), 1.0 + 3e-4)
+    target = torch.empty(1000, dtype=torch.float16)
+    round_into(target, source)
+    assert torch.equal(target, source.half())
+
+
+def test_sub_ulp_updates_accumulate_instead_of_vanishing(monkeypatch):
     """The regime that motivates this module: bf16 weights whose per-step
     update is a fraction of an ulp. UsuiTrack orthogonalizes the direction, so
     the step size is `lr` and not gradient magnitude -- which is exactly when
     round-to-nearest writes back the value it started with, every step.
-    Stochastic rounding must instead track the fp32 trajectory.
+    Stochastic rounding must instead track the fp32 trajectory. The nearest
+    arm replaces the optimizer's rounded write with a plain copy.
     """
+    import usuitrack.optimizer
     torch.manual_seed(0)
     start = torch.full((ROWS, COLS), 0.01)
     gradient = torch.full((ROWS, COLS), 1.0)
@@ -40,14 +53,15 @@ def test_sub_ulp_updates_accumulate_instead_of_vanishing():
     def run(dtype, stochastic):
         weight = torch.nn.Parameter(start.clone().to(dtype))
         origin = weight.detach().clone().float()
-        optimizer = UsuiTrack(
-            [weight], lr=1e-5, rank_fraction=RANK_FRACTION, side="right", stochastic_rounding=stochastic
-        )
+        if not stochastic:
+            monkeypatch.setattr(usuitrack.optimizer, "round_into", lambda target, source: target.copy_(source))
+        optimizer = UsuiTrack([weight], lr=1e-5, rank_fraction=RANK_FRACTION, side="right")
         for _ in range(400):
             weight.grad = gradient.clone().to(dtype)
             optimizer.step()
         assert torch.isfinite(weight).all()
         detached = weight.detach().float()
+        monkeypatch.undo()
         return detached - origin, (detached != origin).float().mean().item()
 
     reference_drift, _ = run(torch.float32, False)

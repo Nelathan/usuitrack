@@ -5,180 +5,18 @@ import pytest
 import torch
 from torch import Tensor
 
-from usuitrack import SubspaceProjector, UsuiTrack, optimizer_state_bytes, optimizer_state_bytes_by_category
+from usuitrack import UsuiTrack
+from usuitrack import frame
+from usuitrack.diagnostics import READS
 from usuitrack.optimizer import GEODESIC_STEPSIZE
+from usuitrack.polar import unit_polar
 
 
-# A representative transformer-ish weight. Small toy shapes like (8, 4) put
-# effective_rank() straight into its floor, so every test silently exercised a
-# rank-1 basis instead of the regime the optimizer is designed for.
-# RANK_FRACTION is chosen so this shape runs at exactly RANK, below the cap.
+# A representative transformer-ish weight. Small toy shapes like (8, 4) put the
+# rank straight into its floor, so every test would silently exercise a rank-1
+# frame. RANK_FRACTION is chosen so this shape runs at exactly RANK, below the cap.
 ROWS, COLS, RANK = 256, 128, 16
 RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
-
-
-def test_rejects_non_matrix():
-    with pytest.raises(ValueError, match="only supports 2D"):
-        UsuiTrack([torch.nn.Parameter(torch.randn(4))])
-
-
-def test_basis_moves_every_step_by_default():
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
-
-    weight.grad = torch.randn_like(weight)
-    optimizer.step()
-    initial_basis = optimizer.state[weight]["basis"].clone()
-
-    weight.grad = torch.randn_like(weight)
-    optimizer.step()
-    assert not torch.equal(initial_basis, optimizer.state[weight]["basis"])
-    assert optimizer.param_groups[0]["basis_update_step"] == 2
-
-
-def test_basis_update_interval_gates_geodesic_not_moment():
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", basis_update_interval=2)
-
-    weight.grad = torch.randn_like(weight)
-    optimizer.step()
-    initial_basis = optimizer.state[weight]["basis"].clone()
-    assert optimizer.param_groups[0]["basis_update_step"] == 0
-
-    weight.grad = torch.randn_like(weight)
-    optimizer.step()
-    assert not torch.equal(initial_basis, optimizer.state[weight]["basis"])
-    assert optimizer.param_groups[0]["basis_update_step"] == 1
-    assert "projected_exp_avg" in optimizer.state[weight]
-
-
-def test_prepare_release_matches_ordinary_step_exactly():
-    """Validates the release_matrix_grads=True fast path (README's early-release
-    mode) produces bit-identical parameters to the ordinary step() path."""
-
-    torch.manual_seed(0)
-    ordinary_weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    released_weight = torch.nn.Parameter(ordinary_weight.detach().clone())
-    ordinary = UsuiTrack([ordinary_weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
-    released = UsuiTrack([released_weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", release_matrix_grads=True)
-
-    for _ in range(3):
-        gradient = torch.randn_like(ordinary_weight)
-        ordinary_weight.grad = gradient.clone()
-        released_weight.grad = gradient.clone()
-        released.prepare(released_weight)
-        assert released_weight.grad is None
-        ordinary.step()
-        released.step()
-        torch.testing.assert_close(ordinary_weight, released_weight, rtol=0, atol=0)
-
-
-def test_plain_gradient_accumulation_without_release_matches_manual_grad_sum():
-    """Two backward() calls before one step() leave a summed gradient in
-    param.grad, and step() reads it as one gradient -- identical to a single
-    step() on the pre-summed tensor, which is the estimator a real batch of
-    both gives."""
-
-    torch.manual_seed(2)
-    accumulated = torch.nn.Linear(COLS, ROWS, bias=False)
-    presummed = torch.nn.Linear(COLS, ROWS, bias=False)
-    presummed.weight.data.copy_(accumulated.weight.data)
-
-    x1, x2 = torch.randn(8, COLS), torch.randn(8, COLS)
-    accumulated(x1).sum().backward()
-    accumulated(x2).sum().backward()
-
-    grad1 = torch.autograd.grad(presummed(x1).sum(), presummed.weight)[0]
-    grad2 = torch.autograd.grad(presummed(x2).sum(), presummed.weight)[0]
-    presummed.weight.grad = grad1 + grad2
-
-    torch.testing.assert_close(accumulated.weight.grad, presummed.weight.grad, rtol=0, atol=0)
-
-    UsuiTrack([accumulated.weight], lr=0.01, rank_fraction=RANK_FRACTION).step()
-    UsuiTrack([presummed.weight], lr=0.01, rank_fraction=RANK_FRACTION).step()
-    torch.testing.assert_close(accumulated.weight, presummed.weight, rtol=0, atol=0)
-
-
-def test_prepare_is_exactly_once():
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION)
-    weight.grad = torch.randn_like(weight)
-    optimizer.prepare(weight)
-    with pytest.raises(RuntimeError, match="already prepared"):
-        optimizer.prepare(weight)
-    optimizer.step()
-
-
-def test_zero_grad_drops_pending_prepared_work():
-    """zero_grad() is an escape hatch for callers that must bail out (e.g. an
-    OOM-retry loop) after prepare() already mutated moving-average state for
-    some params. It can't undo that mutation, but it must not block recovery:
-    it just drops the pending update so the next prepare()/step() starts
-    clean."""
-
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION)
-    weight.grad = torch.randn_like(weight)
-    optimizer.prepare(weight)
-    with pytest.warns(UserWarning, match="discarded prepared updates"):
-        optimizer.zero_grad()
-    assert not optimizer._pending_matrix_updates
-    assert weight.grad is None
-
-
-def test_state_dict_resume_matches_uninterrupted_run():
-    torch.manual_seed(1)
-    first = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    first_optimizer = UsuiTrack([first], lr=0.01, rank_fraction=RANK_FRACTION)
-    for _ in range(2):
-        first.grad = torch.randn_like(first)
-        first_optimizer.step()
-
-    second = torch.nn.Parameter(first.detach().clone())
-    second_optimizer = UsuiTrack([second], lr=0.01, rank_fraction=RANK_FRACTION)
-    second_optimizer.load_state_dict(copy.deepcopy(first_optimizer.state_dict()))
-
-    gradient = torch.randn_like(first)
-    first.grad = gradient.clone()
-    second.grad = gradient.clone()
-    first_optimizer.step()
-    second_optimizer.step()
-    torch.testing.assert_close(first, second, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("side", ["right", "left"])
-def test_live_kernel_tangent_is_horizontal(side):
-    """Oja's tangent must have no component along the current frame -- that is
-    what makes the geodesic turn strictly in the frame's complement and keeps
-    the retraction exact. Checked against the fused kernel because after the
-    first step that is the only code that builds a tangent."""
-    from usuitrack import SubspaceProjector
-
-    torch.manual_seed(0)
-    gradient = torch.randn(ROWS, COLS)
-    projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side=side)
-    projector.fit(gradient)
-    basis = projector.basis
-    assert basis is not None
-
-    kernel = (
-        UsuiTrack._prepare_tracker_right_tensors
-        if side == "right"
-        else UsuiTrack._prepare_tracker_left_tensors
-    )
-    projected_shape = (ROWS, RANK) if side == "right" else (RANK, COLS)
-    # A gradient the frame was *not* fitted on: a frame fitted on G is the
-    # leading eigenspace of `G^T G`, so the Oja action lands entirely inside it
-    # and the horizontal residual is exactly zero, which makes this assertion
-    # vacuous.
-    _projected, tangent, _norm = kernel(
-        torch.randn(ROWS, COLS),
-        basis,
-    )
-
-    frame = projector.canonical_basis()
-    overlap = frame.mT @ tangent
-    assert float(overlap.abs().max()) < 1e-3 * float(tangent.abs().max()), overlap.abs().max()
 
 
 def _two_matrix_optimizer(**kwargs):
@@ -196,77 +34,177 @@ def _run(params, optimizer, steps):
         optimizer.step()
 
 
-def test_a_fitted_frame_is_a_fixed_point_of_its_own_gradient():
-    """The frame has nothing left to learn from the gradient that fitted it.
+def _backward(param: Tensor, gradient: Tensor) -> None:
+    """Deliver `gradient` through autograd, so post-accumulate hooks fire."""
+    (param * gradient).sum().backward()
 
-    The Oja action is `(G^T G) B^T`, and a frame fitted on `G` *is* the leading
-    eigenspace of `G^T G`, so the action lands entirely inside the frame and the
-    horizontal residual is zero. The tracker therefore stops turning when the
-    gradient's principal subspace stops moving, rather than churning on a
-    stationary target.
-    """
+
+def test_rejects_non_matrix():
+    with pytest.raises(ValueError, match="2D matrix"):
+        UsuiTrack([torch.nn.Parameter(torch.randn(4))])
+
+
+def test_rejects_an_unknown_side():
+    with pytest.raises(ValueError, match="side"):
+        UsuiTrack([torch.nn.Parameter(torch.randn(ROWS, COLS))], side="residual")
+
+
+def test_frame_moves_every_step_after_the_one_that_fits_it():
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
+
+    _run([weight], optimizer, 1)
+    fitted = optimizer.state[weight]["frame"].clone()
+    _run([weight], optimizer, 1)
+    moved = optimizer.state[weight]["frame"]
+    residual = moved - fitted @ (fitted.mT @ moved)
+    assert float(residual.norm() / math.sqrt(RANK)) > 1e-3
+
+
+def test_only_a_frame_and_a_moment_are_kept():
+    """UsuiTrack keeps a frame and a projected first moment. Nothing else."""
     torch.manual_seed(0)
-    gradient = torch.randn(ROWS, COLS)
-    projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side="right")
-    projector.fit(gradient)
-    basis = projector.basis
-    assert basis is not None
+    params, optimizer = _two_matrix_optimizer()
+    _run(params, optimizer, 4)
 
-    _projected, tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(gradient, basis)
-    assert float(tangent.abs().max()) < 1e-5, float(tangent.abs().max())
+    for param in params:
+        state = optimizer.state[param]
+        assert set(state) == {"frame", "moment"}
+        assert tuple(state["frame"].shape) == (COLS, RANK)
+        assert tuple(state["moment"].shape) == (ROWS, RANK)
 
 
-def test_kernel_matches_a_hand_rolled_step():
-    """The fused kernel is the written-out projection, not a path that merely runs."""
+def test_release_matches_ordinary_step_exactly():
     torch.manual_seed(0)
-    gradient = torch.randn(ROWS, COLS)
-    projector = SubspaceProjector(rank_fraction=RANK_FRACTION, side="right")
-    projector.fit(torch.randn(ROWS, COLS))
-    basis = projector.basis
-    assert basis is not None
+    ordinary_weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    released_weight = torch.nn.Parameter(ordinary_weight.detach().clone())
+    ordinary = UsuiTrack([ordinary_weight], lr=0.01, rank_fraction=RANK_FRACTION)
+    released = UsuiTrack([released_weight], lr=0.01, rank_fraction=RANK_FRACTION, release_matrix_grads=True)
 
-    projected, _tangent, _norm = UsuiTrack._prepare_tracker_right_tensors(gradient, basis)
+    for _ in range(3):
+        gradient = torch.randn(ROWS, COLS)
+        _backward(ordinary_weight, gradient)
+        _backward(released_weight, gradient)
+        assert released_weight.grad is None
+        ordinary.step()
+        released.step()
+        torch.testing.assert_close(ordinary_weight, released_weight, rtol=0, atol=0)
 
-    assert torch.allclose(projected, gradient @ basis.mT, atol=1e-6)
+
+def test_release_hooks_cover_a_group_added_later():
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    late = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION, release_matrix_grads=True)
+    optimizer.add_param_group({"params": [late]})
+
+    _backward(late, torch.randn(ROWS, COLS))
+    assert late.grad is None
+
+
+def test_plain_gradient_accumulation_matches_a_presummed_gradient():
+    """Two backward() calls before one step() leave a summed gradient, and
+    step() reads it as one gradient: the estimator a batch of both gives."""
+
+    torch.manual_seed(2)
+    accumulated = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    presummed = torch.nn.Parameter(accumulated.detach().clone())
+    first, second = torch.randn(ROWS, COLS), torch.randn(ROWS, COLS)
+
+    _backward(accumulated, first)
+    _backward(accumulated, second)
+    presummed.grad = first + second
+
+    UsuiTrack([accumulated], lr=0.01, rank_fraction=RANK_FRACTION).step()
+    UsuiTrack([presummed], lr=0.01, rank_fraction=RANK_FRACTION).step()
+    torch.testing.assert_close(accumulated, presummed, rtol=0, atol=0)
+
+
+def test_accumulation_under_release_is_refused_with_the_reason():
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION, release_matrix_grads=True)
+    _backward(weight, torch.randn(ROWS, COLS))
+    assert optimizer._pending
+    with pytest.raises(RuntimeError, match="accumulate gradients with it off"):
+        _backward(weight, torch.randn(ROWS, COLS))
+
+
+def test_zero_grad_drops_pending_prepared_work():
+    """An escape hatch for a loop that bails out between backward and step."""
+
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION, release_matrix_grads=True)
+    _backward(weight, torch.randn(ROWS, COLS))
+    with pytest.warns(UserWarning, match="dropped 1 prepared"):
+        optimizer.zero_grad()
+    before = weight.detach().clone()
+    optimizer.step()
+    assert torch.equal(weight, before)
+
+
+def test_state_dict_resume_matches_uninterrupted_run():
+    torch.manual_seed(1)
+    first = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    first_optimizer = UsuiTrack([first], lr=0.01, rank_fraction=RANK_FRACTION)
+    _run([first], first_optimizer, 2)
+
+    second = torch.nn.Parameter(first.detach().clone())
+    second_optimizer = UsuiTrack([second], lr=0.01, rank_fraction=RANK_FRACTION)
+    second_optimizer.load_state_dict(copy.deepcopy(first_optimizer.state_dict()))
+
+    gradient = torch.randn_like(first)
+    first.grad = gradient.clone()
+    second.grad = gradient.clone()
+    first_optimizer.step()
+    second_optimizer.step()
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+
+
+def test_a_loaded_group_is_the_one_the_step_reads():
+    """torch rebuilds the group dicts on load; a hyperparameter changed through
+    `param_groups` afterwards must reach the matrices that release hooks prepare."""
+
+    torch.manual_seed(1)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], rank_fraction=RANK_FRACTION, release_matrix_grads=True)
+    optimizer.load_state_dict(optimizer.state_dict())
+    optimizer.param_groups[0]["side"] = "left"
+
+    _backward(weight, torch.randn(ROWS, COLS))
+    optimizer.step()
+    assert tuple(optimizer.state[weight]["frame"].shape) == (ROWS, RANK)
 
 
 def test_the_moment_averages_unit_gradients_and_the_step_is_its_polar_factor():
     """The average runs on gradients, and the polar map runs once, on the average.
 
-    Written out at the integration site, because that is where the order lives:
-    one step from a zero moment must leave `(1 - beta)` of the projected
-    gradient at unit norm in state -- not of its polar factor -- and the weight
-    must move by the polar factor of that moment at unit norm, not by the moment.
+    One step from a zero moment leaves `(1 - beta)` of the projected gradient at
+    unit norm in state -- not of its polar factor -- and the weight moves by the
+    polar factor of that moment at unit norm, lifted through the frame that
+    measured it, at `lr` of the weight's norm.
     """
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
     before = weight.detach().clone()
-    optimizer = UsuiTrack([weight], lr=0.1, rank_fraction=RANK_FRACTION, side="right", beta=0.9, weight_decay=0.0)
+    optimizer = UsuiTrack([weight], lr=0.1, rank_fraction=RANK_FRACTION, beta=0.9)
 
     gradient = torch.randn(ROWS, COLS)
     weight.grad = gradient.clone()
     optimizer.step()
 
     state = optimizer.state[weight]
-    basis = state["basis"]
-    projected = gradient @ basis.mT
-
-    torch.testing.assert_close(state["projected_exp_avg"].float(), 0.1 * projected / projected.norm(), atol=1e-6, rtol=0)
-    # The frame does not move on the step that fits it, so the update lifts
-    # through the same basis the moment lives in, sized by the weight it lands on.
-    direction = UsuiTrack._orthogonalize_update(projected, UsuiTrack._unit_direction_scale(tuple(projected.shape)))
-    torch.testing.assert_close((before - weight.detach()) / (0.1 * before.norm()), direction @ basis, atol=1e-4, rtol=0)
+    q = state["frame"]
+    projected = gradient @ q
+    torch.testing.assert_close(state["moment"], 0.1 * projected / projected.norm(), atol=1e-6, rtol=0)
+    (direction,) = unit_polar([projected])
+    torch.testing.assert_close((before - weight.detach()) / (0.1 * before.norm()), direction @ q.mT, atol=1e-4, rtol=0)
 
 
 def test_a_contested_direction_steps_as_far_as_an_agreed_one():
     """The moment decides where the step points, never how far it goes.
 
-    Both arms feed the moment gradients of identical size; only the sign pattern
-    differs, so one moment grows to full length and the other cancels toward
-    the white floor. `G` and `-G` share `G^T G`, so a frame fitted on either is
-    a fixed point of both streams and the frame contributes nothing to the
-    difference. The polar map discards the moment's length, so both arms move
-    their weight by `lr` of its norm.
+    Both arms feed gradients of identical size; only the sign pattern differs,
+    so one moment grows to full length and the other cancels. `G` and `-G`
+    share `G^T G`, so the frame contributes nothing to the difference.
     """
 
     lr = 0.01
@@ -274,7 +212,7 @@ def test_a_contested_direction_steps_as_far_as_an_agreed_one():
     def final_relative_step(signs: list[int]) -> float:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
+        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, beta=0.9)
         gradient = torch.randn(ROWS, COLS)
         for sign in signs:
             before = weight.detach().clone()
@@ -287,527 +225,33 @@ def test_a_contested_direction_steps_as_far_as_an_agreed_one():
     assert final_relative_step([1, -1] * 4) == pytest.approx(lr, rel=0.1)
 
 
-def test_moment_persistence_reads_zero_on_an_independent_stream():
-    """The metric must subtract its own floor, or it can never reach zero.
-
-    An EMA of independent constant-norm directions has norm
-    `sqrt((1-beta)/(1+beta))` from incomplete cancellation alone -- 0.229 at
-    beta 0.9 -- so the raw ratio reports "agreement" for a stream that has none.
-    Fed white noise the corrected read sits at zero; fed one repeated direction
-    it sits at one.
-    """
-    def persistence(repeat: bool) -> float:
-        torch.manual_seed(0)
-        weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-        optimizer = UsuiTrack([weight], lr=1e-4, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
-        optimizer.diagnostics = "full"
-        fixed = torch.randn(ROWS, COLS)
-        for _ in range(200):
-            weight.grad = fixed.clone() if repeat else torch.randn(ROWS, COLS)
-            optimizer.step()
-            if _ == 149:
-                optimizer.pop_diagnostics()  # drop the acquisition transient
-        return optimizer.pop_diagnostics()["moment_persistence"]
-
-    assert abs(persistence(repeat=False)) < 0.05, persistence(repeat=False)
-    assert persistence(repeat=True) > 0.9, persistence(repeat=True)
-
-
 def test_the_update_is_invariant_to_gradient_scale():
-    """Why there is no gradient clip: nothing downstream can see the magnitude.
+    """Why there is no gradient clip: nothing downstream sees the magnitude.
 
-    Each step's projected gradient enters the moment at unit norm, so a per-step
-    rescale -- which is exactly what a clip is -- cannot reach the average. The aim is scale-free for its own reason: `action` and
-    `rayleigh` are both quadratic in `G`, so their ratio cancels the factor.
-    A 180x blip is the case the clip existed for, and it is included here.
+    Each projected gradient enters the moment at unit norm, and the Oja tangent
+    divides two quadratics in `G`. A 180x blip is included.
     """
 
     def trajectory(scales: list[float]) -> tuple[Tensor, Tensor]:
         torch.manual_seed(0)
         weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-        optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", beta=0.9)
+        optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, beta=0.9)
         generator = torch.Generator().manual_seed(7)
         for scale in scales:
             weight.grad = torch.randn(ROWS, COLS, generator=generator) * scale
             optimizer.step()
-        return weight.detach().clone(), optimizer.state[weight]["projected_exp_avg"].float()
+        return weight.detach().clone(), optimizer.state[weight]["moment"].clone()
 
-    blip = [180.0 if step == 5 else 1.0 for step in range(12)]
-    scaled, scaled_moment = trajectory(blip)
+    scaled, scaled_moment = trajectory([180.0 if step == 5 else 1.0 for step in range(12)])
     unit, unit_moment = trajectory([1.0] * 12)
-
     torch.testing.assert_close(scaled, unit, atol=1e-5, rtol=0)
     torch.testing.assert_close(scaled_moment, unit_moment, atol=1e-4, rtol=0)
 
 
-def test_polar_factor_of_a_frame_overlap_is_orthogonal():
-    """`_record_frame_rotation` needs the rotation part of the overlap alone."""
-    torch.manual_seed(0)
-    first = torch.linalg.qr(torch.randn(ROWS, RANK))[0]
-    second = torch.linalg.qr(first + 0.01 * torch.randn(ROWS, RANK))[0]
-    overlap = first.mT @ second
-
-    rotation = SubspaceProjector.polar_factor(overlap)
-
-    identity = torch.eye(RANK)
-    # One Polar Express iteration, so orthogonality holds to ~1e-5 rather than
-    # to machine precision. That is two orders below the in-span rotation this
-    # exists to remove, which is what the tolerance has to clear.
-    torch.testing.assert_close(rotation.mT @ rotation, identity, atol=1e-4, rtol=0)
-    # The residue after the rotation is taken out is the symmetric part the
-    # geodesic already accounts for.
-    remainder = overlap @ rotation.mT
-    torch.testing.assert_close(remainder, remainder.mT, atol=1e-4, rtol=0)
-
-
-def test_frame_rotation_is_the_identity_when_transport_is_exact():
-    """In fp32 the geodesic's own overlap is symmetric, so nothing is corrected.
-
-    This is the property that makes the correction safe: it fires on the
-    deviation between the frame computed and the frame stored, and on a path
-    with no rounding there is no deviation.
-    """
-
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    # Captured from the commit, because step() clears its own bookkeeping before
-    # returning -- read afterwards this asserted nothing at all.
-    rotations = []
-    commit = optimizer._commit_moments
-
-    def capture(entries):
-        rotations.extend(entry.frame_rotation for entry in entries)
-        return commit(entries)
-
-    optimizer._commit_moments = capture
-    _run(params, optimizer, 4)
-
-    observed = [rotation for rotation in rotations if rotation is not None]
-    assert len(observed) == 6, "one rotation per matrix per basis update after the fitting step"
-    for rotation in observed:
-        torch.testing.assert_close(rotation, torch.eye(rotation.shape[-1]), atol=1e-5, rtol=0)
-
-
-def test_diagnostics_are_inert_until_enabled():
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    _run(params, optimizer, 3)
-
-    assert optimizer.pop_diagnostics() == {}
-    # Nothing was allocated to hold telemetry nobody asked for.
-    assert optimizer._diagnostics is None
-
-
-def test_core_diagnostics_read_sane_values():
-    """No fixed key set here on purpose: a metric added or removed at `core`
-    should need no test update to be noticed, only a look at what it reads."""
-
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics = "core"
-    # Three steps: the first fits the frame, so basis motion only exists after it.
-    _run(params, optimizer, 3)
-
-    diagnostics = optimizer.pop_diagnostics()
-    assert -1.0 <= diagnostics["grad_moment_cosine"] <= 1.0
-    assert all(isinstance(value, float) for value in diagnostics.values())
-    assert all(value == value for value in diagnostics.values()), diagnostics
-
-    assert diagnostics["transport_speed"] > 0
-    # fp32 frames store the geodesic exactly, so there is no in-span turn to correct.
-    assert 0.0 <= diagnostics["transport_correction"] < 1e-4
-    assert 1.0 / RANK <= diagnostics["tangent_concentration"] <= 1.0
-    # Capture is a fraction of the gradient the frame holds, so it cannot exceed one.
-    assert 0.0 < diagnostics["grad_capture"] <= 1.0 + 1e-6
-    assert diagnostics["raw_grad_norm"] > 0
-    # A healthy aim resolves every plane above the Gram's noise floor.
-    assert diagnostics["tangent_live_fraction"] == 1.0
-    assert diagnostics["relative_step"] > 0
-    assert diagnostics["nonfinite_grads"] == 0.0
-
-
-def test_role_reads_partition_the_fleet_read_only_when_asked_for():
-    """Each role's read is the mean over its own matrices, so the fleet read is
-    their matrix-weighted mean. Labelling matrices alone publishes no role key:
-    the breakout is per read, by name."""
-
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    lone = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer.add_param_group({"params": [lone]})
-    all_params = [*params, lone]
-    _run(all_params, optimizer, 3)
-    optimizer.diagnostic_roles = {params[0]: "pair", params[1]: "pair", lone: "lone"}
-    optimizer.diagnostics = "core"
-    _run(all_params, optimizer, 1)
-    assert not [key for key in optimizer.pop_diagnostics() if "/" in key]
-
-    optimizer.diagnostic_role_reads = {"grad_capture", "grad_moment_cosine"}
-    _run(all_params, optimizer, 1)
-
-    diagnostics = optimizer.pop_diagnostics()
-    assert sorted(key for key in diagnostics if "/" in key) == [
-        "grad_capture/lone",
-        "grad_capture/pair",
-        "grad_moment_cosine/lone",
-        "grad_moment_cosine/pair",
-    ]
-    pair, single = diagnostics["grad_capture/pair"], diagnostics["grad_capture/lone"]
-    assert 0.0 < pair < 1.0 and 0.0 < single < 1.0
-    assert diagnostics["grad_capture"] == pytest.approx((2 * pair + single) / 3, rel=1e-6)
-    pair, single = diagnostics["grad_moment_cosine/pair"], diagnostics["grad_moment_cosine/lone"]
-    assert diagnostics["grad_moment_cosine"] == pytest.approx((2 * pair + single) / 3, rel=1e-5, abs=1e-7)
-
-
-def test_role_reads_reject_an_unknown_read():
-    _, optimizer = _two_matrix_optimizer()
-    with pytest.raises(ValueError, match="diagnostic_role_reads"):
-        optimizer.diagnostic_role_reads = {"grad_captur"}
-
-
-def test_relative_step_reads_the_whole_step_against_the_whole_weight():
-    """In fp32 the parameters move by exactly `lr U`, so the read must equal the
-    realised change of every matrix against their norm -- the joint Frobenius
-    ratio, not a mean over matrices."""
-
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    # Both groups at an lr large enough that `param - old` resolves the change
-    # in fp32; the lone matrix in a group of its own.
-    optimizer.param_groups[0]["lr"] = 1e-1
-    lone = torch.nn.Parameter(torch.randn(ROWS, COLS) * 3)
-    optimizer.add_param_group({"params": [lone], "lr": 1e-1})
-    all_params = [*params, lone]
-    _run(all_params, optimizer, 2)
-    optimizer.diagnostics = "core"
-
-    before = [param.detach().clone() for param in all_params]
-    _run(all_params, optimizer, 1)
-    change = [(param.detach() - old).norm() for param, old in zip(all_params, before, strict=True)]
-    norm = [param.detach().norm() for param in all_params]
-
-    expected = torch.stack(change).square().sum().sqrt() / torch.stack(norm).square().sum().sqrt()
-    assert optimizer.pop_diagnostics()["relative_step"] == pytest.approx(float(expected), rel=1e-4)
-
-
-def test_pop_diagnostics_clears_the_window():
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics = "core"
-    _run(params, optimizer, 2)
-
-    assert optimizer.pop_diagnostics()
-    # A second read with no steps in between has nothing to report, rather than
-    # repeating the previous window's numbers.
-    assert optimizer.pop_diagnostics() == {}
-    _run(params, optimizer, 1)
-    assert optimizer.pop_diagnostics()
-
-
-def test_nonfinite_gradients_are_counted_not_averaged():
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics = "core"
-    _run(params, optimizer, 2)
-    optimizer.pop_diagnostics()
-
-    for param in params:
-        param.grad = torch.randn_like(param)
-    params[0].grad[0, 0] = float("nan")
-    optimizer.step()
-
-    diagnostics = optimizer.pop_diagnostics()
-    assert diagnostics["nonfinite_grads"] == 1.0
-    assert torch.isfinite(params[0]).all()
-
-
-def test_diagnostics_do_not_change_the_trajectory():
-    torch.manual_seed(0)
-    quiet_params, quiet = _two_matrix_optimizer()
-    torch.manual_seed(0)
-    loud_params, loud = _two_matrix_optimizer()
-    loud.diagnostics = "core"
-
-    torch.manual_seed(1)
-    _run(quiet_params, quiet, 4)
-    torch.manual_seed(1)
-    _run(loud_params, loud, 4)
-
-    for quiet_param, loud_param in zip(quiet_params, loud_params, strict=True):
-        assert torch.equal(quiet_param, loud_param)
-
-
-def test_no_second_moment_state_is_allocated():
-    """UsuiTrack keeps a basis and a projected first moment. Nothing else."""
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    _run(params, optimizer, 4)
-
-    for param in params:
-        assert set(optimizer.state[param]) == {
-            "basis",
-            "projection_side_is_right",
-            "projected_exp_avg",
-            "step",
-        }
-
-
-def test_state_bytes_count_only_matrix_state():
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    _run(params, optimizer, 1)
-
-    state_bytes = optimizer_state_bytes_by_category(optimizer)
-    assert state_bytes["matrix"] > 0
-    assert state_bytes["fallback"] == 0
-    assert state_bytes["total"] == state_bytes["matrix"]
-    assert optimizer_state_bytes(optimizer) == state_bytes["total"]
-
-
-def test_agreement_reads_the_moment_before_this_step_not_after():
-    """The post-update moment contains `1-beta` of this very gradient, so a
-    cosine against it would partly measure the gradient against itself. A first
-    step, where the prior moment is exactly zero, is the sharpest case: the
-    post-update moment is a pure multiple of this gradient, so a naive read
-    would report perfect agreement where there is no history to agree with."""
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics = "core"
-    _run(params, optimizer, 1)
-
-    cosine = optimizer.pop_diagnostics()["grad_moment_cosine"]
-    assert abs(cosine) < 1e-6, cosine
-
-
-def test_basis_lag_is_off_until_asked_for_and_measures_frame_motion():
-    torch.manual_seed(0)
-    params, optimizer = _two_matrix_optimizer()
-    optimizer.diagnostics = "core"
-    _run(params, optimizer, 8)
-    assert "transport_lag" not in optimizer.pop_diagnostics()
-    assert optimizer._lag_snapshots == {}
-
-    optimizer.diagnostics = "full"
-    optimizer.diagnostics_lag_interval = 2
-    _run(params, optimizer, 8)
-    drained = optimizer.pop_diagnostics()
-    lag = drained["transport_lag"]
-    # A frame under random gradients keeps moving, so the sine is real but is a
-    # sine: bounded by 1 whatever the frame does.
-    assert 0.0 < lag <= 1.0, lag
-    # Curve is a fraction of a path that cancelled, so it cannot exceed one and
-    # cannot be negative unless the lag exceeded the path that produced it.
-    assert 0.0 <= drained["transport_curve"] < 1.0, drained["transport_curve"]
-    assert drained["transport_spin"] >= 0.0
-
-
-def test_basis_lag_metric_is_the_sine_of_the_principal_angle():
-    """Check the quantity itself, not the plumbing: zero for a frame compared
-    against itself, and exactly sin(theta) for a frame rotated by theta in one
-    plane. This is the property the instrument exists for -- it must vanish iff
-    motion vanishes, and it must not saturate at the small angles we expect."""
-    torch.manual_seed(0)
-    frame, _ = torch.linalg.qr(torch.randn(64, 4))
-
-    def rms_sin(current, previous):
-        residual = current - previous @ (previous.mT @ current)
-        return float(residual.norm() / (current.shape[1] ** 0.5))
-
-    assert rms_sin(frame, frame) < 1e-6
-
-    for theta in (1e-4, 1e-2, 0.3):
-        rotated = frame.clone()
-        # Rotate one plane by theta, out of the span, keeping the frame orthonormal.
-        outside = torch.linalg.qr(torch.randn(64, 1))[0]
-        outside = outside - frame @ (frame.mT @ outside)
-        outside = outside / outside.norm()
-        rotated[:, 0] = frame[:, 0] * math.cos(theta) + outside[:, 0] * math.sin(theta)
-        # One plane of four moved by theta, so the RMS sine is sin(theta)/2.
-        assert abs(rms_sin(rotated, frame) - math.sin(theta) / 2) < 1e-5, theta
-
-
-def test_spin_separates_in_span_rotation_from_subspace_motion():
-    """The property spin exists for: it must see the motion lag is blind to.
-
-    Rotating a frame's columns among themselves moves the subspace not at all,
-    so lag reads zero -- and it renames every coordinate the projected moment is
-    stored in, which under identity transport is total corruption. Spin is the
-    skew part of `Q_old^T Q_new`, which is exactly zero for the symmetric
-    overlap a single Grassmann geodesic produces and nonzero here.
-    """
-    torch.manual_seed(0)
-    frame, _ = torch.linalg.qr(torch.randn(64, 8))
-
-    def reads(current, previous):
-        root = current.shape[1] ** 0.5
-        overlap = previous.mT @ current
-        lag = float((current - previous @ overlap).norm() / root)
-        spin = float((overlap - overlap.mT).norm() / (2.0 * root))
-        return lag, spin
-
-    # A pure in-span rotation: same span, different columns.
-    theta = 0.2
-    rotation = torch.eye(8)
-    rotation[0, 0] = rotation[1, 1] = math.cos(theta)
-    rotation[0, 1], rotation[1, 0] = -math.sin(theta), math.sin(theta)
-    lag, spin = reads(frame @ rotation, frame)
-    assert lag < 1e-6, lag
-    assert spin > 0.05, spin
-
-    # One exact Grassmann geodesic: the overlap is `V cos(theta) V^T`, symmetric,
-    # so all of the motion lands in lag and none of it in spin.
-    tangent = torch.randn(64, 8)
-    tangent = tangent - frame @ (frame.mT @ tangent)
-    values, vectors = torch.linalg.eigh(0.5 * (tangent.mT @ tangent + (tangent.mT @ tangent).mT))
-    moved = SubspaceProjector.oja_geodesic_from_eigh(frame, tangent, values, vectors, 0.05)
-    lag, spin = reads(moved, frame)
-    assert lag > 1e-3, lag
-    assert spin < 1e-5, spin
-
-
-def test_the_frame_turns_from_the_very_first_basis_update():
-    """There is no cold start any more, and that is a deliberate change.
-
-    The gain used to return zero with no history -- no evidence the aim repeats,
-    no turn -- which is what kept the first update off the stability cliff back
-    when a full-magnitude turn at an `eta` chosen for a scale near 0.05 failed
-    `eigh` outright. Masking dead planes removed that cliff: the failure was
-    rounding artifacts promoted to unit-norm directions by `1 / sigma`, not step
-    size. With a constant turn there is no history to wait for, so the first
-    update turns like every other one.
-    """
-
-    def moved(before, after):
-        residual = after.mT - before.mT @ (before @ after.mT)
-        return float(residual.norm() / math.sqrt(RANK))
-
-    torch.manual_seed(0)
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
-
-    _run([weight], optimizer, 1)
-    first = optimizer.state[weight]["basis"].clone().float()
-    _run([weight], optimizer, 1)
-    assert moved(first, optimizer.state[weight]["basis"].float()) > 1e-3
-
-
-def test_every_live_plane_turns_by_exactly_eta():
-    """The turn is `eta`, not `eta` times a meter, and that is now an equality.
-
-    Every live plane of the polar tangent has singular value one, so the geodesic
-    takes the angle `eta` on each of them and the chordal residual per plane is
-    `sin(eta)`. Under the agreement gain this could only be asserted as an upper
-    bound; with a constant turn the bound is the value, which is the sharpest
-    statement available that no magnitude survives into the frame's motion.
-    """
-
-    torch.manual_seed(0)
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
-    optimizer.diagnostics = "core"
-    _run([weight], optimizer, 12)
-
-    before = optimizer.state[weight]["basis"].clone().float()
-    _run([weight], optimizer, 1)
-    after = optimizer.state[weight]["basis"].float()
-
-    drained = optimizer.pop_diagnostics()
-    # The equality below only means "every plane turned by eta" if every plane
-    # was live to begin with.
-    assert drained["tangent_live_fraction"] == 1.0
-    # Chordal distance per plane, the same unit `transport_speed` reports.
-    residual = after.mT - before.mT @ (before @ after.mT)
-    moved = float(residual.norm() / math.sqrt(RANK))
-    assert moved == pytest.approx(math.sin(GEODESIC_STEPSIZE), rel=2e-3), moved
-
-
-def test_diagnostics_tier_rejects_a_typo_instead_of_silently_downgrading():
-    """The failure this guards is silent, which is why it is worth a guard.
-
-    Tiers are string comparisons on the hot path: `"ful"` is not `"off"`, so core
-    switches on, and it is not `"full"`, so the snapshot reads stay off. The run
-    then looks healthy while omitting exactly the telemetry that was asked for.
-    """
-
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
-
-    with pytest.raises(ValueError, match="diagnostics must be one of"):
-        optimizer.diagnostics = "ful"
-    assert optimizer.diagnostics == "off"
-
-    for tier in ("core", "full", "off"):
-        optimizer.diagnostics = tier
-        assert optimizer.diagnostics == tier
-
-
-def test_leaving_the_full_tier_drops_the_snapshot_state():
-    """Snapshots only mean something against a live window.
-
-    Kept across a tier change, the first reading after re-enabling would compare
-    the frame against one from an arbitrarily distant past and report it as one
-    window's travel.
-    """
-
-    torch.manual_seed(0)
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right")
-    optimizer.diagnostics = "full"
-    optimizer.diagnostics_lag_interval = 2
-    _run([weight], optimizer, 6)
-    assert optimizer._lag_snapshots
-
-    optimizer.diagnostics = "core"
-    assert optimizer._lag_snapshots == {}
-    assert optimizer._lag_path == {}
-
-
-def test_compiled_and_eager_kernels_produce_the_same_update():
-    """The guard for the defect this file did not have.
-
-    `compile_tensor_kernels` used to select a *second* implementation of the
-    orthogonalization -- one that hardcoded the aspect scale while the eager one
-    read a four-way mode constant -- so the optimizer's update depended on a
-    compile flag and nothing here was watching. There is one implementation now
-    and `torch.compile` wraps it, which is a property worth holding rather than
-    a state of affairs worth assuming: this fails the moment a compiled path
-    grows its own copy of the maths again.
-
-    Tolerance rather than bitwise identity, because Inductor is free to fuse and
-    reorder float operations. What is being asserted is that the two paths
-    compute the same function, not that they emit the same instructions.
-    """
-
-    torch.manual_seed(0)
-    base = torch.randn(ROWS, COLS)
-    gradients = [torch.randn(ROWS, COLS) for _ in range(4)]
-
-    trained = []
-    for compiled in (False, True):
-        weight = torch.nn.Parameter(base.clone())
-        optimizer = UsuiTrack(
-            [weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right", compile_tensor_kernels=compiled
-        )
-        for gradient in gradients:
-            weight.grad = gradient.clone()
-            optimizer.step()
-        trained.append(weight.detach().clone())
-
-    torch.testing.assert_close(trained[0], trained[1], rtol=1e-5, atol=1e-6)
-
-
 def test_lr_is_the_relative_step_in_every_module():
-    """The step's unit (SPEC step 8): `||dW|| / ||W||` is `lr`.
-
-    Shape, rank and the weight's size used to set how hard a module was pushed
-    -- Muon's aspect factor and the polar factor's `sqrt(r)` -- which on Anima
-    spread one `lr` 80x across roles and gave the network's two narrowest
-    matrices its largest relative steps. None of them enters: the step is the
-    moment's polar factor at unit norm, so every module, tall, wide or scaled,
-    moves by `lr` of its own norm. The polar map's singular values are not
-    exactly one, hence a tolerance on the shapes; the weight's scale enters
-    exactly.
-    """
+    """SPEC step 8: `||dW|| / ||W||` is `lr` whatever the shape, side or scale.
+    The polar map's singular values are not exactly one, hence a tolerance on
+    shapes; the weight's scale enters exactly."""
 
     lr = 1e-2
 
@@ -815,7 +259,7 @@ def test_lr_is_the_relative_step_in_every_module():
         torch.manual_seed(0)
         weight = torch.nn.Parameter(weight_scale * torch.randn(*shape))
         before = weight.detach().clone()
-        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION, weight_decay=0.0)
+        optimizer = UsuiTrack([weight], lr=lr, rank_fraction=RANK_FRACTION)
         weight.grad = torch.randn(*shape)
         optimizer.step()
         return ((before - weight.detach()).norm() / before.norm()).item()
@@ -826,18 +270,35 @@ def test_lr_is_the_relative_step_in_every_module():
         assert relative_step(shape, 1.0) == pytest.approx(lr, rel=0.1)
 
 
-def test_matrices_sharing_a_projected_shape_but_not_a_shape_still_bucket_correctly():
-    """The bucketing win: keying on the projected shape lets differently-shaped
-    matrices batch into one Newton-Schulz call. `projected_exp_avg` for a
-    right-tracked matrix is `(rows, r)` and never encodes `cols`, so two matrices
-    with equal `rows` and equal rank land in one bucket. Must train identically
-    whether they share an optimizer or not -- the grouping is bookkeeping, not
-    maths.
-    """
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_a_forced_side_is_the_transposed_problem(side):
+    """SPEC identity: transposing the problem and swapping sides transposes the update."""
+
+    torch.manual_seed(0)
+    base = torch.randn(ROWS, COLS)
+    gradients = [torch.randn(ROWS, COLS) for _ in range(4)]
+    swapped = {"left": "right", "right": "left"}[side]
+
+    weight = torch.nn.Parameter(base.clone())
+    transposed = torch.nn.Parameter(base.mT.clone())
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side=side)
+    mirror = UsuiTrack([transposed], lr=0.01, rank_fraction=RANK_FRACTION, side=swapped)
+    for gradient in gradients:
+        weight.grad = gradient.clone()
+        transposed.grad = gradient.mT.clone()
+        optimizer.step()
+        mirror.step()
+    torch.testing.assert_close(weight, transposed.mT, rtol=1e-5, atol=1e-6)
+
+
+def test_matrices_sharing_a_moment_shape_but_not_a_shape_batch_correctly():
+    """Keying the polar batch on the moment's shape lets differently-shaped
+    matrices share one Newton-Schulz call; grouping is bookkeeping, not maths.
+    Not bitwise: batched and solo calls round differently at the ulp level."""
 
     torch.manual_seed(5)
     shapes = [(64, 512), (64, 520)]
-    assert len({SubspaceProjector(rank_fraction=RANK_FRACTION).effective_rank(torch.empty(*shape)) for shape in shapes}) == 1
+    assert len({frame.rank(torch.Size(shape), RANK_FRACTION) for shape in shapes}) == 1
     base = {shape: torch.randn(*shape) for shape in shapes}
     gradients = {shape: [torch.randn(*shape) for _ in range(6)] for shape in shapes}
 
@@ -849,14 +310,138 @@ def test_matrices_sharing_a_projected_shape_but_not_a_shape_still_bucket_correct
         optimizer.step()
 
     separate = {shape: torch.nn.Parameter(base[shape].clone()) for shape in shapes}
-    solo_optimizers = {shape: UsuiTrack([separate[shape]], lr=0.01, rank_fraction=RANK_FRACTION, side="right") for shape in shapes}
+    solo = {shape: UsuiTrack([separate[shape]], lr=0.01, rank_fraction=RANK_FRACTION, side="right") for shape in shapes}
     for step in range(6):
         for shape in shapes:
             separate[shape].grad = gradients[shape][step].clone()
-            solo_optimizers[shape].step()
+            solo[shape].step()
 
-    # Not bitwise: batched and per-matrix Newton-Schulz call different BLAS
-    # kernels, so they round differently at the ulp level -- the same tolerance
-    # every other batched-vs-solo comparison in this file already carries.
     for shape in shapes:
         torch.testing.assert_close(together[shape], separate[shape], rtol=1e-5, atol=1e-6)
+
+
+def test_the_frame_turns_from_the_very_first_basis_update():
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
+    _run([weight], optimizer, 1)
+    first = optimizer.state[weight]["frame"].clone()
+    _run([weight], optimizer, 1)
+    after = optimizer.state[weight]["frame"]
+    assert float((after - first @ (first.mT @ after)).norm() / math.sqrt(RANK)) > 1e-3
+
+
+def test_every_live_plane_turns_by_exactly_eta():
+    """The turn is `eta`, not `eta` times a meter: each live plane of the polar
+    tangent has singular value one, so the chordal residual per plane is `sin(eta)`."""
+
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, diagnostics=True)
+    _run([weight], optimizer, 12)
+
+    before = optimizer.state[weight]["frame"].clone()
+    _run([weight], optimizer, 1)
+    after = optimizer.state[weight]["frame"]
+
+    # The equality only means "every plane turned by eta" if every plane was live.
+    assert optimizer.pop_diagnostics()["tangent_live_fraction"] == 1.0
+    moved = float((after - before @ (before.mT @ after)).norm() / math.sqrt(RANK))
+    assert moved == pytest.approx(math.sin(GEODESIC_STEPSIZE), rel=2e-3), moved
+
+
+def test_diagnostics_are_inert_until_enabled():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer()
+    _run(params, optimizer, 3)
+    assert optimizer.diagnostics is None
+    assert optimizer.pop_diagnostics() == {}
+
+
+def test_every_read_is_published_sane_and_describes_itself():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer(diagnostics=True)
+    # Three steps: the first fits the frame, so frame motion only exists after it.
+    _run(params, optimizer, 3)
+
+    diagnostics = optimizer.pop_diagnostics()
+    assert set(diagnostics) == set(READS)
+    assert all(isinstance(value, float) and value == value for value in diagnostics.values()), diagnostics
+    assert -1.0 <= diagnostics["grad_moment_cosine"] <= 1.0
+    # Capture is the share of the gradient the frame holds, so it cannot exceed one.
+    assert 0.0 < diagnostics["grad_capture"] <= 1.0 + 1e-6
+    assert diagnostics["tangent_live_fraction"] == 1.0
+    assert diagnostics["nonfinite_grads"] == 0.0
+
+
+def test_relative_step_reads_the_whole_step_against_the_whole_weight():
+    """In fp32 the parameters move by exactly `lr U`, so the read is the joint
+    Frobenius ratio of every matrix's change, not a mean over matrices."""
+
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer(diagnostics=True)
+    optimizer.param_groups[0]["lr"] = 1e-1
+    lone = torch.nn.Parameter(torch.randn(ROWS, COLS) * 3)
+    optimizer.add_param_group({"params": [lone], "lr": 1e-1})
+    all_params = [*params, lone]
+    _run(all_params, optimizer, 2)
+    optimizer.pop_diagnostics()
+
+    before = [param.detach().clone() for param in all_params]
+    _run(all_params, optimizer, 1)
+    change = torch.stack([(param.detach() - old).norm() for param, old in zip(all_params, before, strict=True)])
+    norm = torch.stack([param.detach().norm() for param in all_params])
+    expected = change.square().sum().sqrt() / norm.square().sum().sqrt()
+    assert optimizer.pop_diagnostics()["relative_step"] == pytest.approx(float(expected), rel=1e-4)
+
+
+def test_pop_diagnostics_clears_the_window():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer(diagnostics=True)
+    _run(params, optimizer, 2)
+
+    assert optimizer.pop_diagnostics()
+    assert optimizer.pop_diagnostics() == {}
+    _run(params, optimizer, 1)
+    assert optimizer.pop_diagnostics()
+
+
+def test_nonfinite_gradients_are_counted_and_sanitized():
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer(diagnostics=True)
+    _run(params, optimizer, 2)
+    optimizer.pop_diagnostics()
+
+    for param in params:
+        param.grad = torch.randn_like(param)
+    params[0].grad[0, 0] = float("nan")
+    optimizer.step()
+
+    drained = optimizer.pop_diagnostics()
+    assert drained["nonfinite_grads"] == 1.0
+    # The bad gradient is flagged, not allowed to take the window's means to NaN.
+    assert math.isfinite(drained["grad_capture"])
+    assert torch.isfinite(params[0]).all()
+
+
+def test_diagnostics_do_not_change_the_trajectory():
+    torch.manual_seed(0)
+    quiet_params, quiet = _two_matrix_optimizer()
+    torch.manual_seed(0)
+    loud_params, loud = _two_matrix_optimizer(diagnostics=True)
+
+    torch.manual_seed(1)
+    _run(quiet_params, quiet, 4)
+    torch.manual_seed(1)
+    _run(loud_params, loud, 4)
+    for quiet_param, loud_param in zip(quiet_params, loud_params, strict=True):
+        assert torch.equal(quiet_param, loud_param)
+
+
+def test_agreement_reads_the_moment_before_this_step_not_after():
+    """On a first step the prior moment is zero, so a cosine against the
+    post-blend moment would report perfect agreement with no history."""
+    torch.manual_seed(0)
+    params, optimizer = _two_matrix_optimizer(diagnostics=True)
+    _run(params, optimizer, 1)
+    assert abs(optimizer.pop_diagnostics()["grad_moment_cosine"]) < 1e-6

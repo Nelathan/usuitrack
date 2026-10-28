@@ -4,6 +4,7 @@ import argparse
 import gc
 import json
 import re
+import sys
 import time
 import types
 from collections.abc import Mapping, Sequence
@@ -16,8 +17,14 @@ import torch
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from usuitrack import StochasticAdamW, SubspaceProjector, UsuiTrack, optimizer_state_bytes_by_category
+from usuitrack import StochasticAdamW, UsuiTrack
+from usuitrack import frame as usuitrack_frame
 import usuitrack.optimizer as usuitrack_optimizer
+
+if not __package__:
+    # Run by path, which puts experiments/ on sys.path rather than the repo root.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from experiments.lab_diagnostics import LabDiagnostics
 
 
 DEFAULT_MODEL = "LiquidAI/LFM2.5-350M-Base"
@@ -182,14 +189,13 @@ def gradient_norm(params: list[torch.nn.Parameter]) -> torch.Tensor:
 
 @torch.no_grad()
 def gradient_norm_statistics(
-    params: list[torch.nn.Parameter], clip_norm: float, extra_norms=()
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    params: list[torch.nn.Parameter], extra_norms=()
+) -> tuple[torch.Tensor, torch.Tensor]:
     norms = torch.stack(
         [param.grad.detach().float().norm() for param in params if param.grad is not None]
         + [norm.detach().float() for norm in extra_norms]
     )
-    clipped_fraction = (norms > clip_norm).float().mean() if clip_norm > 0 else None
-    return norms.norm(), norms.median(), clipped_fraction
+    return norms.norm(), norms.median()
 
 
 def scalar(value: float | int | torch.Tensor) -> float:
@@ -216,44 +222,14 @@ def last_finite_scalar(values: list[float | int | torch.Tensor | None]) -> float
     return float("nan")
 
 
-def install_random_basis_init() -> None:
-    """Replace EIGH initialization with a random orthonormal frame.
+def optimizer_state_bytes_by_category(optimizer: torch.optim.Optimizer) -> dict[str, int]:
+    """Optimizer state bytes, split into UsuiTrack's matrix state and anything else."""
 
-    Diagnostic only, and deliberately a harness-side patch rather than an
-    optimizer argument: it exists to ask whether Oja's tracking equilibrium is a
-    property of the aim or of where EIGH happens to start it. If a random start
-    converges to the same residual an EIGH start settles to, that residual is the
-    aim's own fixed point.
-    """
-
-    def random_fit(self, matrix):
-        side = self.effective_side(matrix)
-        rank = self.effective_rank(matrix)
-        rows = matrix.shape[1] if side == "right" else matrix.shape[0]
-        seed_matrix = torch.randn(rows, rank, device=matrix.device, dtype=torch.float32)
-        frame, _ = torch.linalg.qr(seed_matrix)
-        basis = frame.mT if side == "right" else frame
-        self.basis = basis.to(device=matrix.device, dtype=matrix.dtype).contiguous()
-        self.resolved_side = side
-        return self.basis
-
-    SubspaceProjector.fit = torch.no_grad()(random_fit)
-
-
-def drop_bases_for_refit(optimizer) -> None:
-    """Force a fresh EIGH fit on the next gradient by discarding the frames.
-
-    This is the `eigh at interval` fallback: an uninitialized projector refits
-    from the gradient it next sees instead of moving geodesically. The projected
-    moment survives, since its shape does not change.
-    """
-
-    for group in optimizer.param_groups:
-        for param in group["params"]:
-            state = optimizer.state.get(param)
-            if state:
-                state.pop("basis", None)
-                state.pop("projection_side_is_right", None)
+    totals = {"matrix": 0, "fallback": 0}
+    for state in optimizer.state.values():
+        state_bytes = sum(value.numel() * value.element_size() for value in state.values() if torch.is_tensor(value))
+        totals["matrix" if "frame" in state else "fallback"] += state_bytes
+    return {**totals, "total": totals["matrix"] + totals["fallback"]}
 
 
 def pop_optimizer_diagnostics(optimizer: torch.optim.Optimizer) -> dict[str, float]:
@@ -610,7 +586,7 @@ def build_usuitrack_param_groups(
         side = resolve_tracked_side(name, tuple(param.shape), d_model, side_overrides)
         grouped.setdefault(side, []).append(param)
         if param.ndim == 2:
-            effective_rank = SubspaceProjector(rank_fraction=rank_fraction, side=side).effective_rank(param)
+            effective_rank = usuitrack_frame.rank(param.shape, rank_fraction)
             stats["effective_rank_min"] = effective_rank if not stats["effective_rank_min"] else min(stats["effective_rank_min"], effective_rank)
             stats["effective_rank_max"] = max(stats["effective_rank_max"], effective_rank)
             stats[f"side_policy_{side}_tensors"] += 1
@@ -853,11 +829,9 @@ def train_step(
     batches,
     start_index: int,
     grad_accum_steps: int,
-    grad_clip_norm: float,
     collect_norms: bool,
     fallback_optimizer: torch.optim.Optimizer | None = None,
     fallback_params: Sequence[torch.nn.Parameter] = (),
-    consume_fallback_grads: bool = True,
     collect_memory: bool = False,
     backward_memory_trace: BackwardMemoryTrace | None = None,
     global_clip_params: Sequence[torch.nn.Parameter] = (),
@@ -884,30 +858,30 @@ def train_step(
             sensors.mark("backward")
         losses.append(loss.detach().float())
     if collect_norms:
-        released_grad_norms = optimizer.released_matrix_grad_norms() if hasattr(optimizer, "released_matrix_grad_norms") else ()
-        grad_norm, grad_norm_median_tensor, grad_clip_fraction = gradient_norm_statistics(
-            trainable, grad_clip_norm, released_grad_norms
+        # Under release_matrix_grads the matrix gradients are already freed; their
+        # raw norms wait in the optimizer's pending work until step().
+        pending = getattr(optimizer, "_pending", {})
+        released_grad_norms = tuple(prepared.raw_norm for prepared in pending.values())
+        grad_norm, grad_norm_median_tensor = gradient_norm_statistics(
+            trainable, released_grad_norms
         )
     else:
         grad_norm = float("nan")
         grad_norm_median_tensor = float("nan")
-        grad_clip_fraction = None
     if global_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(global_clip_params, global_clip_norm)
     param_norm = parameter_norm(trainable) if collect_norms else float("nan")
     optimizer.step()
     if fallback_optimizer is not None:
         fallback_optimizer.step()
-        if consume_fallback_grads:
-            for param in fallback_params:
-                param.grad = None
+        for param in fallback_params:
+            param.grad = None
     if sensors is not None:
         sensors.mark("optimizer")
     result = {
         "loss": torch.stack(losses).mean(),
         "grad_norm": grad_norm,
         "grad_norm_median_tensor": grad_norm_median_tensor,
-        "grad_clip_fraction": grad_clip_fraction,
         "param_norm": param_norm,
     }
     if sensors is not None:
@@ -957,8 +931,6 @@ def validate_gradient_release_contract(args) -> None:
         return
     if args.grad_accum_steps != 1:
         raise ValueError("--release-matrix-grads requires --grad-accum-steps 1")
-    if args.keep_grads_after_step:
-        raise ValueError("--release-matrix-grads is incompatible with --keep-grads-after-step")
 
 
 def maybe_compile_training_model(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
@@ -1034,17 +1006,15 @@ def run_optimizer(
             usuitrack_param_groups,
             lr=args.usuitrack_lr,
             beta=args.beta,
-            basis_update_interval=args.basis_update_interval,
-            consume_grad=not args.keep_grads_after_step,
             release_matrix_grads=args.release_matrix_grads,
-            compile_tensor_kernels=args.torch_compile,
         )
         # Accumulated every step and drained on the logging cadence, so each
         # logged point is the interval's mean rather than one sampled step.
-        optimizer.diagnostics = "full" if args.basis_lag_diagnostic else "core"
-        optimizer.diagnostics_lag_interval = args.basis_lag_interval
-        optimizer.diagnostic_roles = {param: matrix_role(name) for name, param in matrix_named}
-        optimizer.diagnostic_role_reads = args.role_reads
+        optimizer.diagnostics = LabDiagnostics(
+            roles={param: matrix_role(name) for name, param in matrix_named},
+            role_reads=tuple(args.role_reads),
+            snapshot_interval=args.basis_lag_interval if args.basis_lag_diagnostic else 0,
+        )
         if fallback_params:
             fallback_optimizer = StochasticAdamW(
                 fallback_params,
@@ -1114,11 +1084,9 @@ def run_optimizer(
             train_batches,
             batch_index,
             args.grad_accum_steps,
-            args.grad_clip_norm,
             False,
             fallback_optimizer,
             fallback_params,
-            not args.keep_grads_after_step,
             global_clip_params=[param for _name, param in adapter_named],
             global_clip_norm=args.lora_grad_clip_norm if optimizer_name == "lora" else None,
         )
@@ -1136,8 +1104,6 @@ def run_optimizer(
         apply_lr_schedule(optimizer, base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio)
         if fallback_optimizer is not None:
             apply_lr_schedule(fallback_optimizer, fallback_base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio)
-        if args.eigh_refit_interval > 0 and global_step > 1 and (global_step - 1) % args.eigh_refit_interval == 0:
-            drop_bases_for_refit(optimizer)
         should_log_train = args.wandb_log_every > 0 and global_step % args.wandb_log_every == 0
         should_eval = args.eval_every > 0 and global_step % args.eval_every == 0
         collect_norms = should_log_train
@@ -1148,11 +1114,9 @@ def run_optimizer(
             train_batches,
             batch_index,
             args.grad_accum_steps,
-            args.grad_clip_norm,
             collect_norms,
             fallback_optimizer,
             fallback_params,
-            not args.keep_grads_after_step,
             global_step == args.max_steps,
             backward_memory_trace if global_step == args.max_steps else None,
             [param for _name, param in adapter_named],
@@ -1168,7 +1132,6 @@ def run_optimizer(
                 "train/loss": train_loss,
                 "train/grad_norm": scalar(step_result["grad_norm"]),
                 "train/grad_norm_median_tensor": scalar(step_result["grad_norm_median_tensor"]),
-                "train/grad_clip_fraction": scalar_or_none(step_result["grad_clip_fraction"]),
                 "train/param_norm": scalar_or_none(step_result["param_norm"]),
                 "train/lr": optimizer.param_groups[0]["lr"],
             }
@@ -1270,10 +1233,8 @@ def run_optimizer(
         "effective_rank_max": policy_stats["effective_rank_max"] if optimizer_name == "usuitrack" else 0,
         "side_policy_left_tensors": policy_stats["side_policy_left_tensors"] if optimizer_name == "usuitrack" else 0,
         "side_policy_right_tensors": policy_stats["side_policy_right_tensors"] if optimizer_name == "usuitrack" else 0,
-        "basis_update_interval": args.basis_update_interval if optimizer_name == "usuitrack" else 0,
         "lr_warmup_steps": args.lr_warmup_steps,
         "lr_final_ratio": args.lr_final_ratio,
-        "consume_grad": (not args.keep_grads_after_step) if optimizer_name == "usuitrack" else False,
         "release_matrix_grads": args.release_matrix_grads if optimizer_name == "usuitrack" else False,
         "fallback_lr": fallback_lr if optimizer_name in {"usuitrack", "lora"} and fallback_params else 0.0,
         # StochasticAdamW dispatches per parameter: bf16 parameters get bf16
@@ -1366,26 +1327,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
     parser.add_argument("--lr-final-ratio", type=float, default=0.2, help="after warmup, decay learning rates linearly to this fraction of the peak at the last step; 1 holds them constant")
     parser.add_argument("--beta", type=float, default=0.95)
-    parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from UsuiTrack.ROLE_READS")
-    parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="clip the raw gradient per tensor before Adafactor, Oja, and projection; must be positive for usuitrack, where the clip protects Adafactor's second-moment memory and has no off switch")
-    parser.add_argument("--random-basis-init", action="store_true", help="start from a random orthonormal frame instead of the EIGH fit; asks whether Oja's equilibrium is a property of the aim or of its starting point")
-    parser.add_argument("--eigh-refit-interval", type=int, default=0, help="discard and refit every frame by EIGH every N measured steps; 0 disables. The fallback if geodesic tracking cannot hold a fit")
-    parser.add_argument("--agreement-planes", type=int, default=0, help="override the agreement meter's width k for a sweep; 0 keeps the released constant. Set on the module, like --geodesic-stepsize, because it is a harness knob and not a product surface")
-    parser.add_argument("--geodesic-stepsize", type=float, default=0.0, help="override eta, the angle one geodesic turns each live plane by; 0 keeps the released constant. Not a cadence -- that is --basis-update-interval. Set on the module rather than as an optimizer argument deliberately -- this is a harness knob for experiments, not a product surface")
+    parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from lab_diagnostics.ROLE_READS")
+    parser.add_argument("--geodesic-stepsize", type=float, default=0.0, help="override eta, the angle one geodesic turns each live plane by; 0 keeps the released constant. Set on the module rather than as an optimizer argument deliberately -- this is a harness knob for experiments, not a product surface")
     parser.add_argument("--seed", type=int, default=0, help="seed torch's RNG. Stochastic rounding draws from it on every bf16 parameter write, so without this a run is not reproducible; measured run-to-run spread without a seed was 3e-4 on target loss and 2e-3 on source")
-    parser.add_argument("--basis-lag-diagnostic", action="store_true", help="run the optimizer at diagnostics=full: adds transport_lag, transport_curve and transport_spin, the reads that need a frame snapshot. The only reads that can show the frame has converged rather than orbiting; costs one [d,r] snapshot per sampled matrix")
+    parser.add_argument("--basis-lag-diagnostic", action="store_true", help="add the lab snapshot reads: transport_lag, transport_curve and transport_spin, the reads that need a frame snapshot. The only reads that can show the frame has converged rather than orbiting; costs one [d,r] snapshot per sampled matrix")
     parser.add_argument("--basis-lag-interval", type=int, default=5, help="how many basis updates back the lag snapshot sits")
-    parser.add_argument("--basis-update-interval", type=int, default=1, help="basis geodesic cadence in matrix optimizer steps; the held-frame projection and projected EMA still run every step")
     parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=True, help="model gradient checkpointing; default ON (bs16@seq1024 OOMs a 12GB card without it); --no-activation-checkpointing to disable")
     parser.add_argument(
         "--torch-compile",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="compile each decoder layer independently plus UsuiTrack tensor kernels with torch.compile (default on); the outer model loop and Python optimizer orchestration remain eager",
+        help="compile each decoder layer independently with torch.compile (default on); the outer model loop and the optimizer remain eager",
     )
     parser.add_argument("--attn-implementation", default="sdpa", help="Transformers attention implementation; local default is sdpa until real flash kernels are available")
     parser.add_argument("--skip-validation", action="store_true", help="skip initial/final validation for throughput-only runs")
-    parser.add_argument("--keep-grads-after-step", action="store_true", help="leave p.grad populated after optimizer.step(); default consumes grads once projected")
     parser.add_argument(
         "--release-matrix-grads",
         action=argparse.BooleanOptionalAction,
@@ -1417,12 +1372,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if args.random_basis_init:
-        install_random_basis_init()
     if args.geodesic_stepsize > 0:
         usuitrack_optimizer.GEODESIC_STEPSIZE = args.geodesic_stepsize
-    if args.agreement_planes > 0:
-        usuitrack_optimizer.AGREEMENT_PLANES = args.agreement_planes
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     validate_gradient_release_contract(args)
@@ -1465,14 +1416,8 @@ def main() -> None:
         raise ValueError("lora_rank must be positive")
     if args.lora_alpha <= 0:
         raise ValueError("lora_alpha must be positive")
-    if args.grad_clip_norm <= 0:
-        # Harness telemetry only: UsuiTrack no longer clips, so this is the
-        # threshold `grad_clip_fraction` counts against, not an applied bound.
-        raise ValueError("grad_clip_norm must be positive; it is the reporting threshold for grad_clip_fraction")
     if args.lora_grad_clip_norm <= 0:
         raise ValueError("lora_grad_clip_norm must be positive")
-    if args.basis_update_interval <= 0:
-        raise ValueError("basis_update_interval must be positive")
     if args.lr_warmup_steps < 0:
         raise ValueError("lr_warmup_steps must be non-negative")
     if not 0 < args.lr_final_ratio <= 1:
@@ -1539,7 +1484,6 @@ def main() -> None:
         f"warmup_steps={args.warmup_steps} max_steps={args.max_steps} param_scope={args.param_scope} "
         f"rank_fraction={args.rank_fraction} "
         f"lora_rank={args.lora_rank} lora_alpha={args.lora_alpha} lora_lr={args.lora_lr} lora_grad_clip_norm={args.lora_grad_clip_norm} "
-        f"basis_update_interval={args.basis_update_interval} "
         f"lr_warmup_steps={args.lr_warmup_steps} "
         f"orthogonalization=aurora "
         f"activation_checkpointing={args.activation_checkpointing} torch_compile={'decoder_layer' if args.torch_compile else 'off'} attn_implementation={args.attn_implementation or 'default'} "
@@ -1548,7 +1492,7 @@ def main() -> None:
         f"final_sample={args.final_sample} final_sample_max_seq_len={args.final_sample_max_seq_len} "
         f"final_sample_temperature={args.final_sample_temperature} final_sample_top_k={args.final_sample_top_k} final_sample_top_p={args.final_sample_top_p} "
         f"final_sample_repetition_penalty={args.final_sample_repetition_penalty} "
-        f"wandb_run={args.wandb_run or 'none'} wandb_entity={args.wandb_entity} consume_grad={not args.keep_grads_after_step}"
+        f"wandb_run={args.wandb_run or 'none'} wandb_entity={args.wandb_entity}"
     )
 
     wandb_run = None

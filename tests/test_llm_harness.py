@@ -135,17 +135,16 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         middle.remove()
         trace.close()
 
-    def test_gradient_norm_statistics_describe_the_per_tensor_clip_population(self):
+    def test_gradient_norm_statistics_describe_the_per_tensor_population(self):
         first = torch.nn.Parameter(torch.zeros(2))
         second = torch.nn.Parameter(torch.zeros(1))
         first.grad = torch.tensor([3.0, 4.0])
         second.grad = torch.tensor([10.0])
 
-        global_norm, median, clipped_fraction = gradient_norm_statistics([first, second], clip_norm=6.0)
+        global_norm, median = gradient_norm_statistics([first, second])
 
         torch.testing.assert_close(global_norm, torch.tensor(125.0).sqrt())
         torch.testing.assert_close(median, torch.tensor(5.0))
-        torch.testing.assert_close(clipped_fraction, torch.tensor(0.5))
 
     def test_wandb_omits_unavailable_metrics_but_preserves_numeric_nan(self):
         class Run:
@@ -186,8 +185,6 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.lr_final_ratio, 0.2)
         self.assertEqual(args.beta, 0.95)
         self.assertEqual(args.role_reads, [])
-        self.assertEqual(args.basis_update_interval, 1)
-        self.assertEqual(args.grad_clip_norm, 1.0)
         self.assertEqual(args.val_blocks, 8)
         self.assertEqual(args.retention_val_blocks, 8)
         self.assertEqual(args.wandb_log_every, 25)
@@ -197,7 +194,6 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertTrue(args.torch_compile)
         self.assertFalse(build_parser().parse_args(["--no-torch-compile"]).torch_compile)
         self.assertFalse(args.skip_validation)
-        self.assertFalse(args.keep_grads_after_step)
         self.assertTrue(args.release_matrix_grads)
         self.assertFalse(build_parser().parse_args(["--no-release-matrix-grads"]).release_matrix_grads)
         self.assertFalse(args.trace_backward_memory)
@@ -220,21 +216,16 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
     def test_gradient_release_rejects_incompatible_harness_contracts(self):
         validate_gradient_release_contract(build_parser().parse_args([]))
         validate_gradient_release_contract(build_parser().parse_args(["--no-release-matrix-grads", "--grad-accum-steps", "2"]))
-        for incompatible in (
-            ["--grad-accum-steps", "2"],
-            ["--keep-grads-after-step"],
-        ):
-            with self.assertRaises(ValueError):
-                validate_gradient_release_contract(build_parser().parse_args(incompatible))
+        with self.assertRaises(ValueError):
+            validate_gradient_release_contract(build_parser().parse_args(["--grad-accum-steps", "2"]))
 
     def test_gradient_statistics_include_released_matrix_norms(self):
         live = torch.nn.Parameter(torch.zeros(3))
         live.grad = torch.tensor([3.0, 4.0, 0.0])
-        total, median, clipped = gradient_norm_statistics([live], 4.0, (torch.tensor(12.0),))
+        total, median = gradient_norm_statistics([live], (torch.tensor(12.0),))
 
         self.assertEqual(float(total), 13.0)
         self.assertEqual(float(median), 5.0)
-        self.assertEqual(float(clipped), 1.0)
 
     def test_cli_has_no_loss_or_padding_option_garden(self):
         option_strings = {option for action in build_parser()._actions for option in action.option_strings}
