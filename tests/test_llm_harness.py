@@ -299,9 +299,15 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         # `out` in the name -> output side for a square weight; an override
         # entry sends a weight the d_model rule would place elsewhere.
         o = torch.nn.Parameter(torch.randn(4, 4))
+        o_proj = torch.nn.Parameter(torch.randn(4, 4))
+        q = torch.nn.Parameter(torch.randn(4, 4))
+        to_proj = torch.nn.Parameter(torch.randn(4, 4))
         xk = torch.nn.Parameter(torch.randn(4, 8))
         named = [
             ("model.layers.0.self_attn.out_proj.weight", o),
+            ("model.layers.1.self_attn.o_proj.weight", o_proj),
+            ("model.layers.1.self_attn.q_proj.weight", q),
+            ("model.layers.1.mixer.to_proj.weight", to_proj),
             ("model.layers.0.cross_attn.to_k.weight", xk),
         ]
 
@@ -311,6 +317,9 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         group_by_param = {id(param): group for group in groups for param in group["params"]}
 
         self.assertEqual(group_by_param[id(o)]["side"], "left")
+        self.assertEqual(group_by_param[id(o_proj)]["side"], "left")
+        self.assertEqual(group_by_param[id(q)]["side"], "right")
+        self.assertEqual(group_by_param[id(to_proj)]["side"], "right")
         self.assertEqual(group_by_param[id(xk)]["side"], "right")
 
     def test_lfm2_gradient_checkpointing_repair_wraps_decoder_layers(self):

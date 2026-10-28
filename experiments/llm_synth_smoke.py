@@ -336,13 +336,15 @@ def packed_text_limit(blocks: int, batch_size: int, seq_len: int) -> int:
     return max(blocks * batch_size, (blocks * batch_size * seq_len + 511) // 512, 16)
 
 
-def load_model_and_tokenizer(model_name: str, device: torch.device, activation_checkpointing: bool, attn_implementation: str):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+def load_model_and_tokenizer(model_name: str, revision: str | None, device: torch.device, activation_checkpointing: bool, attn_implementation: str):
+    # Remote-code models run whatever the hub serves; a revision pins it.
+    tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision, trust_remote_code=True)
     model_kwargs = {}
     if attn_implementation:
         model_kwargs["attn_implementation"] = attn_implementation
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
+        revision=revision,
         trust_remote_code=True,
         dtype=torch.bfloat16 if device.type == "cuda" else torch.float32,
         low_cpu_mem_usage=True,
@@ -554,7 +556,8 @@ def resolve_tracked_side(
        name -- for weights whose residual side the rules below get wrong, e.g. a
        cross-attention K/V that reads a context stream, not the backbone
     2. the side whose dimension equals `d_model`
-    3. square, or neither side `d_model`: `out` in the name means the output
+    3. square, or neither side `d_model`: `out` in the name, or an `o_proj`
+       module (the attention output in most HF models), means the output
        (left) side, otherwise the input (right) side
     """
 
@@ -565,7 +568,9 @@ def resolve_tracked_side(
     rows, cols = int(shape[0]), int(shape[1])
     if (rows == d_model) != (cols == d_model):
         return "left" if rows == d_model else "right"
-    return "left" if "out" in name.lower() else "right"
+    lowered = name.lower()
+    writes_stream = "out" in lowered or re.search(r"(^|\.)o_proj(\.|$)", lowered) is not None
+    return "left" if writes_stream else "right"
 
 
 def build_usuitrack_param_groups(
@@ -973,7 +978,7 @@ def run_optimizer(
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
     gc.collect()
-    model, tokenizer = load_model_and_tokenizer(model_name, device, args.activation_checkpointing, args.attn_implementation)
+    model, tokenizer = load_model_and_tokenizer(model_name, args.model_revision, device, args.activation_checkpointing, args.attn_implementation)
     adapter_named: list[tuple[str, torch.nn.Parameter]] = []
     if optimizer_name == "lora":
         adapter_named, fallback_named, param_stats = install_state_matched_lora(model, args.param_scope, args.lora_rank, args.lora_alpha)
@@ -1300,6 +1305,7 @@ def run_optimizer(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Faithful pretrained-LLM SYNTH harness for UsuiTrack")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"HF model name; default = {DEFAULT_MODEL}")
+    parser.add_argument("--model-revision", default=None, help="hub commit to load the model and its remote code from")
     parser.add_argument("--data-dir", default="/home/djg/.cache/nanochat/base_data_synth")
     parser.add_argument("--target-hf-dataset", default="", help="optional Hugging Face target dataset; first parquet shard only")
     parser.add_argument("--target-format", choices=("auto", "synth", "profile_text", "text"), default="auto", help="target dataset row formatter; profile_text masks profile+divider and trains only on text")
@@ -1475,7 +1481,7 @@ def main() -> None:
         retention_texts, first_parquet = hf_first_parquet_texts(args.retention_hf_dataset, limit=packed_text_limit(retention_blocks, args.batch_size, args.seq_len))
         retention_source = f"{args.retention_hf_dataset}:{first_parquet}"
     print(f"device={device}")
-    print(f"model={model_name}")
+    print(f"model={model_name} revision={args.model_revision or 'latest'}")
     print(f"target_source={target_source}")
     print(f"retention_source={retention_source}")
     print(f"train_texts={len(train_texts)} val_texts={len(val_texts)} retention_texts={len(retention_texts) if retention_texts else 0}")
