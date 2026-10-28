@@ -8,7 +8,7 @@ import torch
 
 from usuitrack import UsuiTrack
 
-from experiments.llm_synth_smoke import BackwardMemoryTrace, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK, DEFAULT_MODEL, DEFAULT_SOURCE_HF_DATASET, build_parser, build_usuitrack_param_groups, install_state_matched_lora, maybe_compile_training_model, packed_text_limit, partition_usuitrack_params, repair_lfm2_gradient_checkpointing, select_trainable_params, validate_gradient_release_contract, validate_lora_optimizer_state_dtype, wandb_log
+from experiments.llm_synth_smoke import BackwardMemoryTrace, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK, DEFAULT_MODEL, DEFAULT_SOURCE_HF_DATASET, build_parser, build_usuitrack_param_groups, install_state_matched_lora, maybe_compile_training_model, packed_text_limit, partition_usuitrack_params, prepare_for_training, select_trainable_params, validate_gradient_release_contract, validate_lora_optimizer_state_dtype, wandb_log
 from experiments.llm_synth_smoke import apply_lr_schedule, cce_causal_lm_loss, gradient_norm_statistics, make_packed_batches, make_right_padded_batches, synth_masked_examples
 
 
@@ -30,21 +30,10 @@ class TinyTopology(torch.nn.Module):
         self.lm_head = torch.nn.Linear(4, 8, bias=False)
 
 
-class CountingCheckpointLayer(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.calls = 0
-
-    def forward(self, x):
-        self.calls += 1
-        return x.sin()
-
-
 class Lfm2Model(torch.nn.Module):
     def __init__(self, layers: int = 2):
         super().__init__()
-        self.gradient_checkpointing = True
-        self.layers = torch.nn.ModuleList([CountingCheckpointLayer() for _ in range(layers)])
+        self.layers = torch.nn.ModuleList([torch.nn.Identity() for _ in range(layers)])
 
 
 class TinyLfmForCausalLM(torch.nn.Module):
@@ -322,29 +311,21 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(group_by_param[id(to_proj)]["side"], "right")
         self.assertEqual(group_by_param[id(xk)]["side"], "right")
 
-    def test_lfm2_gradient_checkpointing_repair_wraps_decoder_layers(self):
-        model = TinyLfmForCausalLM()
+    def test_training_model_checkpoints_its_decoder_layers(self):
+        from transformers import Lfm2Config, Lfm2ForCausalLM
 
-        wrapped = repair_lfm2_gradient_checkpointing(model)
+        config = Lfm2Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=2,
+                            num_attention_heads=2, num_key_value_heads=1, layer_types=["full_attention"] * 2)
+        model = Lfm2ForCausalLM(config).eval()
+        prepare_for_training(model, activation_checkpointing=True)
+        # Forward hooks do not fire on the recompute; the forward itself does.
+        forwards = [mock.patch.object(layer, "forward", wraps=layer.forward) for layer in model.model.layers]
+        counters = [patch.start() for patch in forwards]
+        self.addCleanup(mock.patch.stopall)
 
-        self.assertEqual(wrapped, 2)
-        self.assertEqual(repair_lfm2_gradient_checkpointing(model), 0)
-        self.assertTrue(all(getattr(layer, "_usuitrack_checkpoint_wrapped", False) for layer in model.model.layers))
+        model(torch.randint(0, 32, (1, 8))).logits.sum().backward()
 
-        x = torch.randn(4, requires_grad=True)
-        y = model.model.layers[0](x).sum()
-        y.backward()
-
-        self.assertEqual(model.model.layers[0].calls, 2)
-
-    def test_lfm2_gradient_checkpointing_repair_uses_direct_forward_without_grad(self):
-        model = TinyLfmForCausalLM()
-        repair_lfm2_gradient_checkpointing(model)
-
-        with torch.no_grad():
-            model.model.layers[0](torch.randn(4))
-
-        self.assertEqual(model.model.layers[0].calls, 1)
+        self.assertEqual([counter.call_count for counter in counters], [2, 2])
 
     def test_rank_fraction_clamps_to_half_the_smaller_side(self):
         first = torch.nn.Parameter(torch.randn(16, 4))
