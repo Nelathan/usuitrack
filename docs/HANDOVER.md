@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated overnight to 2026-10-29. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
@@ -40,8 +40,13 @@ release files onto it, prepared locally after your review; you push.
 
 - Packages upgraded around torch, which stays `2.14.*`: `causal-conv1d` has no
   torch 2.15 wheel yet (2026-10-28). Revisit when astral publishes one.
-- LFM3-1.7B (`LiquidAI/LFM3-1.7B-Base`) as the bigger run: which question it
-  asks -- transfer of the default arm, headroom, or baselines -- is open.
+- PLAN L1, lr transfer to LFM3-1.7B: the 350M half ran and matched the
+  predictions. The LFM3 half did not run: bs16 peaks in the optimizer's
+  batched polar and fit once in three tries, as the desktop's share moved. Your
+  call between freeing the card, bounding the polar's batch in the release, or
+  a smaller batch (PLAN L1).
+- The harness never trained in train mode, so HF checkpointing was off and a
+  repair covered LFM2.5. Fixed; the 350M lane is now 0.84 s/step, not 1.13.
 
 ## To review
 
@@ -49,10 +54,26 @@ On `lab`, oldest first, each read by a review subagent:
 - `8e226b1` release surface: package, tests, lab diagnostics, harness.
 - `fcb0562` README and examples.
 - `58ef76b` SPEC corrected to the code; NOTES.
-- the commit carrying this file: PLAN emptied into ARCHIVE (two closures, the
-  parked block), FACTS row for the arm, AGENTS throughput, this handover.
+- `cb012ab` PLAN emptied into ARCHIVE (two closures, the parked block), FACTS
+  row for the arm, AGENTS throughput, this handover.
+- `30e6767` dependencies upgraded around the `torch 2.14.*` hold.
+- `f47a91a` harness: `o_proj` writes the stream; `--model-revision`.
+- `214b78f` PLAN L1 with predictions, written before the runs.
 
-ai-toolkit, uncommitted: `toolkit/optimizers/usuitrack.py` ported (bool
+Overnight, under your handover, each read by a review subagent:
+- `b0aade0` harness: `model.train()` after load, the LFM2 checkpointing repair
+  deleted, a behaviour test on a tiny real LFM2. Verified by
+  `release-trainmode-s1` against `release-clean-s1` (FACTS).
+- `f7296a5` FACTS for the 350M constant-lr arms, the re-check, the
+  LFM3 lane; AGENTS throughput.
+- the commit carrying this file: PLAN L1 evidence, this handover.
+
+Run logs: wandb `pink-marker/usuitrack` (`lfm25-c5e5-s1`, `lfm25-c2e5-s1`,
+`release-trainmode-s1`, `lfm3-probe3`, `lfm3-c5e5-s1`); the local logs are in the
+session scratchpad and will not survive it.
+
+ai-toolkit, branch `usuitrack-release-surface`, `d1eb42f` (its `main`
+untouched): `toolkit/optimizers/usuitrack.py` ported (bool
 diagnostics, no role classes, always `StochasticAdamW` for the fallback, reads
 `_pending`). Its config is gitignored, so the record is here:
 `config/train_full_fine_tune_anima_usuitrack.yaml` lost `rank: 64` and

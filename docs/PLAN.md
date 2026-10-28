@@ -36,6 +36,16 @@ the same fraction of each square side. `2e-5` gains less target and forgets
 less than `5e-5` at both sizes. Unknowns: whether bs16 fits at 1.7B (estimate
 ~6-8 GB peak), and its step time (estimate ~5 s).
 
+Evidence (FACTS, 2026-10-28/29). 350M half as predicted: the plateau cosine is
+negative from step ~500 at `5e-5`, positive throughout at `2e-5`; `2e-5` gains
+less and forgets less; `relative_step` reads `lr`; capture and live fraction
+do not move with lr. LFM3 half not run: the peak is set by the batched polar in
+`optimizer.step`, not by activations, and bs16 ran once and failed twice since,
+as the desktop's share of the card moved. Ways through, none taken: free the
+card (close Discord and zapzap); bound the polar's batch in the release, which
+caps a transient that grows with depth (a release change); or a smaller batch,
+which changes the arm and its lr.
+
 ---
 
 ## Group N. Weight norm
