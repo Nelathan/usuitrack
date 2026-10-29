@@ -195,7 +195,7 @@ def test_the_moment_averages_unit_gradients_and_the_step_is_its_polar_factor():
     q = state["frame"]
     projected = gradient @ q
     torch.testing.assert_close(state["moment"], 0.1 * projected / projected.norm(), atol=1e-6, rtol=0)
-    (direction,) = unit_polar([projected])
+    direction = unit_polar(projected)
     torch.testing.assert_close((before - weight.detach()) / (0.1 * before.norm()), direction @ q.mT, atol=1e-4, rtol=0)
 
 
@@ -291,14 +291,15 @@ def test_a_forced_side_is_the_transposed_problem(side):
     torch.testing.assert_close(weight, transposed.mT, rtol=1e-5, atol=1e-6)
 
 
-def test_matrices_sharing_a_moment_shape_but_not_a_shape_batch_correctly():
-    """Keying the polar batch on the moment's shape lets differently-shaped
-    matrices share one Newton-Schulz call; grouping is bookkeeping, not maths.
-    Not bitwise: batched and solo calls round differently at the ulp level."""
+def test_matrices_stepped_together_match_each_stepped_alone():
+    """Same-rank tangent Grams share one `eigh` across shapes; a third rank does
+    not. Grouping is bookkeeping, not maths. Not bitwise: batched and solo
+    calls round differently at the ulp level."""
 
     torch.manual_seed(5)
-    shapes = [(64, 512), (64, 520)]
-    assert len({frame.rank(torch.Size(shape), RANK_FRACTION) for shape in shapes}) == 1
+    shapes = [(64, 512), (64, 520), (96, 96)]
+    ranks = [frame.rank(torch.Size(shape), RANK_FRACTION) for shape in shapes]
+    assert ranks[0] == ranks[1] != ranks[2]
     base = {shape: torch.randn(*shape) for shape in shapes}
     gradients = {shape: [torch.randn(*shape) for _ in range(6)] for shape in shapes}
 

@@ -47,7 +47,7 @@ weight's own norm (step 8), so `rank_fraction` decides which directions a matrix
 moves in and never how far. On LFM the rule matches or beats a
 per-role rank sized from measured live planes, with no measurement of its own
 (`FACTS.md` on `lab`, "Rank is a fraction of the matrix's size"). Matrices of one shape
-share one rank, so they batch.
+share one rank.
 
 The cap has two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
 has rank at most `min(m,n)`, so a wider basis tracks directions the gradient
@@ -194,10 +194,9 @@ $$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta\,\ell_i))
 +(\Delta V)\operatorname{diag}
 \left(\frac{\ell_i\sin\eta}{\sigma_i}\right)\right]V^\top.$$
 
-Tangent-Gram eigendecompositions are batched across matrices that share a
-shape, and with it a rank, in `step()` under either execution mode. `eigh` on a
-small `[r,r]` matrix is launch-overhead-bound, so this matters more here than
-for the polar map's matmuls. With `S=Q_raw^T Q_raw`, one near-identity step using
+Tangent-Gram eigendecompositions of one rank share one batched `eigh`: on a
+small `[r,r]` matrix it is launch-overhead-bound. Nothing larger is stacked
+across matrices. With `S=Q_raw^T Q_raw`, one near-identity step using
 the converged steady-state coefficient triple from Amsel, Persson, Musco, and
 Gower, ["The Polar Express"](https://arxiv.org/abs/2505.16932) (2025),
 retracts before storage:
@@ -413,9 +412,9 @@ For each matrix, phase one runs exactly once after its full gradient is complete
 Phase one does not move the basis, update the moment, or update the parameter:
 the moment is rotated and committed after the frame moves (step 6), so it is
 written only in `step()`. Phase two runs in `step()`: it blends each unit `Z_t`
-into `M_t`, batches the balanced polar map over same-shaped `M_t`, lifts each
-`O_t` through `Q_t`, updates `W`, then batches the tangent-Gram
-eigendecompositions and moves each frame to `Q_{t+}`.
+into `M_t`, applies the balanced polar map to each `M_t`, lifts each `O_t`
+through `Q_t`, updates `W`, then takes the tangent-Gram eigendecompositions,
+batched by rank, and moves each frame to `Q_{t+}`.
 
 Without `release_matrix_grads`, both phases run in `step()`, on whatever
 gradient has accumulated, so gradient accumulation works. With it, the

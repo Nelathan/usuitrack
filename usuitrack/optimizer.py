@@ -170,8 +170,8 @@ class UsuiTrack(Optimizer):
         """Phase two: SPEC steps 5-8, then the frame moves and the moment is committed."""
 
         moments = [self._blend_moment(param, prepared, group["beta"]) for param, prepared in entries]
-        for (param, _prepared), direction in zip(entries, unit_polar(moments), strict=True):
-            self._write_weight(param, direction, group)
+        for (param, _prepared), moment in zip(entries, moments, strict=True):
+            self._write_weight(param, unit_polar(moment), group)
 
         # The weights were lifted through the held frame; only now does it move.
         turning = [index for index, (_param, prepared) in enumerate(entries) if prepared.tangent is not None]
@@ -179,7 +179,12 @@ class UsuiTrack(Optimizer):
         if turning:
             params = [entries[index][0] for index in turning]
             before = [self.state[param]["frame"] for param in params]
-            turned = frame.turn(before, [entries[index][1].tangent for index in turning], GEODESIC_STEPSIZE)
+            tangents = [entries[index][1].tangent for index in turning]
+            spectra = frame.tangent_spectra(tangents)
+            turned = [
+                frame.turn(stored, tangent, spectrum, GEODESIC_STEPSIZE)
+                for stored, tangent, spectrum in zip(before, tangents, spectra, strict=True)
+            ]
             if self.diagnostics is not None:
                 self.diagnostics.frame_turn(params, before, turned)
             for index, param, item in zip(turning, params, turned, strict=True):

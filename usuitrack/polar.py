@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import math
 
-import torch
 from torch import Tensor
 
 # Per-step-tuned quintic schedule of the Muon lineage (SPEC step 7 credits it).
@@ -22,7 +21,7 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 
 
 def newton_schulz(matrix: Tensor) -> Tensor:
-    """Approximate polar factor of `matrix` (batched over leading dims), in fp32."""
+    """Approximate polar factor of `matrix`, in fp32."""
 
     work = matrix.float()
     work = work / work.norm(dim=(-2, -1), keepdim=True).clamp_min(1e-7)
@@ -54,21 +53,12 @@ def balanced_polar(matrix: Tensor) -> Tensor:
     return polar.mT if transposed else polar
 
 
-def unit_polar(moments: list[Tensor]) -> list[Tensor]:
-    """Each moment's balanced polar factor at unit Frobenius norm.
+def unit_polar(moment: Tensor) -> Tensor:
+    """The moment's balanced polar factor at unit Frobenius norm.
 
     A polar factor of rank `r` has norm `sqrt(r)`, `r` the short side, so
     `1/sqrt(r)` makes every step a unit; its size is set against `||W||`
-    where it lands. Same-shaped moments share one batched call.
+    where it lands.
     """
 
-    buckets: dict[tuple[int, ...], list[int]] = {}
-    for index, moment in enumerate(moments):
-        buckets.setdefault(tuple(moment.shape), []).append(index)
-    directions: list[Tensor] = [torch.empty(0)] * len(moments)
-    for shape, indices in buckets.items():
-        scale = 1.0 / math.sqrt(min(shape))
-        batch = balanced_polar(torch.stack([moments[index] for index in indices])) * scale
-        for index, direction in zip(indices, batch.unbind(0), strict=True):
-            directions[index] = direction
-    return directions
+    return balanced_polar(moment) * (1.0 / math.sqrt(min(moment.shape)))
