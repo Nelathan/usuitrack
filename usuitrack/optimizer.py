@@ -174,28 +174,25 @@ class UsuiTrack(Optimizer):
             self._write_weight(param, unit_polar(moment), group)
 
         # The weights were lifted through the held frame; only now does it move.
-        turning = [index for index, (_param, prepared) in enumerate(entries) if prepared.tangent is not None]
-        rotations: dict[int, Tensor] = {}
-        if turning:
-            params = [entries[index][0] for index in turning]
-            before = [self.state[param]["frame"] for param in params]
-            tangents = [entries[index][1].tangent for index in turning]
-            spectra = frame.tangent_spectra(tangents)
-            turned = [
-                frame.turn(stored, tangent, spectrum, GEODESIC_STEPSIZE)
-                for stored, tangent, spectrum in zip(before, tangents, spectra, strict=True)
-            ]
-            if self.diagnostics is not None:
-                self.diagnostics.frame_turn(params, before, turned)
-            for index, param, item in zip(turning, params, turned, strict=True):
-                self.state[param]["frame"].copy_(item.frame)
-                rotations[index] = item.rotation
+        # A matrix whose frame was fitted this step has no tangent and holds still.
+        turning = [(param, prepared.tangent) for param, prepared in entries if prepared.tangent is not None]
+        spectra = frame.tangent_spectra([tangent for _param, tangent in turning])
+        turned = {
+            param: frame.turn(self.state[param]["frame"], tangent, spectrum, GEODESIC_STEPSIZE)
+            for (param, tangent), spectrum in zip(turning, spectra, strict=True)
+        }
+        if turned and self.diagnostics is not None:
+            self.diagnostics.frame_turn(list(turned), [self.state[param]["frame"] for param in turned], list(turned.values()))
 
-        # SPEC step 6: the moment follows the stored frame's in-span rotation,
-        # then is rounded once.
-        for index, ((param, _prepared), moment) in enumerate(zip(entries, moments, strict=True)):
-            rotation = rotations.get(index)
-            round_into(self.state[param]["moment"], moment if rotation is None else moment @ rotation)
+        # SPEC step 6: the frame is stored, the moment follows its in-span
+        # rotation, then is rounded once.
+        for (param, _prepared), moment in zip(entries, moments, strict=True):
+            state = self.state[param]
+            item = turned.get(param)
+            if item is not None:
+                state["frame"].copy_(item.frame)
+                moment = moment @ item.rotation
+            round_into(state["moment"], moment)
 
     def _blend_moment(self, param: Tensor, prepared: Prepared, beta: float) -> Tensor:
         """SPEC step 5: `M = beta M + (1 - beta) Z / ||Z||`, in fp32 until the commit."""

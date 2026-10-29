@@ -75,9 +75,9 @@ def retract(frame: Tensor) -> Tensor:
     gram = frame.mT @ frame
     a, b, c = RETRACTION_COEFFICIENTS
     correction = c * gram
-    correction.diagonal(dim1=-2, dim2=-1).add_(b)
+    correction.diagonal().add_(b)
     correction = correction @ gram
-    correction.diagonal(dim1=-2, dim2=-1).add_(a)
+    correction.diagonal().add_(a)
     return frame @ correction
 
 
@@ -102,16 +102,14 @@ def tangent_spectra(tangents: list[Tensor]) -> list[tuple[Tensor, Tensor]]:
     """
 
     grams = [tangent.mT @ tangent for tangent in tangents]
-    spectra: dict[int, tuple[Tensor, Tensor]] = {}
-    buckets: dict[int, list[int]] = {}
-    for index, gram in enumerate(grams):
-        buckets.setdefault(gram.shape[-1], []).append(index)
-    for indices in buckets.values():
+    spectra: list[tuple[Tensor, Tensor]] = [None] * len(grams)  # type: ignore[list-item]
+    for rank in {gram.shape[-1] for gram in grams}:
+        indices = [index for index, gram in enumerate(grams) if gram.shape[-1] == rank]
         stacked = torch.stack([grams[index] for index in indices])
         eigenvalues, vectors = torch.linalg.eigh(0.5 * (stacked + stacked.mT))
-        for position, index in enumerate(indices):
-            spectra[index] = (eigenvalues[position], vectors[position])
-    return [spectra[index] for index in range(len(grams))]
+        for index, values, basis in zip(indices, eigenvalues, vectors, strict=True):
+            spectra[index] = (values, basis)
+    return spectra
 
 
 def turn(stored: Tensor, tangent: Tensor, spectrum: tuple[Tensor, Tensor], eta: float) -> Turned:
