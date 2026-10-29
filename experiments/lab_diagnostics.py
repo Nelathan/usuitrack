@@ -27,7 +27,6 @@ LAB_READS = {
     "transport_correction": "||skew(R_s)|| / sqrt(r): the in-span rotation the moment is turned by this step; zero for exact storage.",
     "transport_lag": "Net distance per plane a sampled frame covered over the snapshot window.",
     "transport_curve": "1 - lag / path over the window: 0 straight drift, toward 1 churn in place.",
-    "transport_spin": "||skew(Q_old^T Q_now)|| / (2 sqrt(r)) over the window: in-span rotation, holonomy plus rounding.",
 }
 
 # Reads sampled once per matrix, which is what a role can split.
@@ -118,5 +117,4 @@ class LabDiagnostics(Diagnostics):
             overlap = previous.mT @ end
             lag = (end - previous @ overlap).norm() / root
             self.add("transport_lag", lag)
-            self.add("transport_spin", (overlap - overlap.mT).norm() / (2.0 * root))
             self.add("transport_curve", 1.0 - lag / path.clamp_min(1e-12))

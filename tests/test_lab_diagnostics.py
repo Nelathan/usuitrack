@@ -34,7 +34,6 @@ def test_every_lab_read_is_published_and_describes_itself():
     assert set(drained) == set(ALL_READS)
     assert 0.0 < drained["transport_lag"] <= 1.0
     assert 0.0 <= drained["transport_curve"] < 1.0
-    assert drained["transport_spin"] >= 0.0
     assert 1.0 / RANK <= drained["tangent_concentration"] <= 1.0
     # fp32 frames store the geodesic exactly, so there is no in-span turn to correct.
     assert drained["transport_correction"] < 1e-4
@@ -95,16 +94,14 @@ def test_role_reads_reject_an_unknown_read():
         LabDiagnostics(role_reads=("grad_captur",))
 
 
-def test_lag_is_the_sine_of_the_principal_angle_and_spin_sees_only_in_span_rotation():
-    """Lag vanishes iff the subspace stopped; spin is blind to subspace motion
-    and sees a pure in-span rotation, which renames every moment coordinate."""
+def test_lag_is_the_sine_of_the_principal_angle_and_blind_to_in_span_rotation():
+    """Lag vanishes iff the subspace stopped, however the frame's columns turned inside it."""
     torch.manual_seed(0)
     frame, _ = torch.linalg.qr(torch.randn(64, 8))
 
-    def reads(current, previous):
+    def lag(current, previous):
         root = current.shape[1] ** 0.5
-        overlap = previous.mT @ current
-        return float((current - previous @ overlap).norm() / root), float((overlap - overlap.mT).norm() / (2.0 * root))
+        return float((current - previous @ (previous.mT @ current)).norm() / root)
 
     outside = torch.randn(64, 1)
     outside = outside - frame @ (frame.mT @ outside)
@@ -113,10 +110,9 @@ def test_lag_is_the_sine_of_the_principal_angle_and_spin_sees_only_in_span_rotat
         rotated = frame.clone()
         rotated[:, 0] = frame[:, 0] * math.cos(theta) + outside[:, 0] * math.sin(theta)
         # One plane of eight moved by theta, so the RMS sine is sin(theta)/sqrt(8).
-        assert abs(reads(rotated, frame)[0] - math.sin(theta) / math.sqrt(8)) < 1e-5
+        assert abs(lag(rotated, frame) - math.sin(theta) / math.sqrt(8)) < 1e-5
 
-    spin = torch.eye(8)
-    spin[0, 0] = spin[1, 1] = math.cos(0.2)
-    spin[0, 1], spin[1, 0] = -math.sin(0.2), math.sin(0.2)
-    lag, in_span = reads(frame @ spin, frame)
-    assert lag < 1e-6 and in_span > 0.05
+    in_span = torch.eye(8)
+    in_span[0, 0] = in_span[1, 1] = math.cos(0.2)
+    in_span[0, 1], in_span[1, 0] = -math.sin(0.2), math.sin(0.2)
+    assert lag(frame @ in_span, frame) < 1e-6
