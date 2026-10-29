@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28, updated overnight to 2026-10-29. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-10-29 midday. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
@@ -40,11 +40,30 @@ release files onto it, prepared locally after your review; you push.
 
 - Packages upgraded around torch, which stays `2.14.*`: `causal-conv1d` has no
   torch 2.15 wheel yet (2026-10-28). Revisit when astral publishes one.
-- PLAN L1, lr transfer to LFM3-1.7B: the 350M half ran and matched the
-  predictions. The LFM3 half did not run: bs16 peaks in the optimizer's
-  batched polar and fit once in three tries, as the desktop's share moved. Your
-  call between freeing the card, bounding the polar's batch in the release, or
-  a smaller batch (PLAN L1).
+- **In flight (2026-10-29, 13:10 on).** Queue `outputs/tools/q-next.txt` run by
+  `outputs/tools/queue.sh` (logs `outputs/runs/`, queue log `q-next.log`):
+  `lfm3-cos2e5-r05-s1` (2e-5, cosine to 0.2, `--rank-fraction 0.05`),
+  `release-eighstack-s1` (350M standard arm: the speed read that gates the
+  step commit below), `lfm25-cos2e5-s1` (same schedule at 350M, rank 0.1),
+  `lfm3-c2e5-r05-s1` (constant 2e-5, rank 0.05; the L1 sign read, killable).
+  LFM3 arms use `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; Discord,
+  zapzap and Zed were closed for the card (the user allows it; not the desktop,
+  not ghostty).
+- **Uncommitted: the step un-stacked except the turn's eigh.** Polar and turn run
+  per matrix; `frame.tangent_spectra` stacks only `[r,r]` tangent Grams by rank.
+  Why: stacking was LFM3's peak (optimizer 9.03 -> 6.20 GB). Fully un-stacked cost
+  +15% at 350M (0.84 -> 0.97 s/step); a microbench put ~0.8 ms/matrix on solo
+  eigh, ~0.4 on solo polar, so eigh stays batched (user's call). 69 tests, golden
+  <=6.2e-6, review clean, mutation-checked. Commit once `release-eighstack-s1`
+  reads its s/step; then FACTS gets the number.
+- **L1 so far** (FACTS has the 350M half; LFM3 half not yet written): 
+  `lfm3-c5e5-s1` (constant 5e-5, rank 0.1, un-stacked build): 1.857 -> 1.318
+  target, 2.649 -> 2.704 source, 4.22 s/step, peaks 7.91 backward / 6.45
+  optimizer. Cosine bins +0.394 +0.037 -0.003 -0.007 -0.006: negative from
+  250-500, a bin earlier than 350M, so lr does not transfer one-to-one. Capture
+  0.77 and `relative_step` = lr transfer; live fraction 0.60 against 0.81, hence
+  rank 0.05; projected grad norm 5x lower. User's lean: 2e-5 cosine to 20% on
+  LFM3. Trajectory bins: `outputs/tools/trajectory.py RUN...`.
 - The harness never trained in train mode, so HF checkpointing was off and a
   repair covered LFM2.5. Fixed; the 350M lane is now 0.84 s/step, not 1.13.
 
@@ -66,11 +85,15 @@ Overnight, under your handover, each read by a review subagent:
   `release-trainmode-s1` against `release-clean-s1` (FACTS).
 - `f7296a5` FACTS for the 350M constant-lr arms, the re-check, the
   LFM3 lane; AGENTS throughput.
-- the commit carrying this file: PLAN L1 evidence, this handover.
+- `5da844e` PLAN L1 evidence, this handover.
+- `6103a5b` AGENTS: home-lab work, not frontier; full effort.
+- `f183ff7` harness: `--lr-decay {linear,cosine}`, linear default.
 
 Run logs: wandb `pink-marker/usuitrack` (`lfm25-c5e5-s1`, `lfm25-c2e5-s1`,
-`release-trainmode-s1`, `lfm3-probe3`, `lfm3-c5e5-s1`); the local logs are in the
-session scratchpad and will not survive it.
+`release-trainmode-s1`, `lfm3-probe3`, `lfm3-c5e5-s1`, ...); local logs, queue
+tools, golden trajectories (`outputs/tools/golden.py check`) and the ai-toolkit
+undo record (`outputs/ai-toolkit-freeze-2026-10-28.txt`) live in gitignored
+`outputs/`.
 
 ai-toolkit, branch `usuitrack-release-surface`, `d1eb42f` (its `main`
 untouched): `toolkit/optimizers/usuitrack.py` ported (bool
