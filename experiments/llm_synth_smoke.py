@@ -1327,7 +1327,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="probe-only: buffer per-matrix CUDA allocator readings immediately before and after gradient preparation on the final measured backward",
     )
-    parser.add_argument("--eval-every", type=int, default=100, help="periodically log target/source validation loss every N measured steps; default 100 for the 1k quality contract; use 50 for a 200-step sensor; 0 disables")
+    parser.add_argument("--eval-every", type=int, default=250, help="periodically log target/source validation loss every N measured steps; default 250, the quarter marks of the 1k quality contract; use 100 for a 300-step short run; 0 disables")
     parser.add_argument("--no-final-sample", dest="final_sample", action="store_false", help="disable final qualitative generation from a target eval prompt")
     parser.set_defaults(final_sample=True)
     parser.add_argument("--final-sample-row", type=int, default=0, help="target eval row index used for final qualitative generation")
