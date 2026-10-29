@@ -155,7 +155,7 @@ uv run python experiments/llm_synth_smoke.py \
 
 Every LFM table in `docs/FACTS.md` is at 1k steps; a shorter arm compares
 against nothing there. Pass `--beta`, the lr and `--lr-final-ratio` explicitly,
-so a log names its own arm; tables before the 2026-10-05 moment-first change ran
+so a log names its own arm (`--lr-decay` is `linear` unless set); tables before the 2026-10-05 moment-first change ran
 at a constant lr (`--lr-final-ratio 1`). `--rank-fraction` sets the optimizer's `rank_fraction`
 (default 0.1). Roughly 0.84 s/step at bs16 (2.7 GB peak) and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
 are the `usuitrack_final_val_loss` (target) and

@@ -192,8 +192,8 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         param = torch.nn.Parameter(torch.zeros(1))
         optimizer = torch.optim.SGD([param], lr=1.0)
 
-        def lr_at(step, final_ratio=0.2):
-            apply_lr_schedule(optimizer, [1e-4], step, 50, 1050, final_ratio)
+        def lr_at(step, final_ratio=0.2, decay="linear"):
+            apply_lr_schedule(optimizer, [1e-4], step, 50, 1050, final_ratio, decay)
             return optimizer.param_groups[0]["lr"]
 
         self.assertAlmostEqual(lr_at(25), 5e-5)
@@ -201,6 +201,10 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertAlmostEqual(lr_at(550), 6e-5)
         self.assertAlmostEqual(lr_at(1050), 2e-5)
         self.assertAlmostEqual(lr_at(1050, final_ratio=1.0), 1e-4)
+        self.assertAlmostEqual(lr_at(25, decay="cosine"), 5e-5)
+        self.assertAlmostEqual(lr_at(550, decay="cosine"), 6e-5)
+        self.assertAlmostEqual(lr_at(300, decay="cosine"), 2e-5 + 8e-5 * 0.5 * (1 + math.cos(math.pi / 4)))
+        self.assertAlmostEqual(lr_at(1050, decay="cosine"), 2e-5)
 
     def test_gradient_release_rejects_incompatible_harness_contracts(self):
         validate_gradient_release_contract(build_parser().parse_args([]))
