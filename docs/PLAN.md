@@ -102,6 +102,58 @@ projected weight gradient. The question is whether it can be made fast. A
 prerequisite read: tracking the frame from activations rather than from `G`,
 evaluated with the lab's transport reads.
 
+### S3. Tracking input-side frames from activations
+
+On the input side `G = delta^T X`, so `G^T G = X^T (delta delta^T) X` and the
+gradient's input span lies in the activations' span. Under the harness's
+residual-facing sides, every input-side frame reads a normed residual stream,
+and q/k/v (or gate/up) share one input: an activation frame would be one per
+norm site, not one per matrix. Questions (user, 2026-10-29): can the frame be
+tracked from `X` without losing eval, and how large is the overlap when both
+are tracked. How to settle: first a read with no effect on training -- a shadow
+frame per input-side matrix, turned each step by the same Oja aim and turn on
+`X` (`project_and_aim(X, Q_a)`), its action `X^T X Q_a` taken in a forward
+hook; read `||Q_g^T Q_a||_F^2 / r` and its capture `||G Q_a|| / ||G||` against
+`grad_capture`. Then an arm whose input-side frames are aimed from `X`, against
+the standard arm on eval. Unmeasured guess: the overlap is well short of 1,
+since `delta` concentrates on a few tokens while `X^T X` weighs every token,
+and the activation spectrum carries outlier channels the loss may not care
+about.
+
+---
+
+## Group M. Moment
+
+### M1. Where to throw the magnitude away: `Z`, or `G`?
+
+The moment blends `Z / ||Z||` (SPEC step 5) and the polar map discards scale,
+so every step enters the running average as a unit -- the intent being a
+better blend and a stable geometry, not a weighting. Normalizing `Z` is the
+cheap place to do it. The user's questions (2026-10-29): does a burst in
+gradient magnitude still reach the tracking, in which case the normalization
+belongs on `G`; and if steps are weighted at all, it should be by supervised
+token count, which varies step to step.
+
+Evidence (2026-10-29). Weighting by `||Z|| / ||G||` would weight by capture,
+which is flat (0.77 at 350M, 0.71 on LFM3 at rank 0.05), and a constant weight
+cancels in the polar map: no use. Supervised tokens per bs16 step vary with CV
+0.073 (350M) / 0.076 (LFM3), p01-p99 0.82-1.16 of the mean (FACTS): a
+token-count weight moves a step's share by ~8%. By construction magnitude does
+not reach the tracker either: the Oja tangent is divided by its mean Rayleigh
+quotient, the live floor is relative to `sigma_max`, and the turn is a constant
+`eta`. `lfm3-cos2e5-r05-s1`'s burst (window 550-575, `projected_grad_norm` 21x
+its neighbours) still read: `tangent_live_fraction` 0.821 against ~0.846 around
+it, `grad_capture` 0.703 against 0.708, back the next window; then
+`grad_moment_cosine` rose from 0.002 to 0.062 and decayed over ~150 steps.
+What a burst can do is steer by its direction -- one step's turn and one
+`1 - beta` share of the moment, as any step -- and through the fallback AdamW,
+which does see magnitude. Which of those made the cosine rise is unmeasured.
+The burst is not in the data: the same-seed redo (`lfm3-cos2e5-r05-s1-redo`)
+matches the first run to 4-5 digits through step 550 and reads 0.0897 in the
+burst's window, with no cosine rise after. Something nondeterministic produced
+a 21x gradient once. Open: whether a token-count weight is worth an arm
+(prediction: below the noise floor).
+
 ---
 
 ## Group T. Side

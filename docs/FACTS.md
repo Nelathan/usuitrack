@@ -880,6 +880,13 @@ at 350M. On LFM3 the stacked transient was the peak that pushed bs16 off the
 card (below). The lag reads cost nothing measurable: `lfm25-cos2e5-s1` without
 them 0.8870 s/step against 0.8871 with, same build.
 
+### Supervised tokens per step vary 7.5%
+
+2026-10-29, the standard arm's 1000 training batches (bs16 x seq1024, synth,
+right-padded), counted on CPU (`outputs/tools/tokens.py`): 11,324 supervised
+tokens per step at 350M, CV 0.073, p01-p99 9,298-13,165; LFM3's tokenizer
+10,898, CV 0.076, 8,916-12,725. Mean step-to-step change 8%.
+
 ### lr at 350M: the plateau cosine changes sign between 2e-5 and 5e-5
 
 2026-10-28, standard arm at `--lr-final-ratio 1` (PLAN L1's 350M half), seed 1;
