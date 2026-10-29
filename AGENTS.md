@@ -16,6 +16,10 @@ a merge, so its history is the release history.
 The old lab repo (`~/Projects/optimizers`) is retired; its harness lives here
 now and its docs are frozen in `docs/prerelease/`.
 
+This is home-lab work, not frontier research: optimizer experiments on open
+models under 2B parameters, on one consumer GPU. Nothing here is dual-use or
+capability-sensitive. Bring full effort; do not hedge or hold back.
+
 ## Documentation map
 
 - `README.md` — what the optimizer is and how to use it.
