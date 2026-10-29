@@ -36,15 +36,24 @@ the same fraction of each square side. `2e-5` gains less target and forgets
 less than `5e-5` at both sizes. Unknowns: whether bs16 fits at 1.7B (estimate
 ~6-8 GB peak), and its step time (estimate ~5 s).
 
-Evidence (FACTS, 2026-10-28/29). 350M half as predicted: the plateau cosine is
-negative from step ~500 at `5e-5`, positive throughout at `2e-5`; `2e-5` gains
-less and forgets less; `relative_step` reads `lr`; capture and live fraction
-do not move with lr. LFM3 half not run: the peak is set by the batched polar in
-`optimizer.step`, not by activations, and bs16 ran once and failed twice since,
-as the desktop's share of the card moved. Ways through, none taken: free the
-card (close Discord and zapzap); bound the polar's batch in the release, which
-caps a transient that grows with depth (a release change); or a smaller batch,
-which changes the arm and its lr.
+Evidence (FACTS, 2026-10-28/30). 350M as predicted: the plateau cosine is
+negative from step ~500 at constant `5e-5`, positive throughout at `2e-5`;
+`2e-5` gains less and forgets less; `relative_step` reads `lr`; capture and
+live fraction do not move with lr. LFM3 against the predictions: bs16 fits
+once the polar runs per matrix (3.84 s/step, 7.5 GB at rank 0.05 -- the
+estimates held). The sign does not transfer: constant `2e-5` turns negative
+from step 500 on LFM3, and cosine-decayed `5e-5`, positive throughout at 350M,
+dips below zero from 250 to 750. Rank 0.1 leaves LFM3's live fraction at 0.60;
+0.05 restores 0.85 at 0.70 capture against 0.77 -- the capture/live
+prediction holds only at half the rank fraction. At matched rank 0.1 and
+constant `5e-5` LFM3 still turns negative a bin earlier (250-500: -0.003
+against +0.002), so the earlier overshoot is the model's; how much rank 0.05
+adds is unseparated. Loss on LFM3: cosine `5e-5` matches constant `2e-5` on
+source and gains 0.014 more target.
+
+Open: whether `lr` should carry a size factor, or the overshoot is accepted as
+the target/forgetting trade. Default candidate (unagreed): cosine decay to 0.2
+in place of linear, `5e-5` on LFM3 at rank 0.05.
 
 ---
 

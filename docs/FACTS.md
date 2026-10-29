@@ -866,7 +866,21 @@ slower is unmeasured. Last logged reads: `grad_capture` 0.768,
 `tangent_live_fraction` 0.828, `grad_moment_cosine` 0.007, `relative_step`
 2.1e-5 (the decayed lr).
 
-### Constant lr at 350M: the plateau cosine changes sign between 2e-5 and 5e-5
+### Stacking only the tangent eigh keeps most of the speed and none of the transient
+
+2026-10-29, standard arm with the lag reads, seed 1. Stacking every same-shaped
+matrix's polar and turn into one call (`release-trainmode-s1`) ran 0.840 s/step
+at a 2.24 GB `optimizer.step` peak; everything per matrix
+(`release-unstack-s1`) 0.969 s/step at 1.63 GB; per matrix with only the
+`[r,r]` tangent-Gram `eigh` batched by rank (`release-eighstack-s1`) 0.887
+s/step at 1.64 GB. Losses within 4e-5 target and 8e-4 source of each other,
+inside the noise floor: stacking moves speed, not outcome. A microbench put
+~0.8 ms/matrix on a solo `eigh` and ~0.4 ms on a solo polar, both launch-bound
+at 350M. On LFM3 the stacked transient was the peak that pushed bs16 off the
+card (below). The lag reads cost nothing measurable: `lfm25-cos2e5-s1` without
+them 0.8870 s/step against 0.8871 with, same build.
+
+### lr at 350M: the plateau cosine changes sign between 2e-5 and 5e-5
 
 2026-10-28, standard arm at `--lr-final-ratio 1` (PLAN L1's 350M half), seed 1;
 initial losses 2.297055 target / 2.917386 source. `grad_moment_cosine` as bin
@@ -876,6 +890,8 @@ means over steps (wandb history):
 |---|---|---|---|---|---|---|---|
 | `lfm25-c5e5-s1` | +0.475 | +0.056 | +0.0018 | -0.0051 | -0.0066 | 1.664033 | 3.041894 |
 | `lfm25-c2e5-s1` | +0.604 | +0.176 | +0.034 | +0.0083 | +0.0017 | 1.692191 | 3.010912 |
+| `lfm25-cos2e5-s1` (2e-5, cosine to 0.2) | +0.604 | +0.177 | +0.039 | +0.0195 | +0.0173 | 1.717568 | 2.997595 |
+| `lfm25-cos5e5-s1` (5e-5, cosine to 0.2) | +0.475 | +0.057 | +0.0055 | +0.0032 | +0.0059 | 1.671939 | 3.026230 |
 | `release-clean-s1` (1e-4, decay 0.2) | +0.351 | +0.017 | -0.004 | -0.003 | +0.0002 | 1.652230 | 3.057482 |
 
 At 5e-5 the step overshoots the moment from step ~500 on, as 1e-4 does before
@@ -883,29 +899,63 @@ its decay brings it back; at 2e-5 the moment leads throughout. Loss orders the
 same way: 2e-5 gains 0.028 less target and forgets 0.031 less source than 5e-5.
 `relative_step` reads `lr` on both (2e-5 reads 1.37e-5 in the first bin, the
 warmup). `grad_capture` ~0.77 and `tangent_live_fraction` 0.81 at the end on
-both: neither depends on lr. 1.12 s/step.
+both: neither depends on lr. 1.12 s/step. Cosine decay to 0.2 of 2e-5
+(2026-10-29) keeps the cosine positive and higher on the plateau; it gains
+0.025 less target and forgets 0.013 less source than constant 2e-5, the
+direction a lower constant lr would also take. Cosine decay of 5e-5
+(2026-10-30) keeps the cosine positive throughout where constant 5e-5 turns
+negative; it gains 0.008 less target and forgets 0.016 less source.
 
 ## LFM3-1.7B lane
 
-### bs16 sits on the edge of a 12 GB card, and the polar step is the peak
+### bs16 fits once the polar runs per matrix
 
-2026-10-29, `LiquidAI/LFM3-1.7B-Base` at revision `545fc8f`, the harness at
-`b0aade0`, bs16, seq 1024, compile on, `release_matrix_grads`,
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. A 20-step probe
-(`lfm3-probe3`) ran: 4.04 s/step, 4053 tok/s, matrix state 702 MB. Peak
-allocated: 4.19 GB baseline, 7.29 GB forward, 7.58 GB backward, **9.03 GB
-(8.41 GiB) in `optimizer.step`**. The ~1.45 GB above backward is the step's
-transient, and every failure below died in `unit_polar`, which stacks
-same-shaped moments into one Newton-Schulz call: a transient that grows with
-the number of same-shaped matrices, so with depth, not with batch.
+2026-10-29/30, `LiquidAI/LFM3-1.7B-Base` at revision `545fc8f`, bs16, seq 1024,
+compile on, `release_matrix_grads`,
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. With the stacked polar the
+peak was `optimizer.step`'s transient (9.03 GB allocated in a 20-step probe),
+growing with the count of same-shaped matrices, so with depth; it failed bs16
+twice. Per matrix (`f6ae127`) the peak is backward: 7.91 GB allocated, 10.2 GB
+reserved, 4.22 s/step at `rank_fraction 0.1` (`lfm3-c5e5-s1`); 7.48 GB, 8.43
+GB, 3.84 s/step at 0.05. Five 1k runs since, no failure, with Discord, zapzap
+and Zed closed (they held ~1.4 GB of the card).
 
-With the allocator setting, two later attempts failed in that call, on step 1:
-`lfm3-c5e5-s1` at 8.10 GiB allocated and a one-step rerun at 7.86 GiB, each
-asking 560 MiB more -- at or below the probe's peak. Not a leak: the initial
-eval leaves 7 MB. The card holds 2678 MiB with no run (nvidia-smi, 00:15;
-Discord 597, zapzap 486, Zed 294, the rest the desktop), so whether bs16 fits
-depends on what those hold at that moment. Without the setting (`lfm3-probe2`),
-1.30 GiB sat reserved but unallocated at the failure.
+### lr on LFM3: the cosine crosses zero at a lower lr than at 350M
+
+2026-10-29/30, the standard arm on LFM3 (above), seed 1, eval every 250 (500
+on the two constant arms); initial losses 1.857030 target / 2.649378 source.
+`grad_moment_cosine` as bin means over steps (wandb history):
+
+| arm | rank | 0-100 | 100-250 | 250-500 | 500-750 | 750-1000 | target | source |
+|---|---|---|---|---|---|---|---|---|
+| `lfm3-c5e5-s1` (constant) | 0.1 | +0.394 | +0.037 | -0.0029 | -0.0070 | -0.0057 | 1.317608 | 2.703539 |
+| `lfm3-c2e5-r05-s1` (constant) | 0.05 | +0.468 | +0.081 | +0.0069 | -0.0042 | -0.0048 | 1.333427 | 2.690231 |
+| `lfm3-cos5e5-r05-s1` (cosine to 0.2) | 0.05 | +0.393 | +0.030 | -0.0022 | -0.0022 | +0.0023 | 1.319610 | 2.690622 |
+| `lfm3-cos2e5-r05-s1-redo` (cosine to 0.2) | 0.05 | +0.469 | +0.082 | +0.0106 | +0.0035 | +0.0060 | 1.343179 | 2.681620 |
+
+At 350M constant 2e-5 leads throughout and cosine-decayed 5e-5 stays positive
+(table above); on LFM3 the first turns negative from step 500 and the second
+dips below zero from 250 to 750. At matched rank 0.1 and constant 5e-5, LFM3
+turns negative a bin earlier than 350M (250-500: -0.0029 against +0.0018) and
+deeper: LFM3 overshoots at a lower lr, so `lr` does not transfer as a
+dynamics-preserving constant. How much rank 0.05 adds is unseparated.
+`relative_step` reads `lr` on both models. Rank 0.05 against 0.1 at 5e-5 holds
+`tangent_live_fraction` at 0.85 against 0.60 and costs capture, 0.70 against
+0.77; neither moves with lr.
+
+Loss: cosine 5e-5 matches constant 2e-5 on source (2.6906 / 2.6902) and gains
+0.014 more target, so it dominates it; against cosine 2e-5 it gains 0.024 more
+target and forgets 0.009 more source. At 350M the same cosine 5e-5 is not
+dominant over constant 2e-5 (0.020 more target, 0.015 more forgetting).
+
+A spontaneous gradient burst. `lfm3-cos2e5-r05-s1`, the redo's first run at
+the same seed and settings, had one window (steps 550-575) with
+`projected_grad_norm` 21x its neighbours; the redo matches it to 4-5 digits
+through step 550 and has no burst, so it is nondeterministic, not the data.
+The burst left `tangent_live_fraction` 2.5 points and `grad_capture` 0.005 low
+for one window, then raised the plateau cosine (bins 500-750 / 750-1000:
++0.0197 / +0.0118 against the redo's +0.0035 / +0.0060) for ~150 steps. Final
+losses 1.345078 / 2.683056, 1.9e-3 / 1.4e-3 from the redo: at the noise floor.
 
 ## Run ledger (Anima)
 
