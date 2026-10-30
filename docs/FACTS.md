@@ -1054,6 +1054,34 @@ Eager makes ~10 passes over `W`; compiled, one fused pass after the norm
 and the lift (0.38 against 1.21 ms per matrix). LFM3 compiles three graphs.
 Backward peak 7.23 GB in both.
 
+### Training without `dW`: the stream aim ties `G`'s; the input side costs source
+
+2026-10-30, PLAN S2, `--projected-grads` (`experiments/projected_grads.py`) on
+the standard arm (constant `4e-5`, 500 steps, seed 1), against
+`lfm3-const4e5-s1` at step 500. The `x-side` arms put every tracked matrix on
+its input side (a runner patching `resolve_tracked_side`); the others keep the
+shape rule (input side on 105 matrices, output side on 48). Target / source:
+
+| aim | shape rule | input side everywhere |
+|---|---|---|
+| `G` | 1.340820 / 2.686102 | 1.339945 / 2.695103 |
+| streams, no `dW` | 1.340507 / 2.685977 | 1.339551 / 2.695242 |
+
+The aim is loss-neutral: the stream arms match their `G` twins to 4e-4 at
+every eval. The side is not: input side everywhere forgets 9.0e-3 more source
+at 500 under both aims, behind at every eval from step 100 (+5e-3 to +9e-3),
+for target that leads early (-8.7e-3 at 100) and ties by 500 (-0.9e-3). It
+raises capture 0.703 -> 0.770 (250-500) and `projected_grad_norm` 11%.
+
+Under the stream aim `tangent_live_fraction` reads 0.996 against 0.845: the
+stream action has energy in every frame direction where `G`'s leaves 15%
+dead, so the read means something else there. Its `grad_capture` divides by
+the 16-probe estimate of `||G||`, whose square root is biased low; its +0.006
+over the `G` arm is unresolved.
+
+Cost: 3.48 s/step against 3.89 (both sides), the 0.4 s the `dW` GEMMs cost;
+backward peak 7.76 GB against 7.47, the persistent leaves and their grads.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
