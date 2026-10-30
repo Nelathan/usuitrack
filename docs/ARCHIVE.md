@@ -1068,6 +1068,16 @@ and `delta` on principle; conceptually the two are a draw, since S2 serves
 the output side with the same three leaves (exact `Z`, `delta^T delta Q`), so
 the measured cost decides.
 
+## CLOSED -- a live aim does not make a larger rank pay
+
+PLAN S2, 2026-10-30 (FACTS, "Rank 0.1 against 0.05"). The stream aim pulls on
+every plane, so it keeps 91% of the planes live at rank 0.1 where the `G` aim
+keeps 59%. Doubling rank raises capture 0.70 -> 0.77 under both aims and
+moves neither loss at 500 steps (6e-4 target, 1.6e-3 source across the four
+arms). Liveness is not the binding constraint on this lane; rank 0.05 stays.
+It is the third read of one pattern this day: capture bought by the side,
+the residual writers or the rank does not reach the loss.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

@@ -1135,6 +1135,24 @@ during the backward's tail. Over the whole step 480 ms (13%) of GPU time is
 idle, in 5-100 us gaps between ~30k kernels, ~155 ms of it inside the
 optimizer step and ~37 ms in `prepare`.
 
+### Rank 0.1 against 0.05: capture without loss, under either aim
+
+2026-10-30, standard arm at 500 steps, `r10-g-s1-500` and `r10-s2-s1-500`
+against the rank-0.05 pair above; target / source at 500, reads over steps
+250-500:
+
+| aim | rank 0.05 | rank 0.1 |
+|---|---|---|
+| `G` | 1.340820 / 2.686102, live 0.85, capture 0.70 | 1.340731 / 2.684453, live 0.59, capture 0.77 |
+| streams (S2) | 1.340507 / 2.685977, live 1.00, capture 0.71 | 1.340237 / 2.684781, live 0.91, capture 0.78 |
+
+The four arms sit within 6e-4 target and 1.6e-3 source. The stream aim keeps
+91% of the planes live at rank 0.1 where `G`'s keeps 59%, and neither turns
+the extra capture into loss. Rank 0.1 starts slower (eval at 100: 1.4410 `G`,
+1.4387 S2, against 1.4331) and catches up by 300. S2 at rank 0.1 runs 3.73
+s/step against 4.03; its leaves scale with rank, backward peak 8.56 GB against
+7.69 (+0.88, against +0.29 at rank 0.05).
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
