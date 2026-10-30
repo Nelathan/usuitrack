@@ -943,6 +943,7 @@ on the two constant arms); initial losses 1.857030 target / 2.649378 source.
 | `lfm3-cos5e5-r05-s1` (cosine to 0.2) | 0.05 | +0.393 | +0.030 | -0.0022 | -0.0022 | +0.0023 | 1.319610 | 2.690622 |
 | `lfm3-cos2e5-r05-s1-redo` (cosine to 0.2) | 0.05 | +0.469 | +0.082 | +0.0106 | +0.0035 | +0.0060 | 1.343179 | 2.681620 |
 | `lfm3-cos4e5-s1-500` (cosine to 0.2, 500 steps) | 0.05 | +0.415 | +0.043 | +0.0086 | - | - | 1.348516 | 2.676394 |
+| `lfm3-const4e5-s1` (constant) | 0.05 | +0.415 | +0.040 | -0.0033 | -0.0081 | -0.0069 | 1.321947 | 2.699859 |
 
 At 350M constant 2e-5 leads throughout and cosine-decayed 5e-5 stays positive
 (table above); on LFM3 the first turns negative from step 500 and the second
@@ -959,9 +960,13 @@ Loss: cosine 5e-5 matches constant 2e-5 on source (2.6906 / 2.6902) and gains
 target and forgets 0.009 more source. At 350M the same cosine 5e-5 is not
 dominant over constant 2e-5 (0.020 more target, 0.015 more forgetting).
 
-`lfm3-cos4e5-s1-500` is the standard arm (cosine `4e-5`, 500 steps; 3.88
-s/step), the reference for 500-step LFM3 reads. Its decay spans 500 steps, so
-its bins and losses compare with the 1k arms' only loosely.
+`lfm3-const4e5-s1` is the standard arm and the reference for LFM3 reads
+(constant `4e-5`, eval every 100; 3.89 s/step, 7.47 GB backward peak). A
+shorter run compares at a shared step; at 500 it reads 1.340820 / 2.686102.
+Against constant 2e-5 it gains 0.0115 target and forgets 0.0096 more source;
+its cosine turns negative in the same bin as constant 5e-5, with capture 0.70
+and `tangent_live_fraction` 0.85 on the plateau. The 500-step cosine arm,
+annealed by step 500, trails it there by 0.0077 target and forgets 0.0097 less.
 
 A spontaneous gradient burst. `lfm3-cos2e5-r05-s1`, the redo's first run at
 the same seed and settings, had one window (steps 550-575) with
