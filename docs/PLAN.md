@@ -47,14 +47,25 @@ summed gradient's tangent. The in-optimizer fold that did this was removed
 (`ARCHIVE.md`, "accumulation is removed"); its open questions (B1-B4 there) are
 this one's prior.
 
-### S2. Projected gradients from projected activations (molegrad)
+### S2. Weight gradients without `G` (molegrad)
 
-Project activations into the subspace in the forward pass so that backward
-produces `Z` directly and the full gradient never exists. Proven to work and
-slower; it needs an autograd replacement, since PyTorch has no hook for a
-projected weight gradient. The question is whether it can be made fast. A
-prerequisite read: tracking the frame from activations rather than from `G`,
-evaluated with the lab's transport reads.
+The goal (user, 2026-10-30). Wherever autograd forms `dW = delta^T X`, both
+streams are in hand, so `G` is unnecessary: with the held frame `Q` (it turns
+only in `step()`, so it is known in the forward) the input side's
+`Z = G Q = delta^T (X Q)` and its Oja action `G^T G Q = X^T (delta Z)`, the
+output side's `Z = Q^T G = (delta Q)^T X` and action `delta^T (X Z^T)` -- exact,
+four skinny GEMMs against one full one, a FLOP ratio of
+`2 r (d_in + d_out) / (d_in d_out)` (~0.1 at rank 0.05). Wired by freezing `W`
+for autograd and taking `X` and `delta` per module, no null gradients. Tracking
+the frame from `X` (S3) is then needed only to not hold `X` at all. Not holding
+`X` does not retire checkpointing: `dX = delta W` needs no `X`, but SwiGLU,
+attention, conv and norm internals keep their own saves, and down/o_proj (output
+side) need the full `X` for `Z`. Old evidence (`../optimizers`,
+`PROJECTED_ACTIVATION.md`, 350M bs8): a custom-autograd version, all frames
+input-side, saved ~275 MB on top of checkpointing and ran 9% slower in eager
+wrappers. Open: the wiring under `torch.compile` (module hooks vs a zero
+adapter `y = x W^T + (x Q) A^T` whose `A.grad` is `Z`, vs a `torch.library`
+custom op); and the speed.
 
 ### S3. Tracking input-side frames from activations
 
@@ -82,6 +93,26 @@ the input side, which makes S2's prerequisite read positive. Open: whether the
 1.4 points cost anything over a longer run or at another lr; one frame per
 norm site (q/k/v and gate/up share `X`) in place of one per matrix, which is
 what S2 would need.
+
+### S4. Tracking output-side frames from `delta`, and from both streams
+
+On the output side `G G^T = delta^T (X X^T) delta`, so the gradient's output
+span lies in `delta`'s: S3's mirror, a shadow and an aim arm on `delta^T delta Q`
+from a backward hook (the user, 2026-10-30). Then two ways to use both streams
+(user and Claude): the agreement of the two frames -- the core
+`C = (delta Q_delta)^T (X Q_x)`, `[r,r]`, the gradient seen through both, whose
+singular vectors pick the directions inside each frame the gradient uses, the
+input action `X^T (delta Q_delta) C` exact when `delta` lies in `Q_delta`; or
+one step on both Grams -- under residual-facing sides every frame lives in
+`d_model` coordinates, as do `X` (the normed stream, read) and `delta` (the
+residual gradient, written), so their trace-normalized Grams may simply add;
+or `X` weighted per token by `||delta_t||^2`, the diagonal of `delta delta^T`,
+which tests whether S3's 1.4-point capture gap is `delta`'s token concentration.
+Sharing: q/k/v and gate/up read one `X`, so an `X` frame is one per norm site;
+aimed per matrix, q/k/v's frames should converge onto it
+(unmeasured: the aim arm logged no overlap between them). A frame that mixes in
+`delta` is per matrix again. How to settle: all shadows in one 500-step LFM3
+run, read against the G-frame like S3.
 
 ---
 
