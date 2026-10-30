@@ -1185,6 +1185,16 @@ The k=1 pair sets the float noise, 5e-5. k=2 moves 6e-4 either way, under
 the run-to-run floor: the frame fitted from half the batch, or `z` summed in
 bf16, unseparated.
 
+### The `[Q | P]` join: 40 ms in the microbench, inside the run's spread
+
+2026-10-30. S2's backward work per step on LFM3 shapes, compiled
+(`outputs/tools/s2_bwd_bench.py`): 247 ms, 207 ms with the probes riding the
+frame's GEMM over each stream, against an 80 ms floor for reading `X` and
+`delta` once at the measured 390-420 GB/s. In the run (`s2-join-100` against
+`s2-split1-100`, standard arm, 100 steps, seed 1): target 1.431849 against
+1.431749, capture 0.710; steps 75-100 at 3.290 s/step, where three runs of
+the code before the join spread over 3.294-3.324.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
