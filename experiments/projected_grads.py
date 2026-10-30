@@ -60,6 +60,12 @@ class _Projected(torch.autograd.Function):
         return grad_x, None, None, None, None, z, action.float(), probed
 
 
+def _anchor(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> Tensor:
+    """A leaf whose value is never read, only the grad autograd gives it: one
+    zero expanded to `shape`, so it holds no storage of its own."""
+    return torch.zeros((), dtype=dtype, device=device).expand(shape).requires_grad_()
+
+
 class ProjectedLinear(torch.nn.Linear):
     """A Linear whose weight gradient arrives projected; `ProjectedGrads` swaps
     a tracked Linear's class to this once its frame is fitted."""
@@ -141,9 +147,9 @@ class ProjectedGrads:
             module.basis = basis
             module.right = right
             module.probes = self._probe(weight.shape[1], weight.device, weight.dtype)
-            module.z = torch.zeros(other, basis.shape[-1], dtype=weight.dtype, device=weight.device, requires_grad=True)
-            module.action = torch.zeros(basis.shape, dtype=torch.float32, device=weight.device, requires_grad=True)
-            module.probed = torch.zeros(PROBES, dtype=torch.float32, device=weight.device, requires_grad=True)
+            module.z = _anchor((other, basis.shape[-1]), weight.dtype, weight.device)
+            module.action = _anchor(basis.shape, torch.float32, weight.device)
+            module.probed = _anchor((PROBES,), torch.float32, weight.device)
             weight.requires_grad_(False)
             self._projected.append(module)
         self._waiting = still
