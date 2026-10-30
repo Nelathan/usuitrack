@@ -66,8 +66,6 @@ the whole `dW` cost and ties `G`'s aim on loss. Open:
   tied target under either aim, as ARCHIVE "tracking the residual-facing side"
   lost 8.2e-3 target with older code. One seed on LFM3, whose noise floor is
   unmeasured.
-- `||G||` from 16 probes is unmeasured against the true norm on LFM3; the
-  reads that divide by it are suspect until it is.
 - The weighted action is a token sum, so accumulation is exact (tested on
   CPU), which may answer S1; no accumulated run yet.
 

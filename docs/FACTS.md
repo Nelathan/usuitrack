@@ -1076,8 +1076,12 @@ raises capture 0.703 -> 0.770 (250-500) and `projected_grad_norm` 11%.
 Under the stream aim `tangent_live_fraction` reads 0.996 against 0.845: the
 stream action has energy in every frame direction where `G`'s leaves 15%
 dead, so the read means something else there. Its `grad_capture` divides by
-the 16-probe estimate of `||G||`, whose square root is biased low; its +0.006
-over the `G` arm is unresolved.
+the 16-probe estimate of `||G||`. On the true bs16 gradients of an ordinary
+run (`outputs/tools/probe_bias.py`, 20 draws per matrix at steps 1, 25, 100,
+200), the estimate's ratio to `||G||` averages 0.990-1.004 on every weight
+shape, spread 4-11% per matrix and step (3.7% on the FFN inputs at 200, 8% on
+k/v), and inflates a read divided by it by 0.2-1.1% at step 200: about +0.003
+of the +0.006 capture over the `G` arm.
 
 Cost: 3.48 s/step against 3.89 (both sides), the 0.4 s the `dW` GEMMs cost;
 backward peak 7.76 GB against 7.47, the persistent leaves and their grads.
