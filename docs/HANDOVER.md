@@ -1,14 +1,17 @@
 # Handover
 
-Written 2026-10-28, updated 2026-10-30 night. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-10-30, 14:00. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
 
 The release cleanup is on `lab`: one optimizer with a minimal surface, its
 maths in `docs/SPEC.md`, history moved to `docs/NOTES.md` and `docs/ARCHIVE.md`.
-PLAN holds L1 (lr transfer), N (norm), S (subspace gradients, now with S3), M1
-(where magnitude is dropped), T (side), and a one-line index of the parked ones.
+PLAN holds N (norm), S (subspace gradients: S1 accumulation, S2 weight
+gradients from both streams), M1 (where magnitude is dropped), T (side), and a
+one-line index of the parked ones. Closed: L1, `lr` does not transfer across
+sizes, the release defaults to `4e-5`, LFM3's; S3 and S4, frames track from
+the streams, the input side from `X` weighted by `delta`'s token norms.
 
 - **Package:** `frame.py` (fit, Oja aim, constant-angle turn, retraction),
   `polar.py` (balanced Newton-Schulz), `optimizer.py`, `diagnostics.py`,
@@ -22,14 +25,18 @@ PLAN holds L1 (lr transfer), N (norm), S (subspace gradients, now with S3), M1
 - **Telemetry:** on/off, six self-describing reads (`READS`). Transport,
   concentration, persistence and role breakouts are `LabDiagnostics`, installed
   by the harness; `transport_spin` is gone.
-- **Harness:** eval at 250/500/750/end by default; short runs are 300 steps at
-  `--eval-every 100`; lag reads only for tracker diagnostics.
-  `--activation-frames {off,shadow,aim}` is the S3 instrument.
+- **Harness:** LFM3-1.7B pinned at `545fc8f` is the default model, at the
+  standard arm (constant `4e-5` after a 50-step warmup, rank 0.05, 500
+  steps, eval every 100); a shorter run is a prefix of a longer one, 1k only
+  for the late plateau. The LFM2.5 lane's
+  arm is in AGENTS. Lag reads only for tracker diagnostics.
+  `--activation-frames {off,shadow,aim}` is the S3 instrument,
+  `--stream-frames` the S4 one.
 - **Fixed:** fp16 targets were stochastically rounded on bf16's grid; a stale
   group index after `load_state_dict`; hooks missing on later param groups;
   `pop()` making two transfers; a NaN gradient turning `grad_capture` NaN; lab
   frame-motion reads sampling only the first param group.
-- **Verified:** 69 tests; golden trajectories from the old code reproduced to
+- **Verified:** 75 tests; golden trajectories from the old code reproduced to
   ~5e-6 relative; `release-clean-s1`, the standard arm: 1.652230 / 3.057482 against the
   reference 1.652199 / 3.058867, 1.133 s/step (FACTS).
   `examples/train_pytorch.py` and `train_hf_trainer.py` run in both modes.
@@ -42,13 +49,12 @@ release files onto it, prepared locally after your review; you push.
 
 ## Next
 
-- **Default candidates (unagreed, PLAN L1):** cosine decay to 0.2 in place of
-  linear; `5e-5` on LFM3 at `rank_fraction 0.05`. When LFM3 becomes the default
-  model, the harness also sets `expandable_segments` and the FACTS tables get a
-  model annotation.
-- S3 answered on LFM3 (FACTS, "Input-side frames tracked from activations"):
-  overlap 0.81, eval unchanged when aimed from `X`. Next there is S2 or one
-  frame per norm site; your pick.
+- `lfm3-const4e5-s1`, the constant-lr standard arm at 1k with evals every
+  100: the reference for every length; into FACTS when it lands.
+- S2 per `docs/PROJECTED_ACTIVATION_2.md`, with the weighted `X` frame, on
+  branch `x-side` (the user, 2026-10-30): a microbench on one compiled,
+  checkpointed LFM3 layer first.
+- The release `rank_fraction` default is still 0.1; the harness runs 0.05.
 - M1 has no arm; its open item (a token-count weight) is predicted below noise.
 
 ## To review
@@ -83,6 +89,21 @@ Under your handover of 2026-10-29 night, oldest first:
   harness wiring).
 - `b754b74` ledger: L1 on LFM3, the per-matrix step's speed.
 - `622aba8` PLAN: M1 and S3 opened, before their runs.
+
+2026-10-30 day, oldest first:
+- `49f36dc` harness: LFM3 the default model at the standard arm; AGENTS lanes.
+- `f0f6ee4` release: `lr` defaults to `4e-5`.
+- `4f6b132` FACTS: 350M at cosine `4e-5`.
+- `b9457e6` L1 closed into ARCHIVE.
+- `5a82246` PLAN: S2 as exact weight gradients from both streams; S4 opened.
+- `e451d00` `docs/PROJECTED_ACTIVATION_2.md`.
+- `88c9bad` `frame.aim` split off `project_and_aim` (release, behaviour-identical).
+- `fae7b82` the S4 instrument (`experiments/stream_frames.py`, tests, flag).
+- `0803e40` FACTS: the standard arm at 500 steps.
+- `7c162d7` FACTS: S4, the weighted `X` frame holds G's capture.
+- `ebfa1b5` S3 and S4 closed into ARCHIVE; PLAN S2 carries the frame and the
+  side question.
+- `209ab14` harness: constant lr, eval every 100.
 
 Run logs: wandb `pink-marker/usuitrack` (`lfm25-c5e5-s1`, `lfm25-c2e5-s1`,
 `release-trainmode-s1`, `lfm3-*`, ...); local logs, queue tools (`queue.sh`;
