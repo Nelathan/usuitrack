@@ -29,6 +29,7 @@ if not __package__:
     # Run by path, which puts experiments/ on sys.path rather than the repo root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.activation_frames import MODES as ACTIVATION_FRAME_MODES, ActivationFrames
+from experiments.projected_grads import ProjectedGrads
 from experiments.stream_frames import StreamFrames, lfm_sites
 from experiments.lab_diagnostics import LabDiagnostics
 
@@ -815,6 +816,7 @@ def train_step(
     global_clip_params: Sequence[torch.nn.Parameter] = (),
     global_clip_norm: float | None = None,
     activation_frames: ActivationFrames | StreamFrames | None = None,
+    projected_grads: ProjectedGrads | None = None,
 ) -> dict[str, float | torch.Tensor | None]:
     optimizer.zero_grad(set_to_none=True)
     if fallback_optimizer is not None:
@@ -838,6 +840,8 @@ def train_step(
         if sensors is not None and offset == grad_accum_steps - 1:
             sensors.mark("backward")
         losses.append(loss.detach().float())
+    if projected_grads is not None:
+        projected_grads.prepare()
     if collect_norms:
         # Under release_matrix_grads the matrix gradients are already freed; their
         # raw norms wait in the optimizer's pending work until step().
@@ -985,6 +989,7 @@ def run_optimizer(
 
     fallback_optimizer = None
     activation_frames = None
+    projected_grads = None
     if optimizer_name == "usuitrack":
         optimizer = UsuiTrack(
             usuitrack_param_groups,
@@ -1003,6 +1008,8 @@ def run_optimizer(
             activation_frames = ActivationFrames(model, optimizer, args.activation_frames)
         if args.stream_frames:
             activation_frames = StreamFrames(model, optimizer, lfm_sites(model))
+        if args.projected_grads:
+            projected_grads = ProjectedGrads(model, optimizer)
         if fallback_params:
             fallback_optimizer = StochasticAdamW(
                 fallback_params,
@@ -1078,6 +1085,7 @@ def run_optimizer(
             global_clip_params=[param for _name, param in adapter_named],
             global_clip_norm=args.lora_grad_clip_norm if optimizer_name == "lora" else None,
             activation_frames=activation_frames,
+            projected_grads=projected_grads,
         )
     if optimizer_name == "lora":
         validate_lora_optimizer_state_dtype(optimizer, adapter_named[0][1].dtype)
@@ -1111,6 +1119,7 @@ def run_optimizer(
             [param for _name, param in adapter_named],
             args.lora_grad_clip_norm if optimizer_name == "lora" else None,
             activation_frames,
+            projected_grads,
         )
         measured_steps.append(step_result)
         loss_window.append(step_result["loss"])
@@ -1343,6 +1352,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="prepare each full matrix gradient in a post-accumulate backward hook and release it immediately while retaining batched Oja/Aurora application in optimizer.step() (default on; requires no accumulation)",
     )
     parser.add_argument(
+        "--projected-grads",
+        action="store_true",
+        help="PLAN S2: tracked matrices never form G; each backward returns Z and the frame's action from X and delta instead. See experiments/projected_grads.py",
+    )
+    parser.add_argument(
         "--trace-backward-memory",
         action="store_true",
         help="probe-only: buffer per-matrix CUDA allocator readings immediately before and after gradient preparation on the final measured backward",
@@ -1382,6 +1396,8 @@ def main() -> None:
             raise ValueError("--stream-frames pairs one batch's streams with its G and requires --grad-accum-steps 1")
         if not args.activation_checkpointing:
             raise ValueError("--stream-frames takes X on the checkpoint recompute and requires --activation-checkpointing")
+    if args.projected_grads and (args.activation_frames != "off" or args.stream_frames):
+        raise ValueError("--projected-grads leaves no G for the S3/S4 instruments to read")
     if args.warmup_steps < 0:
         raise ValueError("warmup_steps must be non-negative")
     if args.max_steps <= 0:
@@ -1486,7 +1502,7 @@ def main() -> None:
     print(
         f"seq_len={args.seq_len} batch_size={args.batch_size} grad_accum_steps={args.grad_accum_steps} "
         f"warmup_steps={args.warmup_steps} max_steps={args.max_steps} param_scope={args.param_scope} "
-        f"rank_fraction={args.rank_fraction} activation_frames={args.activation_frames} stream_frames={args.stream_frames} "
+        f"rank_fraction={args.rank_fraction} activation_frames={args.activation_frames} stream_frames={args.stream_frames} projected_grads={args.projected_grads} "
         f"lora_rank={args.lora_rank} lora_alpha={args.lora_alpha} lora_lr={args.lora_lr} lora_grad_clip_norm={args.lora_grad_clip_norm} "
         f"lr_warmup_steps={args.lr_warmup_steps} lr_final_ratio={args.lr_final_ratio} lr_decay={args.lr_decay} "
         f"orthogonalization=aurora "

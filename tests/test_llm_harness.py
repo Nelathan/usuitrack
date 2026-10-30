@@ -182,6 +182,7 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.eval_every, 100)
         self.assertEqual(args.activation_frames, "off")
         self.assertFalse(args.stream_frames)
+        self.assertFalse(args.projected_grads)
         self.assertEqual(args.attn_implementation, "sdpa")
         self.assertTrue(args.activation_checkpointing)
         self.assertTrue(args.torch_compile)
