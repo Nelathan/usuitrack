@@ -26,16 +26,7 @@ GEODESIC_STEPSIZE = 0.02
 
 @torch.compile(dynamic=True)
 def write_weight(param: Tensor, direction: Tensor, basis: Tensor, side: str, lr: float, decay: float) -> Tensor:
-    """SPEC step 8 on one matrix; returns `||W||` from before the write.
-
-    Compiled because eager spends ~10 dense passes over `W` per matrix where
-    inductor emits the norm, the lift's GEMM and one fused pass for the rest,
-    rounding included. `dynamic=True` keeps sizes symbolic, so a model compiles
-    one graph per side plus one for square matrices; `lr` and `decay` are
-    symbolic floats, so a schedule never recompiles. The rounding's random bits
-    come from inductor's generator, not eager's: equal in distribution, not
-    bitwise.
-    """
+    """SPEC step 8 on one matrix; returns `||W||` from before the write."""
     lift = frame.orient(direction @ basis.float().mT, side)
     weight_norm = torch.linalg.vector_norm(param, dtype=torch.float32)
     round_into(param, param.float() * (1.0 - lr * decay) - lr * weight_norm * lift)
@@ -232,8 +223,7 @@ class UsuiTrack(Optimizer):
         """SPEC step 8: `W -= lr ||W|| lift(O)`, decay folded in, rounded once."""
 
         side = frame.resolve_side(param.shape, group["side"])
-        # Detached: dynamo holds an `nn.Parameter`'s shape static, so every
-        # distinct weight shape would compile its own graph.
+        # A Parameter's shape is static to dynamo: one graph per weight shape.
         weight_norm = write_weight(param.detach(), direction, self.state[param]["frame"], side, group["lr"], group["weight_decay"])
         if self.diagnostics is not None:
             # The lift is an isometry, so `||U|| = ||O|| ||W||` without a pass over `W`.

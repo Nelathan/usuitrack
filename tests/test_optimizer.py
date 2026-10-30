@@ -271,8 +271,7 @@ def test_lr_is_the_relative_step_in_every_module():
 
 
 def _write_inputs(side: str, dtype: torch.dtype) -> tuple[Tensor, Tensor, Tensor]:
-    """The layouts the optimizer hands over: the polar factor column-major, the
-    frame row-major. Each other layout is another compiled graph."""
+    """The optimizer's layouts; another layout is another compiled graph."""
     other, frame_length = (ROWS, COLS) if side == "right" else (COLS, ROWS)
     direction = torch.linalg.qr(torch.randn(other, RANK))[0]
     basis = torch.linalg.qr(torch.randn(frame_length, RANK))[0].to(dtype).contiguous()
@@ -296,10 +295,8 @@ def test_the_compiled_write_is_the_eager_write(side):
 @pytest.mark.parametrize("side", ["left", "right"])
 @torch.no_grad()
 def test_the_compiled_bf16_write_lands_the_fp32_step_in_expectation(side):
-    """Inductor draws its own rounding bits, so bf16 matches eager only in
-    expectation. A step of a fraction of an ulp, averaged over draws, lands on
-    the fp32 step to within the rounding noise (~0.05 at 400 draws); rounding to
-    nearest misses it by ~0.6."""
+    """Inductor draws its own rounding bits: bf16 matches only in expectation.
+    Rounding noise is ~0.05 here; round-to-nearest misses by ~0.6."""
 
     torch.manual_seed(0)
     start, direction, basis = _write_inputs(side, torch.bfloat16)
