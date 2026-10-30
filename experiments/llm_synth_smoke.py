@@ -4,6 +4,7 @@ import argparse
 import gc
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -13,6 +14,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pyarrow.parquet as pq
+
+# LFM3 at bs16 sits near the 12 GB card's edge, where fragmentation decides a fit
+# (docs/FACTS.md, LFM3 lane). Read at the first CUDA allocation, so set before it.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -27,7 +32,8 @@ from experiments.activation_frames import MODES as ACTIVATION_FRAME_MODES, Activ
 from experiments.lab_diagnostics import LabDiagnostics
 
 
-DEFAULT_MODEL = "LiquidAI/LFM2.5-350M-Base"
+DEFAULT_MODEL = "LiquidAI/LFM3-1.7B-Base"
+DEFAULT_MODEL_REVISION = "545fc8f4c7b5fa9f405105274cd29c4f8f44b526"
 DEFAULT_SOURCE_HF_DATASET = "HuggingFaceFW/finepdfs_50BT-dclm_30BT-fineweb_edu_20BT-shuffled"
 DEFAULT_FALLBACK_LR = 1e-4
 DEFAULT_LORA_RANK = 44
@@ -1282,7 +1288,7 @@ def run_optimizer(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Faithful pretrained-LLM SYNTH harness for UsuiTrack")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"HF model name; default = {DEFAULT_MODEL}")
-    parser.add_argument("--model-revision", default=None, help="hub commit to load the model and its remote code from")
+    parser.add_argument("--model-revision", default=DEFAULT_MODEL_REVISION, help=f"hub commit to load the model and its remote code from; default pins {DEFAULT_MODEL}; pass main for another model's latest")
     parser.add_argument("--data-dir", default="/home/djg/.cache/nanochat/base_data_synth")
     parser.add_argument("--target-hf-dataset", default="", help="optional Hugging Face target dataset; first parquet shard only")
     parser.add_argument("--target-format", choices=("auto", "synth", "profile_text", "text"), default="auto", help="target dataset row formatter; profile_text masks profile+divider and trains only on text")
@@ -1292,15 +1298,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--optimizers", default="usuitrack", help="comma-separated: usuitrack,lora,torch_adamw")
     parser.add_argument("--param-scope", choices=("full", "broad-no-embeddings", "matrices-no-embeddings"), default="broad-no-embeddings")
     parser.add_argument("--warmup-steps", type=int, default=1)
-    parser.add_argument("--max-steps", type=int, default=1000, help="ceiling on measured optimizer steps; default is the current 1k quality contract; clamped down with a warning if the dataset can't supply this many rows")
+    parser.add_argument("--max-steps", type=int, default=500, help="ceiling on measured optimizer steps; default 500, a multiple of the eval cadence; clamped down with a warning if the dataset can't supply this many rows")
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--val-blocks", type=int, default=8, help="number of validation batches/blocks to build")
     parser.add_argument("--retention-val-blocks", type=int, default=8, help="number of source validation batches/blocks to build")
     parser.add_argument("--batching", choices=("synth_right_padded_no_mask", "eos_packed_no_mask"), default="synth_right_padded_no_mask", help="batch construction policy; default is faithful SYNTH diagnostics; choose eos_packed_no_mask explicitly for throughput")
-    parser.add_argument("--rank-fraction", type=float, default=0.1, help="UsuiTrack rank_fraction: each matrix's rank is this times sqrt(rows * cols)")
-    parser.add_argument("--usuitrack-lr", type=float, default=1e-4)
+    parser.add_argument("--rank-fraction", type=float, default=0.05, help="UsuiTrack rank_fraction: each matrix's rank is this times sqrt(rows * cols)")
+    parser.add_argument("--usuitrack-lr", type=float, default=4e-5)
     parser.add_argument("--fallback-lr", type=float, default=DEFAULT_FALLBACK_LR, help="Non-matrix AdamW LR")
     parser.add_argument("--adamw-lr", type=float, default=2e-5)
     parser.add_argument("--lora-rank", type=int, default=DEFAULT_LORA_RANK)
@@ -1308,8 +1314,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-lr", type=float, default=2e-4)
     parser.add_argument("--lora-grad-clip-norm", type=float, default=1.0, help="global gradient clip for LoRA adapter parameters")
     parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
-    parser.add_argument("--lr-final-ratio", type=float, default=0.2, help="after warmup, decay learning rates linearly to this fraction of the peak at the last step; 1 holds them constant")
-    parser.add_argument("--lr-decay", choices=("linear", "cosine"), default="linear", help="shape of the decay from the peak to --lr-final-ratio")
+    parser.add_argument("--lr-final-ratio", type=float, default=0.2, help="after warmup, decay learning rates to this fraction of the peak at the last step; 1 holds them constant")
+    parser.add_argument("--lr-decay", choices=("linear", "cosine"), default="cosine", help="shape of the decay from the peak to --lr-final-ratio")
     parser.add_argument("--beta", type=float, default=0.95)
     parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from lab_diagnostics.ROLE_READS")
     parser.add_argument("--activation-frames", choices=ACTIVATION_FRAME_MODES, default="off", help="PLAN S3, input-side matrices only: 'shadow' tracks a second frame from the layer inputs X and reads both frames against G and X without touching training; 'aim' turns the optimizer's frame by the tangent from X instead of G. See experiments/activation_frames.py")
@@ -1337,7 +1343,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="probe-only: buffer per-matrix CUDA allocator readings immediately before and after gradient preparation on the final measured backward",
     )
-    parser.add_argument("--eval-every", type=int, default=250, help="periodically log target/source validation loss every N measured steps; default 250, the quarter marks of the 1k quality contract; use 100 for a 300-step short run; 0 disables")
+    parser.add_argument("--eval-every", type=int, default=250, help="periodically log target/source validation loss every N measured steps; default 250, so a 250-, 500- or 1000-step run evaluates at each multiple and at its end; 0 disables")
     parser.add_argument("--no-final-sample", dest="final_sample", action="store_false", help="disable final qualitative generation from a target eval prompt")
     parser.set_defaults(final_sample=True)
     parser.add_argument("--final-sample-row", type=int, default=0, help="target eval row index used for final qualitative generation")

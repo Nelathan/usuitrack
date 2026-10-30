@@ -139,29 +139,41 @@ Anima's lives in ai-toolkit. Both measure this working tree, so they run
 whichever branch is checked out. **Always launch a training or calibration job
 in the background, never in the foreground.**
 
-### LFM2.5-350M — the lab harness
+### LFM3-1.7B — the lab harness
 
 From the repo root on `lab`. `uv sync` installs the `lab` dependency group by
 default; torch is pinned to the build `causal-conv1d`'s CUDA extension loads
-against (`pyproject.toml`). Standard arm:
+against (`pyproject.toml`). The harness defaults are the standard arm, on
+`LiquidAI/LFM3-1.7B-Base` pinned to revision `545fc8f`, with
+`expandable_segments` set; spelled out:
 
 ```bash
 uv run python experiments/llm_synth_smoke.py \
-  --max-steps 1000 --batch-size 16 --eval-every 250 --wandb-log-every 25 \
-  --seed 1 --usuitrack-lr 1e-4 --beta 0.95 --lr-final-ratio 0.2 \
-  --no-final-sample --wandb-run <name>
+  --max-steps 500 --batch-size 16 --eval-every 250 --wandb-log-every 25 \
+  --seed 1 --usuitrack-lr 4e-5 --beta 0.95 --lr-final-ratio 0.2 --lr-decay cosine \
+  --rank-fraction 0.05 --no-final-sample --wandb-run <name>
 ```
 
-Every LFM table in `docs/FACTS.md` is at 1k steps; a short run (300 steps,
-`--eval-every 100`) compares against nothing there. `--basis-lag-diagnostic
+About 3.9 s/step at bs16 (7.5 GB peak), so 500 steps take ~33 min and 1k
+steps over an hour: run 500, or 250 for a quick read, and 1k only when the
+question needs the late plateau. Keep the length a multiple of the eval
+cadence. Pass `--beta`, the lr, `--lr-final-ratio`, `--lr-decay` and
+`--rank-fraction` explicitly, so a log names its own arm. `--basis-lag-diagnostic
 --basis-lag-interval 10` adds the frame-tracking reads (lag, curve); pass it
-for tracker diagnostics, not on regular runs. Pass `--beta`, the lr and `--lr-final-ratio` explicitly,
-so a log names its own arm (`--lr-decay` is `linear` unless set); tables before the 2026-10-05 moment-first change ran
-at a constant lr (`--lr-final-ratio 1`). `--rank-fraction` sets the optimizer's `rank_fraction`
-(default 0.1). Roughly 0.89 s/step at bs16 (2.7 GB peak) and 0.14 s/step at bs1, so a 300-step bs1 arm costs about a minute. Results
-are the `usuitrack_final_val_loss` (target) and
-`usuitrack_final_retention_val_loss` (source) lines at the end of the log, plus
-the `usuitrack_last_logged_*` telemetry block.
+for tracker diagnostics, not on regular runs. Results are the
+`usuitrack_final_val_loss` (target) and `usuitrack_final_retention_val_loss`
+(source) lines at the end of the log, plus the `usuitrack_last_logged_*`
+telemetry block.
+
+`docs/FACTS.md` tables name their model by lane, and their length: the LFM2.5
+tables are all at 1k steps, as are the LFM3 tables before 2026-10-30.
+
+**LFM2.5-350M**, the lane before 2026-10-30, needs more lr than LFM3: pass
+`--model LiquidAI/LFM2.5-350M-Base --model-revision main --rank-fraction 0.1
+--usuitrack-lr 1e-4 --lr-decay linear --max-steps 1000`, its standard arm
+(7.5e-5 is a candidate, unmeasured). About 0.89 s/step at bs16 (2.7 GB
+peak) and 0.14 s/step at bs1. Its tables before the 2026-10-05 moment-first
+change ran at a constant lr (`--lr-final-ratio 1`).
 
 **Experiment knobs the release does not expose** — `GEODESIC_STEPSIZE` and the
 other module constants — are patched by a runner, never by adding an optimizer
@@ -228,7 +240,7 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
   at 1/16 the tokens, use 1/4 the LR. Relative comparisons within a sweep
   survive because all arms share it; the absolute losses do not transfer.
 - **Noise floor: unsettled (`PLAN.md` D6).** A same-seed replicate differed by
-  `1.6e-3` on target and `5.6e-3` on source. Below that, no claim.
+  `1.6e-3` on target and `5.6e-3` on source (LFM2.5, 1k steps). Below that, no claim.
 
 ## Code style
 

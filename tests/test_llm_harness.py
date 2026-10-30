@@ -8,7 +8,7 @@ import torch
 
 from usuitrack import UsuiTrack
 
-from experiments.llm_synth_smoke import BackwardMemoryTrace, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK, DEFAULT_MODEL, DEFAULT_SOURCE_HF_DATASET, build_parser, build_usuitrack_param_groups, install_state_matched_lora, maybe_compile_training_model, packed_text_limit, partition_usuitrack_params, prepare_for_training, select_trainable_params, validate_gradient_release_contract, validate_lora_optimizer_state_dtype, wandb_log
+from experiments.llm_synth_smoke import BackwardMemoryTrace, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK, DEFAULT_MODEL, DEFAULT_MODEL_REVISION, DEFAULT_SOURCE_HF_DATASET, build_parser, build_usuitrack_param_groups, install_state_matched_lora, maybe_compile_training_model, packed_text_limit, partition_usuitrack_params, prepare_for_training, select_trainable_params, validate_gradient_release_contract, validate_lora_optimizer_state_dtype, wandb_log
 from experiments.llm_synth_smoke import apply_lr_schedule, cce_causal_lm_loss, gradient_norm_statistics, make_packed_batches, make_right_padded_batches, synth_masked_examples
 
 
@@ -157,14 +157,15 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         args = build_parser().parse_args([])
 
         self.assertEqual(args.model, DEFAULT_MODEL)
+        self.assertEqual(args.model_revision, DEFAULT_MODEL_REVISION)
         self.assertEqual(args.param_scope, "broad-no-embeddings")
         self.assertEqual(args.seq_len, 1024)
         self.assertEqual(args.batch_size, 16)
         self.assertEqual(args.batching, "synth_right_padded_no_mask")
-        self.assertEqual(args.max_steps, 1000)
+        self.assertEqual(args.max_steps, 500)
         self.assertEqual(args.retention_hf_dataset, DEFAULT_SOURCE_HF_DATASET)
-        self.assertEqual(args.rank_fraction, 0.1)
-        self.assertEqual(args.usuitrack_lr, 1e-4)
+        self.assertEqual(args.rank_fraction, 0.05)
+        self.assertEqual(args.usuitrack_lr, 4e-5)
         self.assertEqual(args.fallback_lr, 1e-4)
         self.assertEqual(args.lora_rank, 44)
         self.assertEqual(args.lora_alpha, 44)
@@ -172,6 +173,7 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.lora_grad_clip_norm, 1.0)
         self.assertEqual(args.lr_warmup_steps, 50)
         self.assertEqual(args.lr_final_ratio, 0.2)
+        self.assertEqual(args.lr_decay, "cosine")
         self.assertEqual(args.beta, 0.95)
         self.assertEqual(args.role_reads, [])
         self.assertEqual(args.val_blocks, 8)
