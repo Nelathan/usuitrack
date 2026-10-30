@@ -1005,6 +1005,24 @@ and `load_state_dict` left the group index stale. One layout change: a
 Withdrawn: SPEC's residual-facing recommendation and decision 2, the diagnostics
 tiers and `diagnostic_roles`, `prepare()` as API, the jitter retry in the fit.
 
+## CLOSED -- `lr` does not transfer across sizes; LFM3 is the default at cosine `4e-5`
+
+2026-10-28 to 30 (FACTS, both LFM lanes). `lr` is the relative step and
+`relative_step` reads it on both models, but the dynamics it buys do not
+transfer: at matched rank and lr, LFM3-1.7B's plateau `grad_moment_cosine`
+turns negative a bin earlier than LFM2.5-350M's, so the larger model overshoots
+at a lower lr. Capture and live fraction do not move with lr; on LFM3 rank 0.1
+leaves the live fraction at 0.60, and 0.05 restores the 0.85 that 0.1 gives at
+350M. Decay to 0.2 keeps the cosine positive where a constant lr turns it
+negative; cosine against linear decay is unmeasured. The user's
+defaults (2026-10-30), target first and retention welcome: LFM3 at cosine
+`4e-5` to 0.2, rank 0.05 -- cosine `5e-5` measured best on target but ran hot
+early; LFM2.5 keeps `1e-4` (7.5e-5 a candidate). The release `lr` default is
+`4e-5`; the harness defaults to LFM3 and 500-step runs.
+
+Withdrawn: PLAN L1's prediction that one `lr` gives the same sign at both
+sizes, and that capture and live fraction transfer at the same rank fraction.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

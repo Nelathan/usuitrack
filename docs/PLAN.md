@@ -11,52 +11,6 @@ run yet; each "how to settle" is a proposal, not an agreed arm.
 
 ---
 
-## Group L. Scale
-
-### L1. Does `lr` transfer from LFM2.5-350M to LFM3-1.7B?
-
-`lr` is a relative step (SPEC step 8), so the claim is that one value means the
-same dynamics at any size. The 1e-4 default pushed for loss and overshot:
-`grad_moment_cosine` stayed negative until late in the run. Arms (user,
-2026-10-28): constant `5e-5` and `2e-5` at both sizes, the standard arm
-otherwise, LFM3 pinned to revision `545fc8f`, `o_proj` on the output side like
-LFM2.5's `out_proj`. A 20-step LFM3 probe reads step time and peak memory
-(headroom).
-
-Read: mechanism decides, at equal `lr` across sizes -- `relative_step`,
-`grad_moment_cosine`'s level and sign, `grad_capture` and
-`tangent_live_fraction` (does `rank_fraction 0.1` transfer too). Loss vetoes:
-target gain against forgetting, each from that model's own initial losses.
-
-Predictions, written before the runs: `relative_step` equals `lr` at both
-sizes. Cosine sits nearer zero at `5e-5` and positive at `2e-5`, and the same
-`lr` gives the same sign at both sizes if transfer holds. Capture and live
-fraction land within a few points of the 350M's 0.77 and 0.83, since rank is
-the same fraction of each square side. `2e-5` gains less target and forgets
-less than `5e-5` at both sizes. Unknowns: whether bs16 fits at 1.7B (estimate
-~6-8 GB peak), and its step time (estimate ~5 s).
-
-Evidence (FACTS, 2026-10-28/30). 350M as predicted: the plateau cosine is
-negative from step ~500 at constant `5e-5`, positive throughout at `2e-5`;
-`2e-5` gains less and forgets less; `relative_step` reads `lr`; capture and
-live fraction do not move with lr. LFM3 against the predictions: bs16 fits
-once the polar runs per matrix (3.84 s/step, 7.5 GB at rank 0.05 -- the
-estimates held). The sign does not transfer: constant `2e-5` turns negative
-from step 500 on LFM3, and cosine-decayed `5e-5`, positive throughout at 350M,
-dips below zero from 250 to 750. Rank 0.1 leaves LFM3's live fraction at 0.60;
-0.05 restores 0.85 at 0.70 capture against 0.77 -- the capture/live
-prediction holds only at half the rank fraction. At matched rank 0.1 and
-constant `5e-5` LFM3 still turns negative a bin earlier (250-500: -0.003
-against +0.002), so the earlier overshoot is the model's; how much rank 0.05
-adds is unseparated. Loss on LFM3: cosine `5e-5` matches constant `2e-5` on
-source and gains 0.014 more target.
-
-Open: whether `lr` should carry a size factor, or the overshoot is accepted as
-the target/forgetting trade. Default candidate (unagreed): cosine decay to 0.2
-in place of linear, `5e-5` on LFM3 at rank 0.05.
-
----
-
 ## Group N. Weight norm
 
 ### N1. Can the step force an ideal weight norm?
