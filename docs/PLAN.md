@@ -29,9 +29,9 @@ scratch, where the init is a free variable.
 
 Weight norms rise over runs (observed, unmeasured as a table). A step at a fixed
 fraction of `||W||` compounds when it correlates with `W`, so the rise may be
-N1's issue seen from the other end. `weight_decay` is in the release and
-untested on either lane. How to settle: `||W||` per role over a standard LFM arm
-first (cheap, a lab read), then a decay arm against it.
+N1's issue seen from the other end. Weight decay is not the remedy for a
+Muon-type step (user, 2026-10-30), though `weight_decay` is in the release. How
+to settle: `||W||` per role over a standard LFM arm first (cheap, a lab read).
 
 ---
 

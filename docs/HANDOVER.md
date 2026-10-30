@@ -66,8 +66,8 @@ Proposed for the next session, 2026-10-30 late, in order; not yet confirmed:
    behaviour; a 100-step run to check telemetry.
 2. S2 against `G` at 1k steps on the standard arm with today's code (two
    runs, ~2 h each): does the tie hold on the late plateau?
-3. PLAN N2: `||W||` per role over those two runs; a decay arm if the rise is
-   real.
+3. PLAN N2: `||W||` per role over those two runs. Not a decay arm: decay is
+   not the tool for a Muon-type step (user).
 
 Still open:
 - S2 onto `lab`: `ProjectedLinear` is a lab feature, not the optimizer (it
