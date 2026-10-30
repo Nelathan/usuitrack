@@ -56,11 +56,19 @@ release files onto it, prepared locally after your review; you push.
 
 ## Next
 
-- Your call: the compiled weight write into the release (-0.20 s/step,
-  measured; `outputs/tools/fused_write.py` is the prototype), and whether a
-  CUDA graph over the post-backward work goes on PLAN (needs in-place
-  diagnostics, `lr` as a device tensor).
-- S2's leaves as expanded zeros: the +0.29 GB (rank 0.05) is mostly them.
+Agreed with the user, 2026-10-30 evening, in order:
+- The compiled weight write onto `lab` (not released yet); prototype
+  `outputs/tools/fused_write.py`, equivalence test in expectation.
+- S2's leaves as expanded zeros (most of its +0.29 / +0.88 GB).
+- Accumulation under S2: the leaves sum exactly; the first step's ordinary
+  path and the harness's release/accumulation check need reworking.
+- Norms: normalizing `G` or `Z`, and acting on the weights (norm or polar).
+- Triton, after those: the weight write as one pass with the rank-`r` lift
+  in-tile (63 -> ~15 ms); S2's per-matrix backward reading `X` and `delta`
+  once (~50-100 ms).
+- `ProjectedLinear` is a lab feature, not the optimizer: it swaps the user's
+  module class and freezes weight grads, an integration shape most users
+  would not want. The CUDA graph is optional; clean code first.
 - The release `rank_fraction` default is still 0.1; the harness runs 0.05.
 - M1 has no arm; its open item (a token-count weight) is predicted below noise.
 
