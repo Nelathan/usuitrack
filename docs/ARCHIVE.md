@@ -1080,12 +1080,8 @@ the residual writers or the rank does not reach the loss.
 
 ## CLOSED -- S2's leaves hold no storage
 
-PLAN S2, 2026-10-30 (FACTS, "S2's leaves hold no storage"). The leaves that
-carry `Z`, the stream action and the probes out of the backward are autograd
-anchors whose values are never read. As one zero expanded to their shape they
-drop every peak by their value bytes, 0.44 GB at rank 0.05, and S2's backward
-peak matches the `G` path's; loss is unchanged. Their grads still scale with
-rank.
+PLAN S2, 2026-10-30 (FACTS, "S2's leaves hold no storage"). Expanded zeros
+save the leaves' 0.44 GB; S2's backward peak matches the `G` path's.
 
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 

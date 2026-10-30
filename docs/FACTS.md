@@ -1158,21 +1158,16 @@ leaves hold no storage").
 
 ### S2's leaves hold no storage
 
-2026-10-30, `--projected-grads` on the standard arm (constant `4e-5`, rank
-0.05, 100 steps, seed 1, the compiled write): the leaves `z`, `action` and
-`probed` as one zero expanded to their shape (`s2-anchors-100`) against
-full-size zeros (`s2-fusedwrite-100`). Their values are never read, only the
-grads autograd gives them.
+2026-10-30, S2 on the standard arm, 100 steps, seed 1: leaves as expanded
+zeros (`s2-anchors-100`) against full-size (`s2-fusedwrite-100`).
 
 | leaves | s/step | forward peak | backward peak | optimizer peak | target @100 | source @100 |
 |---|---|---|---|---|---|---|
 | full-size | 3.33 | 7.39 GB | 7.66 GB | 5.31 GB | 1.431788 | 2.671430 |
 | expanded | 3.37 | 6.95 GB | 7.22 GB | 4.87 GB | 1.431734 | 2.671608 |
 
-Every peak drops by 0.438 GB, the value bytes predicted from LFM3's 153
-tracked matrices (`z` 0.26 GB bf16, `action` 0.18 GB fp32; 0.88 GB at rank
-0.1). S2's backward peak now matches the `G` path's at the same length (7.23
-GB, `cwrite-s1-100`). The 0.04 s/step is one unreplicated pair, unresolved.
+Every peak drops by the predicted 0.438 GB (0.88 at rank 0.1); the backward
+peak now matches the `G` path's 7.23 GB. The 0.04 s/step is unresolved.
 
 ## Run ledger (Anima)
 
