@@ -35,28 +35,23 @@ lab = [
     "peft>=0.19.1",
     "cut-cross-entropy>=25.1.1",
     "flash-linear-attention>=0.5.0",
-    "causal-conv1d==1.7.0+cu.13.2.torch.2.14; sys_platform == 'linux'",
+    "causal-conv1d==1.7.0; sys_platform == 'linux' and python_version == '3.14'",
 ]
 
 [tool.uv]
 default-groups = ["dev", "lab"]
-# causal-conv1d's prebuilt wheel is compiled against one torch minor, named in
-# its local version; torch is held to that minor so the extension loads.
-constraint-dependencies = ["torch==2.14.*"]
+# causal-conv1d's CUDA extension loads only against the torch minor it was built
+# for; no published wheel covers torch 2.15, so it is a local build (docs/HANDOVER.md).
+constraint-dependencies = ["torch==2.15.*"]
 
 [[tool.uv.index]]
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
-[[tool.uv.index]]
-name = "astral-cu132"
-url = "https://wheels.astral.sh/simple/cu132/"
-explicit = true
-
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
-causal-conv1d = { index = "astral-cu132" }
+causal-conv1d = { path = "/home/djg/Projects/usuitrack/outputs/wheels/causal_conv1d-1.7.0-cp314-cp314-linux_x86_64.whl" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
