@@ -381,14 +381,13 @@ $$W_t=(1-\alpha\lambda)W_{t-1}-\alpha U_t.$$
 
 Matrix parameters retain no full-size first or second moment.
 
-**Rounding.** For bf16 `W`, the lift and the update are accumulated in fp32 and
-written back once through stochastic rounding; fp16 is written to nearest,
-fp32 in place. A LoRA-scale `alpha` puts `alpha * U` well under a bf16 ulp --
-measured at ~1/76 ulp on a 2B DiT at a relative step below `2e-5` -- and
-round-to-nearest then discards every step. For bf16, `U` is never cast to `W`'s
-dtype on the way in; a single rounding happens at the write, with weight decay
-folded into the same accumulator so it is not rounded twice. fp16 weights are
-updated in place, decay and step each rounded to nearest. See `usuitrack/stochastic.py`.
+**Rounding.** `W`, the lift and the update are accumulated in fp32 and written
+back once: stochastically for bf16, to nearest for fp16, exactly for fp32. A
+LoRA-scale `alpha` puts `alpha * U` well under a bf16 ulp -- measured at ~1/76
+ulp on a 2B DiT at a relative step below `2e-5` -- and round-to-nearest then
+discards every step. `U` is never cast to `W`'s dtype on the way in; a single
+rounding happens at the write, with weight decay folded into the same
+accumulator so it is not rounded twice. See `usuitrack/stochastic.py`.
 
 Stochastic rounding keeps the expectation and pays in variance. A coordinate
 whose update `u` is below its ulp moves by a whole ulp with probability

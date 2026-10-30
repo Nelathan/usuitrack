@@ -8,7 +8,7 @@ from torch import Tensor
 from usuitrack import UsuiTrack
 from usuitrack import frame
 from usuitrack.diagnostics import READS
-from usuitrack.optimizer import GEODESIC_STEPSIZE
+from usuitrack.optimizer import GEODESIC_STEPSIZE, write_weight
 from usuitrack.polar import unit_polar
 
 
@@ -268,6 +268,49 @@ def test_lr_is_the_relative_step_in_every_module():
     assert relative_step((ROWS, COLS), 30.0) == pytest.approx(reference, rel=1e-5)
     for shape in ((ROWS, COLS), (COLS, ROWS), (512, 32), (32, 512)):
         assert relative_step(shape, 1.0) == pytest.approx(lr, rel=0.1)
+
+
+def _write_inputs(side: str, dtype: torch.dtype) -> tuple[Tensor, Tensor, Tensor]:
+    """The layouts the optimizer hands over: the polar factor column-major, the
+    frame row-major. Each other layout is another compiled graph."""
+    other, frame_length = (ROWS, COLS) if side == "right" else (COLS, ROWS)
+    direction = torch.linalg.qr(torch.randn(other, RANK))[0]
+    basis = torch.linalg.qr(torch.randn(frame_length, RANK))[0].to(dtype).contiguous()
+    return (0.01 * torch.randn(ROWS, COLS)).to(dtype), direction, basis
+
+
+@pytest.mark.parametrize("side", ["left", "right"])
+@torch.no_grad()
+def test_the_compiled_write_is_the_eager_write(side):
+    """The compiled weight write against its own eager function, fp32."""
+
+    torch.manual_seed(0)
+    weight, direction, basis = _write_inputs(side, torch.float32)
+    compiled, eager = weight.clone(), weight.clone()
+    compiled_norm = write_weight(compiled, direction, basis, side, 1e-2, 0.1)
+    eager_norm = write_weight.__wrapped__(eager, direction, basis, side, 1e-2, 0.1)
+    torch.testing.assert_close(compiled, eager)
+    torch.testing.assert_close(compiled_norm, eager_norm)
+
+
+@pytest.mark.parametrize("side", ["left", "right"])
+@torch.no_grad()
+def test_the_compiled_bf16_write_lands_the_fp32_step_in_expectation(side):
+    """Inductor draws its own rounding bits, so bf16 matches eager only in
+    expectation. A step of a fraction of an ulp, averaged over draws, lands on
+    the fp32 step to within the rounding noise (~0.05 at 400 draws); rounding to
+    nearest misses it by ~0.6."""
+
+    torch.manual_seed(0)
+    start, direction, basis = _write_inputs(side, torch.bfloat16)
+    exact = start.float()
+    write_weight.__wrapped__(exact, direction, basis, side, 5e-4, 0.1)
+    landed = torch.zeros_like(exact)
+    for _ in range(400):
+        weight = start.clone()
+        write_weight(weight, direction, basis, side, 5e-4, 0.1)
+        landed += weight.float() / 400
+    assert ((landed - exact).norm() / (exact - start.float()).norm()).item() < 0.1
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
