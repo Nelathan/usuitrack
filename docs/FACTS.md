@@ -1040,6 +1040,25 @@ the instrument (five shadows and the far frame per matrix, hooks that
 exhaust dynamo's recompile limit): 5.19 s/step against 3.88, peak 8.39 GB
 against 7.34.
 
+### The compiled weight write saves 0.22 s/step
+
+2026-10-30, `lab`, the standard arm (constant `4e-5`, 100 steps, seed 1):
+SPEC step 8 as one `torch.compile`d function (`write_weight`), against the
+same function run eager by a runner (`cwrite-s1-100` against
+`eagerwrite-s1-100`). Elapsed train time includes warmup and every compile.
+
+| write | s/step | optimizer peak | target @100 | source @100 |
+|---|---|---|---|---|
+| eager | 3.95 | 5.03 GB | 1.433068 | 2.671485 |
+| compiled | 3.73 | 4.87 GB | 1.433122 | 2.671895 |
+
+The eager write spends ~10 dense passes over each `W`; compiled it is the
+norm, the lift's GEMM and one fused pass (1.21 against 0.38 ms per matrix on
+LFM3 shapes, bf16). The fp32 working copy of `W` is never materialized, hence
+the 0.16 GB. LFM3 compiles three graphs (two sides, plus square matrices).
+Loss moves by the rounding's different random stream only, well under the
+noise floor; the backward peak (7.23 GB) is unchanged.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

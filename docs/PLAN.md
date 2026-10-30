@@ -111,6 +111,23 @@ ai-toolkit lane gets `LabDiagnostics`, which lives in this repo's `experiments/`
 
 ---
 
+## Group R. Release
+
+### R1. Does the compiled weight write enter the release?
+
+`write_weight` is `torch.compile`d on `lab` (FACTS, "The compiled weight write
+saves 0.22 s/step"); the user's call (2026-10-30): not released yet. What it
+asks of a stranger's setup: a working inductor (Triton on GPU, a C++ toolchain
+on CPU) and a compile on the first step (unmeasured). Its graphs come from its
+own recompile budget of 8, one per side plus one for square matrices, again
+per dtype: a model mixing bf16 and fp32 matrices fills it, and past it the
+write runs eager in silence. Open: whether that cost is the release's to
+impose, or whether the release keeps one eager write and `lab` patches in the
+compiled one -- which AGENTS forbids as two implementations, unless the patch
+is the same function compiled.
+
+---
+
 ## Parked at release
 
 Moved whole to `ARCHIVE.md`, "PARKED at release"; reopen by moving the text
