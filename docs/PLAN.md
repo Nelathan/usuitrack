@@ -59,12 +59,15 @@ the `X Q` that `Z` needs, one GEMM where the exact action takes two. Built as
 `--projected-grads` (FACTS, "Training without `dW`"): compiled, it collects
 the whole `dW` cost and ties `G`'s aim on loss. Open:
 
-- The next saving. A profile of the S2 step (3.6 s under the profiler): linear
-  GEMMs 2.1 s, the optimizer step 0.54 s of which 0.30 s is kernels -- 24.5k
-  launches, launch-bound -- then CCE 0.25, attention 0.13. A CUDA graph or a
-  fused step would take 0.25-0.35 s, and touches the release optimizer;
-  fewer checkpointed layers in the 4 GB S2 leaves free, ~0.1 s; fusing the
-  bases of matrices sharing `X`, ~0.05.
+- The next saving (FACTS, "Where the S2 step's time goes"). The compiled
+  weight write is measured (0.20 s); does it enter the release? Past it the
+  step is host-bound, ~155 ms of idle GPU in the optimizer and ~37 ms in
+  `prepare`, which only a CUDA graph over the post-backward work reaches. That
+  needs the release diagnostics to accumulate in place with static counts,
+  `lr` as a device tensor, and S2's leaves to keep their grads.
+- Rank. The stream aim pulls on every plane (FACTS, "The stream aim pulls on
+  every plane"); whether that lets a larger rank pay is unmeasured: S2 against
+  `G` at rank 0.1.
 - The weighted action is a token sum, so accumulation is exact (tested on
   CPU), which may answer S1; no accumulated run yet.
 

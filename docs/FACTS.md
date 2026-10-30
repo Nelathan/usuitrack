@@ -1086,6 +1086,55 @@ of the +0.006 capture over the `G` arm.
 Cost: 3.48 s/step against 3.89 (both sides), the 0.4 s the `dW` GEMMs cost;
 backward peak 7.76 GB against 7.47, the persistent leaves and their grads.
 
+### The stream aim pulls on every plane; the frame does not travel further
+
+2026-10-30, `lag-g-s1-300` against `lag-s2-s1-300` (standard arm, 300 steps,
+`--basis-lag-diagnostic --basis-lag-interval 10`), means over steps 250-300:
+
+| read | `G` aim | stream aim (S2) |
+|---|---|---|
+| `transport_speed` | 0.0198 | 0.0199 |
+| `transport_lag` (10 steps) | 0.0610 | 0.0587 |
+| `transport_curve` | 0.693 | 0.705 |
+| `transport_correction` | 5.1e-4 | 6.6e-4 |
+| `tangent_concentration` | 0.70 | 0.48 |
+
+Speed is eta's under the constant turn; on the plateau both frames cover the
+same net distance and churn alike, ~70% of the path cancelling within ten
+steps, so the new aim asks for no eta of its own. The difference is the aim's
+shape: its leading plane holds 0.48 of the tangent Gram against 0.70, the
+pull spread over every plane (the 0.996 liveness), and the in-span
+correction is 30% larger. Over steps 0-100 the S2 frame travels further and
+straighter (lag 0.105 against 0.084, curve 0.47 against 0.55): a one-off move
+from the `G`-fitted start toward the stream's own span. Eval at 300: 1.358110
+against 1.358713.
+
+### Where the S2 step's time goes: the weight write, then host overhead
+
+2026-10-30, `torch.profiler` over three steady steps (`outputs/tools/
+profile_step.py`), and 100-step speed reads from runners that patch the
+release (`fused_write.py`, `fused_step.py`), seconds per step over steps
+75-100:
+
+| build | s/step |
+|---|---|
+| reference (`G`) | 3.89 |
+| S2 | 3.49 |
+| S2, weight write compiled | 3.285 |
+| S2, write + blend + polar + turn compiled | 3.268 |
+
+The weight write (SPEC step 8 with its stochastic round) is ~10 dense fp32
+passes per parameter: 212 ms per step eager on all 153 matrices, 63 ms as one
+`torch.compile` of the same math, 12 ms at the one-read-one-write bandwidth
+floor (microbench `write_bench.py`). In the run it saved 0.20 s, losses equal
+to 4e-5. Compiling the rest of phase two saved 17 ms: those functions were
+never kernel-bound. With the write compiled the optimizer step costs 540 ms of
+host time, ~3.5 ms of Python, dispatch and diagnostics per matrix, against 52
+ms of kernels; the GPU span of the step is 209 ms because the host starts it
+during the backward's tail. Over the whole step 480 ms (13%) of GPU time is
+idle, in 5-100 us gaps between ~30k kernels, ~155 ms of it inside the
+optimizer step and ~37 ms in `prepare`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
