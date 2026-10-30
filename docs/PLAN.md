@@ -61,11 +61,6 @@ the whole `dW` cost and ties `G`'s aim on loss. Open:
 
 - Where the rest of the step goes: `dW` was 0.4 s of 3.9; the next saving is
   outside the linear GEMMs, and a profile has to name it.
-- The side. The user leans to tracking every matrix from its input, the
-  purer use of `X` and `delta`; measured, that forgets 9e-3 more source at a
-  tied target under either aim, as ARCHIVE "tracking the residual-facing side"
-  lost 8.2e-3 target with older code. One seed on LFM3, whose noise floor is
-  unmeasured.
 - The weighted action is a token sum, so accumulation is exact (tested on
   CPU), which may answer S1; no accumulated run yet.
 

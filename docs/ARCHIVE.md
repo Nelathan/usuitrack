@@ -1051,6 +1051,23 @@ Withdrawn: S3's per-norm-site frame. Its case was that q/k/v and gate/up
 share one `X`; their weights are their own `delta`'s, so the frame is per
 matrix again.
 
+## CLOSED -- the residual writers keep their output side, under either aim
+
+PLAN S2, 2026-10-30 (FACTS, "Training without `dW`"). Tracking every matrix
+from its input -- the 48 residual writers `w2`, `out_proj`, `o_proj` moved off
+`delta` at the residual onto their own inputs, `w2`'s the 7680-wide gated
+activations -- raises capture 0.703 -> 0.770, ties target at 500 steps and
+forgets 9e-3 more source, behind at every eval and the same under the `G` aim
+and the stream aim. It is the side, not the aim. This is the earlier closure
+("tracking the residual-facing side") again on LFM3: more capture on the
+writers buys no target and costs retention, there on target, here on source.
+
+The user's choice: the residual-facing side stays, by the harness's
+`resolve_tracked_side`. The input-only design was argued as purer, using `X`
+and `delta` on principle; conceptually the two are a draw, since S2 serves
+the output side with the same three leaves (exact `Z`, `delta^T delta Q`), so
+the measured cost decides.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved
