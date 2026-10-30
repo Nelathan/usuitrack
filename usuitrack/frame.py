@@ -60,12 +60,17 @@ def project_and_aim(grad: Tensor, frame: Tensor) -> tuple[Tensor, Tensor]:
     """
 
     projected = grad @ frame
+    return projected, aim(grad.float().mT @ projected.float(), frame)
+
+
+def aim(action: Tensor, frame: Tensor) -> Tensor:
+    """The Oja tangent from the frame's action `A = G^T G Q`, fp32: its
+    horizontal part, scaled by the mean Rayleigh quotient (SPEC step 4)."""
+
     q = frame.float()
-    action = grad.float().mT @ projected.float()
     rayleigh = q.mT @ action
     rayleigh = 0.5 * (rayleigh + rayleigh.mT)
-    tangent = (action - q @ rayleigh) / rayleigh.diagonal().mean().clamp_min(1e-12)
-    return projected, tangent
+    return (action - q @ rayleigh) / rayleigh.diagonal().mean().clamp_min(1e-12)
 
 
 def retract(frame: Tensor) -> Tensor:
