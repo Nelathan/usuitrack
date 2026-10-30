@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28, updated 2026-10-30, 19:20. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-10-30, late. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
@@ -14,11 +14,13 @@ sizes, the release defaults to `4e-5`, LFM3's; S3 and S4, frames track from
 the streams, the input side from `X` weighted by `delta`'s token norms; the
 residual writers keep their output side; a live aim does not make rank 0.1 pay.
 
-**S2 is built**, on branch `projected-grads` (was `x-side`; no upstream):
-`--projected-grads` trains with no `dW`, ties `G`'s aim on loss and runs 3.49
-s/step against 3.89. A runner with the weight write compiled reaches 3.285
-(FACTS, "Where the S2 step's time goes"). Past that the optimizer step is
-host-bound.
+**S2 is built**, on branch `projected-grads` (rebased onto `lab`; no
+upstream): `--projected-grads` trains with no `dW` and ties `G`'s aim on loss.
+Its leaves are expanded zeros (no storage; backward peak equals `G`'s), each
+frame is fitted in its matrix's first backward, so no step ever holds `G`, and
+`--grad-accum-steps` works under it (1.2 GB less at bs8 x 2, 6e-4 from the
+unsplit step). M1 closed: the magnitude goes at `Z`. The weight write is
+compiled on `lab` (-0.22 s/step), not released (PLAN R1).
 
 - **Package:** `frame.py` (fit, Oja aim, constant-angle turn, retraction),
   `polar.py` (balanced Newton-Schulz), `optimizer.py`, `diagnostics.py`,
@@ -43,7 +45,7 @@ host-bound.
   group index after `load_state_dict`; hooks missing on later param groups;
   `pop()` making two transfers; a NaN gradient turning `grad_capture` NaN; lab
   frame-motion reads sampling only the first param group.
-- **Verified:** 75 tests; golden trajectories from the old code reproduced to
+- **Verified:** 85 tests on `projected-grads`, 79 on `lab`; golden trajectories from the old code reproduced to
   ~5e-6 relative; `release-clean-s1`, the standard arm: 1.652230 / 3.057482 against the
   reference 1.652199 / 3.058867, 1.133 s/step (FACTS).
   `examples/train_pytorch.py` and `train_hf_trainer.py` run in both modes.
@@ -56,21 +58,24 @@ release files onto it, prepared locally after your review; you push.
 
 ## Next
 
-Agreed with the user, 2026-10-30 evening, in order:
-- The compiled weight write onto `lab` (not released yet); prototype
-  `outputs/tools/fused_write.py`, equivalence test in expectation.
-- S2's leaves as expanded zeros (most of its +0.29 / +0.88 GB).
-- Accumulation under S2: the leaves sum exactly; the first step's ordinary
-  path and the harness's release/accumulation check need reworking.
-- Norms: normalizing `G` or `Z`, and acting on the weights (norm or polar).
-- Triton, after those: the weight write as one pass with the rank-`r` lift
-  in-tile (63 -> ~15 ms); S2's per-matrix backward reading `X` and `delta`
-  once (~50-100 ms).
-- `ProjectedLinear` is a lab feature, not the optimizer: it swaps the user's
-  module class and freezes weight grads, an integration shape most users
-  would not want. The CUDA graph is optional; clean code first.
+Proposed for the next session, 2026-10-30 late, in order; not yet confirmed:
+1. The `[Q | P]` join in `_Projected.backward`: one `stream @ [Q | P]` on the
+   input side, one `delta^T @ [delta Q | X P]` on the output side. Bench
+   `outputs/tools/s2_bwd_bench.py` (`s2_joint`) reads 247 -> 207 ms/step of
+   backward work against an 80 ms one-read floor. Tests unchanged in
+   behaviour; a 100-step run to check telemetry.
+2. S2 against `G` at 1k steps on the standard arm with today's code (two
+   runs, ~2 h each): does the tie hold on the late plateau?
+3. PLAN N2: `||W||` per role over those two runs; a decay arm if the rise is
+   real.
+
+Still open:
+- S2 onto `lab`: `ProjectedLinear` is a lab feature, not the optimizer (it
+  swaps the user's module class and freezes weight grads).
+- Triton: the write as one pass (77 ms against a 12 ms floor); S2's backward
+  reading `X` and `delta` once. Total ceiling ~7% of the step, likely half.
+  The CUDA graph is optional; clean code first.
 - The release `rank_fraction` default is still 0.1; the harness runs 0.05.
-- M1 has no arm; its open item (a token-count weight) is predicted below noise.
 
 ## To review
 
@@ -120,18 +125,35 @@ Under your handover of 2026-10-29 night, oldest first:
   side question.
 - `209ab14` harness: constant lr, eval every 100.
 
-2026-10-30 evening, branch `projected-grads`, oldest first:
-- `68b6973` FACTS: the constant reference (on `lab` as `db4349c`).
-- `f1e0626` harness: `--projected-grads` (`experiments/projected_grads.py`,
+2026-10-30 evening, on `lab`, oldest first:
+- `db4349c` FACTS: the constant reference.
+- `156e1f6` AGENTS: own the goal.
+- `df5f3c0` the compiled weight write; `tests/conftest.py` makes dynamo's
+  recompile limit a failure.
+- `44f601c` FACTS/PLAN: its saving; R1.
+- `068d85c` its prose trimmed.
+
+2026-10-30 evening, branch `projected-grads` on top of `lab`, oldest first:
+- `52ca890` harness: `--projected-grads` (`experiments/projected_grads.py`,
   tests, flag).
-- `825d31c` FACTS: S2's aim x side 2x2.
-- `e1b5221`, `85e9782` PLAN S2 open items.
-- `aa97ec7` FACTS: the 16-probe `||G||` estimate.
-- `17f5de9` ARCHIVE: the residual writers keep their output side.
-- `553b527` AGENTS: own the goal (on `lab` as `156e1f6`).
-- `3f35de3` FACTS: frame motion under the stream aim; where the step's time
+- `11a9819` FACTS: S2's aim x side 2x2.
+- `85f4eaa`, `6ff48ce` PLAN S2 open items.
+- `68e6cf0` FACTS: the 16-probe `||G||` estimate.
+- `86ee3a3` ARCHIVE: the residual writers keep their output side.
+- `ce73df1` FACTS: frame motion under the stream aim; where the step's time
   goes.
-- `3dc126d` FACTS/ARCHIVE: rank 0.1 buys capture and no loss.
+- `7fb6d49` FACTS/ARCHIVE: rank 0.1 buys capture and no loss.
+- `da0d1f6`, `946527f` this handover; `749d778` AGENTS: S2 built.
+- `c802f37` PLAN S2: the compiled write is on `lab`.
+- `82972eb` S2's leaves as expanded zeros; `0dc6803`, `b5087f1` their
+  write-up.
+- `472e14d` the probe leaf carries `G P`, so accumulation keeps the estimate.
+- `9bfd37f` the frame fitted in its first backward; accumulation works.
+- `7c87d61` FACTS/PLAN: S2 accumulates.
+- `37c1bc9` PLAN/ARCHIVE: M1 closed.
+- `7bc2422` harness: accumulation splits the step's batch, every token
+  weighted the same.
+- `f07ebd4` FACTS/PLAN: accumulation on matched rows.
 
 Run logs: wandb `pink-marker/usuitrack` (`lfm25-c5e5-s1`, `lfm25-c2e5-s1`,
 `release-trainmode-s1`, `lfm3-*`, ...); local logs, queue tools (`queue.sh`;
