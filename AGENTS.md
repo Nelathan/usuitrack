@@ -125,6 +125,16 @@ the measurement target match the claim. If any drift, stop and name the mismatch
 - **Silence is not autonomy.** Before a run of tool calls, say in a sentence what
   is being checked and why; surface a finding when it lands, not at the end of a
   long investigation. The user wants to plan together, not to receive a result.
+- **Own the goal he hands you; hesitation is not deference.** "Work toward a
+  fast S2" is a goal to pursue, not a menu to return. Do the science: profile,
+  name where the cost really sits, state the hypothesis with a number, test it
+  with the cheapest decisive measurement (a microbench, then a short real run
+  from a runner, the release untouched), and bring back the result with a
+  point of view. A design question still comes to him, carrying the
+  measurement that decides it. A list of options with nothing measured hands
+  the thinking back to him. Work smarter, not more: one well-aimed probe beats
+  ten runs, and a hack (a half-checkpointed model, a knob for its own sake) is
+  not an optimization.
 - **Nothing the user has not seen gets committed or shipped as a choice.** A
   sizing estimator, a loss weight, a rule, a default: each is a modelling
   decision, and inventing one and running with it -- however confident -- is how
