@@ -1023,6 +1023,30 @@ early; LFM2.5 keeps `1e-4` (7.5e-5 a candidate). The release `lr` default is
 Withdrawn: PLAN L1's prediction that one `lr` gives the same sign at both
 sizes, and that capture and live fraction transfer at the same rank fraction.
 
+## CLOSED -- frames track from the streams: `X` weighted by `delta`'s token norms, and `delta`
+
+PLAN S3 and S4, 2026-10-30 (FACTS, LFM3 lane). On the input side
+`G^T G = X^T (delta delta^T) X`. `X` alone (`X^T X Q`) shares 81% of the
+gradient frame's span, gives up 1.2-1.4 points of capture, and an arm aimed
+from it reads the same eval as the standard arm. Keeping the diagonal of
+`delta delta^T` -- each token's row of `X` weighted by `||delta_t||^2` -- lifts
+the overlap to 0.93 and the capture to the gradient frame's own (0.775 against
+0.776): the activations' frame differs from the gradient's because the loss
+weighs tokens unevenly, and the weighting is that selection. The off-diagonal
+(an agreement core through a second, output-side frame) adds nothing over the
+diagonal; adding the norm-input gradient's Gram moves the frame away. On the
+output side `delta^T delta Q` captures as much as `G` (0.547 against 0.541).
+
+The user's choice: the weighted `X` frame is the input-side tracker, and it
+carries S2. Capture, not overlap, decides between frames: the span a frame
+lacks against the gradient frame is mostly the tracker following past noise.
+Rows past the last supervised token have `delta_t = 0`, so the weighting also
+does the mask S3 needed.
+
+Withdrawn: S3's per-norm-site frame. Its case was that q/k/v and gate/up
+share one `X`; their weights are their own `delta`'s, so the frame is per
+matrix again.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

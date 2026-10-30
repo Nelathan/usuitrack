@@ -53,55 +53,16 @@ The goal (user, 2026-10-30): a FLOP win under checkpointing, not a VRAM win.
 `Z` and the exact Oja action come from `X` and `delta` in four skinny GEMMs
 wherever autograd would form `dW`, at ~0.1 of its FLOPs at rank 0.05. Design,
 wiring candidates and the order of work: `docs/PROJECTED_ACTIVATION_2.md`.
-Open: whether compile and fused launches collect the FLOP saving, where the
-first pass's eager wrappers ran 9% slower.
-
-### S3. Tracking input-side frames from activations
-
-On the input side `G = delta^T X`, so `G^T G = X^T (delta delta^T) X` and the
-gradient's input span lies in the activations' span. Under the harness's
-residual-facing sides, every input-side frame reads a normed residual stream,
-and q/k/v (or gate/up) share one input: an activation frame would be one per
-norm site, not one per matrix. Questions (user, 2026-10-29): can the frame be
-tracked from `X` without losing eval, and how large is the overlap when both
-are tracked. How to settle: first a read with no effect on training -- a shadow
-frame per input-side matrix, turned each step by the same Oja aim and turn on
-`X` (`project_and_aim(X, Q_a)`), its action `X^T X Q_a` taken in a forward
-hook; read `||Q_g^T Q_a||_F^2 / r` and its capture `||G Q_a|| / ||G||` against
-`grad_capture`. Then an arm whose input-side frames are aimed from `X`, against
-the standard arm on eval. Unmeasured guess: the overlap is well short of 1,
-since `delta` concentrates on a few tokens while `X^T X` weighs every token,
-and the activation spectrum carries outlier channels the loss may not care
-about.
-
-Evidence (FACTS, 2026-10-30, LFM3). The guess half held: overlap 0.81, not 1,
-but the activation frame gives up only 1.4 points of input-side gradient
-capture, and an arm aimed from `X` reads the same eval as the standard arm
-(+1.2e-3 target, inside the noise floor). Tracking from `X` is admissible on
-the input side, which makes S2's prerequisite read positive. Open: whether the
-1.4 points cost anything over a longer run or at another lr; one frame per
-norm site (q/k/v and gate/up share `X`) in place of one per matrix, which is
-what S2 would need.
-
-### S4. Tracking output-side frames from `delta`, and from both streams
-
-On the output side `G G^T = delta^T (X X^T) delta`, so the gradient's output
-span lies in `delta`'s: S3's mirror, a shadow and an aim arm on `delta^T delta Q`
-from a backward hook (the user, 2026-10-30). Then two ways to use both streams
-(user and Claude): the agreement of the two frames -- the core
-`C = (delta Q_delta)^T (X Q_x)`, `[r,r]`, the gradient seen through both, whose
-singular vectors pick the directions inside each frame the gradient uses, the
-input action `X^T (delta Q_delta) C` exact when `delta` lies in `Q_delta`; or
-one step on both Grams -- under residual-facing sides every frame lives in
-`d_model` coordinates, as do `X` (the normed stream, read) and `delta` (the
-residual gradient, written), so their trace-normalized Grams may simply add;
-or `X` weighted per token by `||delta_t||^2`, the diagonal of `delta delta^T`,
-which tests whether S3's 1.4-point capture gap is `delta`'s token concentration.
-Sharing: q/k/v and gate/up read one `X`, so an `X` frame is one per norm site;
-aimed per matrix, q/k/v's frames should converge onto it
-(unmeasured: the aim arm logged no overlap between them). A frame that mixes in
-`delta` is per matrix again. How to settle: all shadows in one 500-step LFM3
-run, read against the G-frame like S3.
+The input-side frame tracks from `X` weighted by `delta`'s token norms
+(ARCHIVE, "frames track from the streams"): its action `X^T (w^2 * X Q)` reuses
+the `X Q` that `Z` needs, one GEMM where the exact action takes two. Open:
+whether compile and fused launches collect the FLOP saving, where the first
+pass's eager wrappers ran 9% slower; and whether the residual-facing sides
+stay, since the output-side frames capture 0.54 against the input side's 0.78
+(the user leans to tracking every matrix from its input; ARCHIVE "tracking the
+residual-facing side" lost 8.2e-3 target doing that with `G`-tracked frames).
+A token sum makes the weighted action additive over micro-batches, which may
+answer S1.
 
 ---
 
