@@ -1317,7 +1317,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-lr", type=float, default=2e-4)
     parser.add_argument("--lora-grad-clip-norm", type=float, default=1.0, help="global gradient clip for LoRA adapter parameters")
     parser.add_argument("--lr-warmup-steps", type=int, default=50, help="linearly ramp optimizer learning rates over this many optimizer steps; 0 disables")
-    parser.add_argument("--lr-final-ratio", type=float, default=0.2, help="after warmup, decay learning rates to this fraction of the peak at the last step; 1 holds them constant")
+    parser.add_argument("--lr-final-ratio", type=float, default=1.0, help="after warmup, decay learning rates to this fraction of the peak at the last step; 1 holds them constant")
     parser.add_argument("--lr-decay", choices=("linear", "cosine"), default="cosine", help="shape of the decay from the peak to --lr-final-ratio")
     parser.add_argument("--beta", type=float, default=0.95)
     parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from lab_diagnostics.ROLE_READS")
@@ -1347,7 +1347,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="probe-only: buffer per-matrix CUDA allocator readings immediately before and after gradient preparation on the final measured backward",
     )
-    parser.add_argument("--eval-every", type=int, default=250, help="periodically log target/source validation loss every N measured steps; default 250, so a 250-, 500- or 1000-step run evaluates at each multiple and at its end; 0 disables")
+    parser.add_argument("--eval-every", type=int, default=100, help="periodically log target/source validation loss every N measured steps; default 100, so any run whose length is a multiple of 100 evaluates at each multiple and at its end; 0 disables")
     parser.add_argument("--no-final-sample", dest="final_sample", action="store_false", help="disable final qualitative generation from a target eval prompt")
     parser.set_defaults(final_sample=True)
     parser.add_argument("--final-sample-row", type=int, default=0, help="target eval row index used for final qualitative generation")

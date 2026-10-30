@@ -151,16 +151,18 @@ against (`pyproject.toml`). The harness defaults are the standard arm, on
 
 ```bash
 uv run python experiments/llm_synth_smoke.py \
-  --max-steps 500 --batch-size 16 --eval-every 250 --wandb-log-every 25 \
-  --seed 1 --usuitrack-lr 4e-5 --beta 0.95 --lr-final-ratio 0.2 --lr-decay cosine \
+  --max-steps 500 --batch-size 16 --eval-every 100 --wandb-log-every 25 \
+  --seed 1 --usuitrack-lr 4e-5 --beta 0.95 --lr-final-ratio 1 \
   --rank-fraction 0.05 --no-final-sample --wandb-run <name>
 ```
 
 About 3.9 s/step at bs16 (7.5 GB peak), so 500 steps take ~33 min and 1k
 steps over an hour: run 500, or 250 for a quick read, and 1k only when the
-question needs the late plateau. Keep the length a multiple of the eval
-cadence. Pass `--beta`, the lr, `--lr-final-ratio`, `--lr-decay` and
-`--rank-fraction` explicitly, so a log names its own arm. `--basis-lag-diagnostic
+question needs the late plateau. The lr is constant after warmup, so a
+shorter run is a prefix of a longer one at the same seed: compare at a shared
+eval step (every 100). Keep the length a multiple of the eval cadence. Pass
+`--beta`, the lr, `--lr-final-ratio` and `--rank-fraction` explicitly, so a log
+names its own arm. `--basis-lag-diagnostic
 --basis-lag-interval 10` adds the frame-tracking reads (lag, curve); pass it
 for tracker diagnostics, not on regular runs. Results are the
 `usuitrack_final_val_loss` (target) and `usuitrack_final_retention_val_loss`
@@ -168,7 +170,8 @@ for tracker diagnostics, not on regular runs. Results are the
 telemetry block.
 
 `docs/FACTS.md` tables name their model by lane, and their length: the LFM2.5
-tables are all at 1k steps, as are the LFM3 tables before 2026-10-30.
+tables are all at 1k steps, as are the LFM3 tables before 2026-10-30; LFM3
+arms before 2026-10-30 afternoon decayed by cosine to 0.2.
 
 **LFM2.5-350M**, the lane before 2026-10-30, needs more lr than LFM3: pass
 `--model LiquidAI/LFM2.5-350M-Base --model-revision main --rank-fraction 0.1

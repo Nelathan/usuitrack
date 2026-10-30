@@ -1019,6 +1019,10 @@ defaults (2026-10-30), target first and retention welcome: LFM3 at cosine
 `4e-5` to 0.2, rank 0.05 -- cosine `5e-5` measured best on target but ran hot
 early; LFM2.5 keeps `1e-4` (7.5e-5 a candidate). The release `lr` default is
 `4e-5`; the harness defaults to LFM3 and 500-step runs.
+Later the same day the user moved the harness's standard arm to a constant
+`4e-5` after warmup, evaluated every 100 steps: a run is then a prefix of any
+longer one at its seed, which a decay spanning the run's own length breaks.
+Constant `4e-5` at rank 0.05 was unmeasured when chosen.
 
 Withdrawn: PLAN L1's prediction that one `lr` gives the same sign at both
 sizes, and that capture and live fraction transfer at the same rank fraction.
