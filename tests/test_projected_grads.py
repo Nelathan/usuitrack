@@ -40,11 +40,12 @@ def _loss(block, batch):
 
 
 def _projected_step_two(batches):
-    """Step one on the ordinary path; then the leaves of step two's backwards."""
+    """Step one, which fits the frames; then the leaves of step two's backwards."""
 
     block, optimizer = _setup()
     projected = ProjectedGrads(block, optimizer)
     _loss(block, _batch(0)).backward()
+    projected.prepare()
     optimizer.step()
     for batch in batches:
         _loss(block, batch).backward()
@@ -52,14 +53,53 @@ def _projected_step_two(batches):
     return block, optimizer
 
 
-def test_switches_after_the_fit_and_freezes_the_weights():
+def _gradients(block, batch):
+    """The ordinary weight gradients of `block`'s weights on `batch`, oriented to each frame's side."""
+
+    twin = _Block()
+    twin.load_state_dict(block.state_dict())
+    _loss(twin, batch).backward()
+    return frame.orient(twin.w1.weight.grad, "right"), frame.orient(twin.w2.weight.grad, "left")
+
+
+def _span(basis):
+    return basis @ basis.mT
+
+
+def test_step_one_is_the_optimizers_own_first_step():
+    """At one micro-batch per step the fit comes from the step's whole `G`, and
+    the weights after step one are the ordinary optimizer's."""
+
     block, optimizer = _setup()
-    ProjectedGrads(block, optimizer)
-    _loss(block, _batch(0)).backward()
-    assert type(block.w1) is torch.nn.Linear
-    optimizer.step()
+    projected = ProjectedGrads(block, optimizer)
     assert isinstance(block.w1, ProjectedLinear) and isinstance(block.w2, ProjectedLinear)
     assert not block.w1.weight.requires_grad
+    twin, twin_optimizer = _setup()
+    _loss(block, _batch(0)).backward()
+    projected.prepare()
+    optimizer.step()
+    _loss(twin, _batch(0)).backward()
+    twin_optimizer.step()
+    for module, twin_module in ((block.w1, twin.w1), (block.w2, twin.w2)):
+        torch.testing.assert_close(_span(optimizer.state[module.weight]["frame"]), _span(twin_optimizer.state[twin_module.weight]["frame"]))
+        torch.testing.assert_close(module.weight, twin_module.weight)
+
+
+def test_under_accumulation_the_first_micro_batch_fits_the_frame():
+    first, second = _batch(1), _batch(2)
+    block, optimizer = _setup()
+    projected = ProjectedGrads(block, optimizer)
+    from_first = _gradients(block, first)
+    from_second = _gradients(block, second)
+    for batch in (first, second):
+        _loss(block, batch).backward()
+    projected.prepare()
+    for module, grad_first, grad_second in zip((block.w1, block.w2), from_first, from_second, strict=True):
+        basis = optimizer.state[module.weight]["frame"]
+        torch.testing.assert_close(_span(basis), _span(frame.fit(grad_first, basis.shape[-1])))
+        prepared = optimizer._pending[module.weight]
+        torch.testing.assert_close(prepared.projected, (grad_first + grad_second) @ basis)
+        assert prepared.tangent is None
 
 
 def test_projection_is_exact_and_the_action_comes_from_the_streams():
@@ -108,7 +148,8 @@ def test_training_runs_with_projected_grads():
     projected = ProjectedGrads(block, optimizer)
     before = block.w1.weight.detach().clone()
     for step in range(5):
-        _loss(block, _batch(step)).backward()
+        for micro in range(2):
+            _loss(block, _batch(2 * step + micro)).backward()
         projected.prepare()
         optimizer.step()
     assert not torch.equal(block.w1.weight, before)

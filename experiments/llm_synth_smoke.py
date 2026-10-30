@@ -914,7 +914,8 @@ def apply_lr_schedule(
 
 
 def validate_gradient_release_contract(args) -> None:
-    if not args.release_matrix_grads:
+    # Under --projected-grads no tracked matrix forms G, so release has nothing to free.
+    if not args.release_matrix_grads or args.projected_grads:
         return
     if args.grad_accum_steps != 1:
         raise ValueError("--release-matrix-grads requires --grad-accum-steps 1")
