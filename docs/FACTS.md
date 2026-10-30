@@ -1084,7 +1084,9 @@ k/v), and inflates a read divided by it by 0.2-1.1% at step 200: about +0.003
 of the +0.006 capture over the `G` arm.
 
 Cost: 3.48 s/step against 3.89 (both sides), the 0.4 s the `dW` GEMMs cost;
-backward peak 7.76 GB against 7.47, the persistent leaves and their grads.
+backward peak 7.76 GB against 7.47, the persistent leaves and their grads
+(full-size leaves; as expanded zeros they hold 0.44 GB less, "S2's leaves
+hold no storage").
 
 ### The stream aim pulls on every plane; the frame does not travel further
 
@@ -1151,7 +1153,26 @@ The four arms sit within 6e-4 target and 1.6e-3 source. The stream aim keeps
 the extra capture into loss. Rank 0.1 starts slower (eval at 100: 1.4410 `G`,
 1.4387 S2, against 1.4331) and catches up by 300. S2 at rank 0.1 runs 3.73
 s/step against 4.03; its leaves scale with rank, backward peak 8.56 GB against
-7.69 (+0.88, against +0.29 at rank 0.05).
+7.69 (+0.88, against +0.29 at rank 0.05), with full-size leaves ("S2's
+leaves hold no storage").
+
+### S2's leaves hold no storage
+
+2026-10-30, `--projected-grads` on the standard arm (constant `4e-5`, rank
+0.05, 100 steps, seed 1, the compiled write): the leaves `z`, `action` and
+`probed` as one zero expanded to their shape (`s2-anchors-100`) against
+full-size zeros (`s2-fusedwrite-100`). Their values are never read, only the
+grads autograd gives them.
+
+| leaves | s/step | forward peak | backward peak | optimizer peak | target @100 | source @100 |
+|---|---|---|---|---|---|---|
+| full-size | 3.33 | 7.39 GB | 7.66 GB | 5.31 GB | 1.431788 | 2.671430 |
+| expanded | 3.37 | 6.95 GB | 7.22 GB | 4.87 GB | 1.431734 | 2.671608 |
+
+Every peak drops by 0.438 GB, the value bytes predicted from LFM3's 153
+tracked matrices (`z` 0.26 GB bf16, `action` 0.18 GB fp32; 0.88 GB at rank
+0.1). S2's backward peak now matches the `G` path's at the same length (7.23
+GB, `cwrite-s1-100`). The 0.04 s/step is one unreplicated pair, unresolved.
 
 ## Run ledger (Anima)
 

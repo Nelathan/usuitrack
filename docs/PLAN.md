@@ -66,9 +66,6 @@ the whole `dW` cost and ties `G`'s aim on loss. Open:
   release diagnostics to accumulate in place with static counts, `lr` as a
   device tensor, and S2's leaves to keep their grads; optional (user,
   2026-10-30: ~5%, clean code first).
-- The leaves' memory: +0.29 GB at rank 0.05, +0.88 GB at 0.1 (FACTS, "Rank
-  0.1 against 0.05"). They are autograd anchors whose values are never read;
-  expanded zeros would leave only their grads.
 - The weighted action is a token sum, so accumulation is exact (tested on
   CPU), which may answer S1; no accumulated run yet.
 
