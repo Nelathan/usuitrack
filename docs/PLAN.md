@@ -66,8 +66,8 @@ the whole `dW` cost and ties `G`'s aim on loss. Open:
   release diagnostics to accumulate in place with static counts, `lr` as a
   device tensor, and S2's leaves to keep their grads; optional (user,
   2026-10-30: ~5%, clean code first).
-- Accumulation works under S2 (FACTS, "S2 accumulates"), which may answer
-  S1 for the harness; whether it costs loss needs a matched-data pair.
+- Accumulation works under S2 (FACTS, "S2 accumulates"), 6e-4 from the
+  unsplit step; which may answer S1 for the harness.
 
 ---
 

@@ -1171,15 +1171,19 @@ peak now matches the `G` path's 7.23 GB. The 0.04 s/step is unresolved.
 
 ### S2 accumulates
 
-2026-10-30, S2, 100 steps, seed 1. Each frame is fitted in its first backward
-from that micro-batch's `G`; bs16 reproduces the old first step.
+2026-10-30, S2, bs16, 100 steps, seed 1, the same rows split into k
+micro-batches. Each frame is fitted in its first backward from that
+micro-batch's `G`; at k=1 that is the old first step.
 
 | run | capture | backward peak | s/step | target @100 | source @100 |
 |---|---|---|---|---|---|
-| bs16 (`s2-fitbwd-100`) | 0.710 | 7.22 GB | 3.42 | 1.431798 | 2.671562 |
-| bs8 x 2 (`s2-fitbwd-accum2-100`) | 0.708 | 6.01 GB | 3.32 | 1.440489 | 2.655436 |
+| k=1, before the token weighting (`s2-fitbwd-100`) | 0.710 | 7.22 GB | 3.42 | 1.431798 | 2.671562 |
+| k=1 (`s2-split1-100`) | 0.710 | 7.22 GB | 3.38 | 1.431749 | 2.671502 |
+| k=2 (`s2-split2-100`) | 0.708 | 6.01 GB | 3.35 | 1.432345 | 2.670934 |
 
-The two packings see different rows, so the losses do not compare.
+The k=1 pair sets the float noise, 5e-5. k=2 moves 6e-4 either way, under
+the run-to-run floor: the frame fitted from half the batch, or `z` summed in
+bf16, unseparated.
 
 ## Run ledger (Anima)
 
