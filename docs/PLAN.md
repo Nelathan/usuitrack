@@ -59,12 +59,13 @@ the `X Q` that `Z` needs, one GEMM where the exact action takes two. Built as
 `--projected-grads` (FACTS, "Training without `dW`"): compiled, it collects
 the whole `dW` cost and ties `G`'s aim on loss. Open:
 
-- The next saving (FACTS, "Where the S2 step's time goes"). The compiled
-  weight write is measured (0.20 s); does it enter the release? Past it the
-  step is host-bound, ~155 ms of idle GPU in the optimizer and ~37 ms in
-  `prepare`, which only a CUDA graph over the post-backward work reaches. That
-  needs the release diagnostics to accumulate in place with static counts,
-  `lr` as a device tensor, and S2's leaves to keep their grads.
+- The next saving (FACTS, "Where the S2 step's time goes"). The weight write
+  is compiled on `lab` (R1 asks about the release). Past it the step is
+  host-bound, ~155 ms of idle GPU in the optimizer and ~37 ms in `prepare`,
+  which only a CUDA graph over the post-backward work reaches. That needs the
+  release diagnostics to accumulate in place with static counts, `lr` as a
+  device tensor, and S2's leaves to keep their grads; optional (user,
+  2026-10-30: ~5%, clean code first).
 - The leaves' memory: +0.29 GB at rank 0.05, +0.88 GB at 0.1 (FACTS, "Rank
   0.1 against 0.05"). They are autograd anchors whose values are never read;
   expanded zeros would leave only their grads.
