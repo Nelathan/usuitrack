@@ -55,14 +55,21 @@ wherever autograd would form `dW`, at ~0.1 of its FLOPs at rank 0.05. Design,
 wiring candidates and the order of work: `docs/PROJECTED_ACTIVATION_2.md`.
 The input-side frame tracks from `X` weighted by `delta`'s token norms
 (ARCHIVE, "frames track from the streams"): its action `X^T (w^2 * X Q)` reuses
-the `X Q` that `Z` needs, one GEMM where the exact action takes two. Open:
-whether compile and fused launches collect the FLOP saving, where the first
-pass's eager wrappers ran 9% slower; and whether the residual-facing sides
-stay, since the output-side frames capture 0.54 against the input side's 0.78
-(the user leans to tracking every matrix from its input; ARCHIVE "tracking the
-residual-facing side" lost 8.2e-3 target doing that with `G`-tracked frames).
-A token sum makes the weighted action additive over micro-batches, which may
-answer S1.
+the `X Q` that `Z` needs, one GEMM where the exact action takes two. Built as
+`--projected-grads` (FACTS, "Training without `dW`"): compiled, it collects
+the whole `dW` cost and ties `G`'s aim on loss. Open:
+
+- Where the rest of the step goes: `dW` was 0.4 s of 3.9; the next saving is
+  outside the linear GEMMs, and a profile has to name it.
+- The side. The user leans to tracking every matrix from its input, the
+  purer use of `X` and `delta`; measured, that forgets 9e-3 more source at a
+  tied target under either aim, as ARCHIVE "tracking the residual-facing side"
+  lost 8.2e-3 target with older code. One seed on LFM3, whose noise floor is
+  unmeasured.
+- `||G||` from 16 probes is unmeasured against the true norm on LFM3; the
+  reads that divide by it are suspect until it is.
+- The weighted action is a token sum, so accumulation is exact (tested on
+  CPU), which may answer S1; no accumulated run yet.
 
 ---
 
