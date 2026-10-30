@@ -66,8 +66,8 @@ the whole `dW` cost and ties `G`'s aim on loss. Open:
   release diagnostics to accumulate in place with static counts, `lr` as a
   device tensor, and S2's leaves to keep their grads; optional (user,
   2026-10-30: ~5%, clean code first).
-- The weighted action is a token sum, so accumulation is exact (tested on
-  CPU), which may answer S1; no accumulated run yet.
+- Accumulation works under S2 (FACTS, "S2 accumulates"), which may answer
+  S1 for the harness; whether it costs loss needs a matched-data pair.
 
 ---
 

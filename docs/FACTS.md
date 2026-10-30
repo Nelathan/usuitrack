@@ -1169,6 +1169,18 @@ zeros (`s2-anchors-100`) against full-size (`s2-fusedwrite-100`).
 Every peak drops by the predicted 0.438 GB (0.88 at rank 0.1); the backward
 peak now matches the `G` path's 7.23 GB. The 0.04 s/step is unresolved.
 
+### S2 accumulates
+
+2026-10-30, S2, 100 steps, seed 1. Each frame is fitted in its first backward
+from that micro-batch's `G`; bs16 reproduces the old first step.
+
+| run | capture | backward peak | s/step | target @100 | source @100 |
+|---|---|---|---|---|---|
+| bs16 (`s2-fitbwd-100`) | 0.710 | 7.22 GB | 3.42 | 1.431798 | 2.671562 |
+| bs8 x 2 (`s2-fitbwd-accum2-100`) | 0.708 | 6.01 GB | 3.32 | 1.440489 | 2.655436 |
+
+The two packings see different rows, so the losses do not compare.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
