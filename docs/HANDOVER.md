@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28, updated 2026-10-30, 14:00. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-10-30, 19:20. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
@@ -11,7 +11,14 @@ PLAN holds N (norm), S (subspace gradients: S1 accumulation, S2 weight
 gradients from both streams), M1 (where magnitude is dropped), T (side), and a
 one-line index of the parked ones. Closed: L1, `lr` does not transfer across
 sizes, the release defaults to `4e-5`, LFM3's; S3 and S4, frames track from
-the streams, the input side from `X` weighted by `delta`'s token norms.
+the streams, the input side from `X` weighted by `delta`'s token norms; the
+residual writers keep their output side; a live aim does not make rank 0.1 pay.
+
+**S2 is built**, on branch `projected-grads` (was `x-side`; no upstream):
+`--projected-grads` trains with no `dW`, ties `G`'s aim on loss and runs 3.49
+s/step against 3.89. A runner with the weight write compiled reaches 3.285
+(FACTS, "Where the S2 step's time goes"). Past that the optimizer step is
+host-bound.
 
 - **Package:** `frame.py` (fit, Oja aim, constant-angle turn, retraction),
   `polar.py` (balanced Newton-Schulz), `optimizer.py`, `diagnostics.py`,
@@ -49,11 +56,11 @@ release files onto it, prepared locally after your review; you push.
 
 ## Next
 
-- `lfm3-const4e5-s1`, the constant-lr standard arm at 1k with evals every
-  100: the reference for every length; into FACTS when it lands.
-- S2 per `docs/PROJECTED_ACTIVATION_2.md`, with the weighted `X` frame, on
-  branch `x-side` (the user, 2026-10-30): a microbench on one compiled,
-  checkpointed LFM3 layer first.
+- Your call: the compiled weight write into the release (-0.20 s/step,
+  measured; `outputs/tools/fused_write.py` is the prototype), and whether a
+  CUDA graph over the post-backward work goes on PLAN (needs in-place
+  diagnostics, `lr` as a device tensor).
+- S2's leaves as expanded zeros: the +0.29 GB (rank 0.05) is mostly them.
 - The release `rank_fraction` default is still 0.1; the harness runs 0.05.
 - M1 has no arm; its open item (a token-count weight) is predicted below noise.
 
@@ -104,6 +111,19 @@ Under your handover of 2026-10-29 night, oldest first:
 - `ebfa1b5` S3 and S4 closed into ARCHIVE; PLAN S2 carries the frame and the
   side question.
 - `209ab14` harness: constant lr, eval every 100.
+
+2026-10-30 evening, branch `projected-grads`, oldest first:
+- `68b6973` FACTS: the constant reference (on `lab` as `db4349c`).
+- `f1e0626` harness: `--projected-grads` (`experiments/projected_grads.py`,
+  tests, flag).
+- `825d31c` FACTS: S2's aim x side 2x2.
+- `e1b5221`, `85e9782` PLAN S2 open items.
+- `aa97ec7` FACTS: the 16-probe `||G||` estimate.
+- `17f5de9` ARCHIVE: the residual writers keep their output side.
+- `553b527` AGENTS: own the goal (on `lab` as `156e1f6`).
+- `3f35de3` FACTS: frame motion under the stream aim; where the step's time
+  goes.
+- `3dc126d` FACTS/ARCHIVE: rank 0.1 buys capture and no loss.
 
 Run logs: wandb `pink-marker/usuitrack` (`lfm25-c5e5-s1`, `lfm25-c2e5-s1`,
 `release-trainmode-s1`, `lfm3-*`, ...); local logs, queue tools (`queue.sh`;
