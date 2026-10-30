@@ -52,7 +52,7 @@ class UsuiTrack(Optimizer):
     def __init__(
         self,
         params: Iterable[Tensor] | Iterable[dict],
-        lr: float = 1e-4,
+        lr: float = 4e-5,
         beta: float = 0.95,
         weight_decay: float = 0.0,
         rank_fraction: float = 0.1,

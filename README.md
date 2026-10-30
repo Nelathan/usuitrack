@@ -50,7 +50,7 @@ matrix at `rank_fraction * sqrt(m * n)`, capped at half its smaller side, so a
 side defaults to `side="auto"`, the shorter one; a param group can fix it with
 `side="left"` or `"right"` where you know better.
 
-`lr` is the relative step, `||dW|| / ||W||` per matrix, so the default `1e-4`
+`lr` is the relative step, `||dW|| / ||W||` per matrix, so the default `4e-5`
 means the same in every module. Schedule it like any optimizer's: a trainer's or
 torch's scheduler drives it, and the optimizer has no schedule of its own.
 
@@ -149,8 +149,10 @@ planes weight the average and its noise planes stay small. Magnitude is
 relative to the weight it lands on: `lr` is the fraction of `||W||` a matrix
 moves per step, the same in every module whatever its shape or rank (LAMB's
 trust ratio); see `docs/SPEC.md` step 8. That puts it on LoRA's scale. The
-default `1e-4` was set on a 350M LLM at 16 x 1024 tokens per step, under a
-linear decay to a fifth of it over the run, which beat a constant `lr`. On a 2B
+default `4e-5` was set on a 1.7B LLM at 16 x 1024 tokens per step, under a
+cosine decay to a fifth of it over the run, which beat a constant `lr`; a 350M
+LLM at the same batch takes more, `1e-4`, so the relative step does not
+transfer across sizes one-to-one. On a 2B
 image DiT at batch 8 the best relative step measured so far is about `1.3e-5`.
 For bf16 weights the update is accumulated in fp32 and written back with
 stochastic rounding, because an orthogonalized step is often a fraction of a
