@@ -59,8 +59,12 @@ the `X Q` that `Z` needs, one GEMM where the exact action takes two. Built as
 `--projected-grads` (FACTS, "Training without `dW`"): compiled, it collects
 the whole `dW` cost and ties `G`'s aim on loss. Open:
 
-- Where the rest of the step goes: `dW` was 0.4 s of 3.9; the next saving is
-  outside the linear GEMMs, and a profile has to name it.
+- The next saving. A profile of the S2 step (3.6 s under the profiler): linear
+  GEMMs 2.1 s, the optimizer step 0.54 s of which 0.30 s is kernels -- 24.5k
+  launches, launch-bound -- then CCE 0.25, attention 0.13. A CUDA graph or a
+  fused step would take 0.25-0.35 s, and touches the release optimizer;
+  fewer checkpointed layers in the 4 GB S2 leaves free, ~0.1 s; fusing the
+  bases of matrices sharing `X`, ~0.05.
 - The weighted action is a token sum, so accumulation is exact (tested on
   CPU), which may answer S1; no accumulated run yet.
 
