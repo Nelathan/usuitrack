@@ -9,7 +9,7 @@ import torch
 from usuitrack import UsuiTrack
 
 from experiments.llm_synth_smoke import BackwardMemoryTrace, DEFAULT_LORA_ALPHA, DEFAULT_LORA_RANK, DEFAULT_MODEL, DEFAULT_MODEL_REVISION, DEFAULT_SOURCE_HF_DATASET, build_parser, build_usuitrack_param_groups, install_state_matched_lora, maybe_compile_training_model, packed_text_limit, partition_usuitrack_params, prepare_for_training, select_trainable_params, validate_gradient_release_contract, validate_lora_optimizer_state_dtype, wandb_log
-from experiments.llm_synth_smoke import apply_lr_schedule, cce_causal_lm_loss, gradient_norm_statistics, make_packed_batches, make_right_padded_batches, synth_masked_examples
+from experiments.llm_synth_smoke import apply_lr_schedule, cce_causal_lm_loss, gradient_norm_statistics, make_packed_batches, make_right_padded_batches, synth_masked_examples, train_step
 
 
 def assert_param_membership(test_case, param, params, expected: bool) -> None:
@@ -439,6 +439,43 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(captured["ignore_index"], -100)
         self.assertTrue(captured["shift"])
         self.assertTrue(torch.equal(captured["targets"], torch.tensor([[-100, 2, 3]])))
+
+    def test_accumulation_splits_the_step_and_weighs_every_token_the_same(self):
+        def linear_cross_entropy(hidden_states, weight, targets, ignore_index, shift, reduction):
+            logits = (hidden_states[:, :-1] @ weight.mT).flatten(0, 1)
+            return torch.nn.functional.cross_entropy(logits, targets[:, 1:].flatten(), ignore_index=ignore_index, reduction=reduction)
+
+        class Base(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed = torch.nn.Embedding(11, 8)
+
+            def forward(self, input_ids, use_cache=False):
+                return types.SimpleNamespace(last_hidden_state=self.embed(input_ids))
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = Base()
+                self.lm_head = torch.nn.Linear(8, 11, bias=False)
+
+        input_ids = torch.randint(0, 11, (4, 6), generator=torch.Generator().manual_seed(0))
+        labels = input_ids.clone()
+        labels[:2, :5] = -100  # the first micro-batch supervises 2 tokens, the second 10
+        batch = {"input_ids": input_ids, "labels": labels}
+
+        def stepped(grad_accum_steps):
+            torch.manual_seed(0)
+            model = Model()
+            params = list(model.parameters())
+            train_step(model, torch.optim.SGD(params, lr=1.0), params, [batch], 0, grad_accum_steps, collect_norms=False)
+            return params
+
+        fake_module = types.ModuleType("cut_cross_entropy")
+        fake_module.linear_cross_entropy = linear_cross_entropy
+        with mock.patch.dict(sys.modules, {"cut_cross_entropy": fake_module}):
+            for whole, split in zip(stepped(1), stepped(2), strict=True):
+                torch.testing.assert_close(whole, split)
 
 
 if __name__ == "__main__":

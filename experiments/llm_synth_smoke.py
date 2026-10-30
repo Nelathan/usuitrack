@@ -825,16 +825,19 @@ def train_step(
     if sensors is not None:
         sensors.start()
     losses = []
-    for offset in range(grad_accum_steps):
-        batch = batches[(start_index + offset) % len(batches)]
+    batch = batches[start_index % len(batches)]
+    # Every supervised token of the step weighs the same, whichever micro-batch holds it.
+    supervised = (batch["labels"][:, 1:] != -100).sum()
+    micro_batches = [dict(zip(batch, rows)) for rows in zip(*(value.chunk(grad_accum_steps) for value in batch.values()))]
+    for offset, micro_batch in enumerate(micro_batches):
         if activation_frames is not None:
-            activation_frames.set_batch(batch["labels"])
-        loss = cce_causal_lm_loss(model, batch)
+            activation_frames.set_batch(micro_batch["labels"])
+        loss = cce_causal_lm_loss(model, micro_batch, reduction="sum") / supervised
         if sensors is not None and offset == grad_accum_steps - 1:
             sensors.mark("forward")
         if backward_memory_trace is not None and offset == grad_accum_steps - 1:
             backward_memory_trace.start()
-        (loss / grad_accum_steps).backward()
+        loss.backward()
         if backward_memory_trace is not None and offset == grad_accum_steps - 1:
             backward_memory_trace.stop()
         if sensors is not None and offset == grad_accum_steps - 1:
@@ -864,7 +867,7 @@ def train_step(
     if sensors is not None:
         sensors.mark("optimizer")
     result = {
-        "loss": torch.stack(losses).mean(),
+        "loss": torch.stack(losses).sum(),
         "grad_norm": grad_norm,
         "grad_norm_median_tensor": grad_norm_median_tensor,
         "param_norm": param_norm,
@@ -983,7 +986,7 @@ def run_optimizer(
     else:
         usuitrack_param_groups = []
         policy_stats = {"effective_rank_min": 0, "effective_rank_max": 0, "side_policy_left_tensors": 0, "side_policy_right_tensors": 0}
-    train_batch_count = (args.warmup_steps + args.max_steps) * args.grad_accum_steps
+    train_batch_count = args.warmup_steps + args.max_steps
     train_batches = make_batches(tokenizer, train_texts, device, args.batch_size, args.seq_len, train_batch_count, args.batching, "synth")
     val_batches = make_batches(tokenizer, val_texts, device, args.batch_size, args.seq_len, args.val_blocks, args.batching, "synth")
     retention_batches = make_batches(tokenizer, retention_texts, device, args.batch_size, args.seq_len, args.retention_val_blocks, args.batching, "source") if retention_texts else None
@@ -1069,7 +1072,7 @@ def run_optimizer(
     last_eval_val = float("nan")
 
     for step in range(args.warmup_steps):
-        batch_index = step * args.grad_accum_steps
+        batch_index = step
         apply_lr_schedule(optimizer, base_lrs, step + 1, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio, args.lr_decay)
         if fallback_optimizer is not None:
             apply_lr_schedule(fallback_optimizer, fallback_base_lrs, step + 1, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio, args.lr_decay)
@@ -1097,7 +1100,7 @@ def run_optimizer(
     start_time = time.perf_counter()
     eval_elapsed = 0.0
     for step in range(args.max_steps):
-        batch_index = (args.warmup_steps + step) * args.grad_accum_steps
+        batch_index = args.warmup_steps + step
         global_step = step + 1
         apply_lr_schedule(optimizer, base_lrs, args.warmup_steps + global_step, args.lr_warmup_steps, args.warmup_steps + args.max_steps, args.lr_final_ratio, args.lr_decay)
         if fallback_optimizer is not None:
@@ -1257,10 +1260,10 @@ def run_optimizer(
         "skip_validation": args.skip_validation,
         "actual_sequence_tokens": batch_tokens(train_batches[0]),
         "actual_supervised_tokens": batch_supervised_tokens(train_batches[0]),
-        "tokens_per_optimizer_step": batch_tokens(train_batches[0]) * args.grad_accum_steps,
-        "supervised_tokens_per_optimizer_step": batch_supervised_tokens(train_batches[0]) * args.grad_accum_steps,
-        "measured_tokens_per_second": (batch_tokens(train_batches[0]) * args.grad_accum_steps * args.max_steps) / training_elapsed,
-        "measured_tokens_per_second_with_eval": (batch_tokens(train_batches[0]) * args.grad_accum_steps * args.max_steps) / measured_elapsed,
+        "tokens_per_optimizer_step": batch_tokens(train_batches[0]),
+        "supervised_tokens_per_optimizer_step": batch_supervised_tokens(train_batches[0]),
+        "measured_tokens_per_second": (batch_tokens(train_batches[0]) * args.max_steps) / training_elapsed,
+        "measured_tokens_per_second_with_eval": (batch_tokens(train_batches[0]) * args.max_steps) / measured_elapsed,
         "matrix_state_bytes": matrix_state_bytes,
         "fallback_state_bytes": fallback_state_bytes,
         "state_bytes": total_state_bytes,
@@ -1314,7 +1317,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=500, help="ceiling on measured optimizer steps; default 500, a multiple of the eval cadence; clamped down with a warning if the dataset can't supply this many rows")
     parser.add_argument("--seq-len", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--grad-accum-steps", type=int, default=1, help="split each step's --batch-size rows into this many micro-batches")
     parser.add_argument("--val-blocks", type=int, default=8, help="number of validation batches/blocks to build")
     parser.add_argument("--retention-val-blocks", type=int, default=8, help="number of source validation batches/blocks to build")
     parser.add_argument("--batching", choices=("synth_right_padded_no_mask", "eos_packed_no_mask"), default="synth_right_padded_no_mask", help="batch construction policy; default is faithful SYNTH diagnostics; choose eos_packed_no_mask explicitly for throughput")
@@ -1403,8 +1406,8 @@ def main() -> None:
         raise ValueError("warmup_steps must be non-negative")
     if args.max_steps <= 0:
         raise ValueError("max_steps must be positive")
-    if args.grad_accum_steps <= 0:
-        raise ValueError("grad_accum_steps must be positive")
+    if args.grad_accum_steps <= 0 or args.batch_size % args.grad_accum_steps:
+        raise ValueError("grad_accum_steps must be positive and divide batch_size")
     if args.seq_len <= 1:
         raise ValueError("seq_len must be greater than 1")
     if args.batch_size <= 0:
@@ -1449,7 +1452,7 @@ def main() -> None:
     model_name = args.model
 
     total_train_steps = args.warmup_steps + args.max_steps
-    train_blocks = max(total_train_steps * args.grad_accum_steps, 1)
+    train_blocks = max(total_train_steps, 1)
     val_blocks = args.val_blocks
     target_source = args.data_dir
     if args.target_hf_dataset:
@@ -1458,10 +1461,10 @@ def main() -> None:
             while train_blocks > 1 and packed_text_limit(train_blocks, args.batch_size, args.seq_len) > args.target_val_offset:
                 train_blocks -= 1
             train_limit = packed_text_limit(train_blocks, args.batch_size, args.seq_len)
-            clamped_total_steps = max(train_blocks // args.grad_accum_steps, 1)
+            clamped_total_steps = train_blocks
             clamped_max_steps = max(clamped_total_steps - args.warmup_steps, 1)
             print(
-                f"warning: --max-steps {args.max_steps} needs {packed_text_limit(max(total_train_steps * args.grad_accum_steps, 1), args.batch_size, args.seq_len)} "
+                f"warning: --max-steps {args.max_steps} needs {packed_text_limit(max(total_train_steps, 1), args.batch_size, args.seq_len)} "
                 f"training rows but only {args.target_val_offset} are available before --target-val-offset; "
                 f"clamping to --max-steps {clamped_max_steps}",
                 flush=True,
