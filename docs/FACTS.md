@@ -1003,6 +1003,38 @@ tangent spectrum is now X's). The shadow arm leaves training alone end to end:
 at 350M shadow 1.13 against 0.89. A 300-step 350M shadow smoke read overlap
 0.81, G-frame 0.854 against X-frame 0.825 of input-side `G`.
 
+### Frames from both streams: `X` weighted by `||delta_t||^2` holds G's capture
+
+2026-10-30, PLAN S4, `--stream-frames` (`experiments/stream_frames.py`) on the
+standard arm (cosine `4e-5`, 500 steps, seed 1), `s4-streams-s1-500`, against
+`lfm3-cos4e5-s1-500`. Every shadow starts as a copy of the optimizer's fitted
+frame and turns by the same aim and turn; every read scores a frame on the
+gradient it has not yet seen. Means over steps 250-500 (the 100-250 bin reads
+the same to within 0.01, so the disagreements are steady, not convergence):
+
+| side | frame tracked from | overlap with G-frame | capture of `G` |
+|---|---|---|---|
+| input (105) | `G` (the optimizer's) | - | 0.776 |
+| | `X`: `X^T X Q` | 0.808 | 0.764 |
+| | `X` weighted: `X^T diag(\|\|delta_t\|\|^2) X Q` | 0.928 | 0.775 |
+| | agreement core: `X^T (delta Q_o) C` | 0.897 | 0.771 |
+| | sum of trace-normalized `X` and norm-input-gradient Grams | 0.584 | 0.739 |
+| output (48) | `G` (the optimizer's) | - | 0.541 |
+| | `delta`: `delta^T delta Q` | 0.732 | 0.547 |
+
+The diagonal of `delta delta^T` is what separates `X`'s frame from `G`'s: it
+lifts overlap 0.81 -> 0.93 and closes the capture gap to 0.001. The
+off-diagonal adds nothing the diagonal does not (agreement below weighted on
+both reads); the residual-gradient Gram moves the frame away. On the output
+side `delta` alone captures as much as `G`. Capture moves far less than
+overlap: the 19% of span the `X` frame lacks carries 1.2 points of the next
+gradient. One seed; capture gaps of 0.005 or less are unresolved.
+
+Training untouched: 1.348438 / 2.676389 against 1.348516 / 2.676394. Cost of
+the instrument (five shadows and the far frame per matrix, hooks that
+exhaust dynamo's recompile limit): 5.19 s/step against 3.88, peak 8.39 GB
+against 7.34.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
