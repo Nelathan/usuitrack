@@ -49,23 +49,12 @@ this one's prior.
 
 ### S2. Weight gradients without `G` (molegrad)
 
-The goal (user, 2026-10-30). Wherever autograd forms `dW = delta^T X`, both
-streams are in hand, so `G` is unnecessary: with the held frame `Q` (it turns
-only in `step()`, so it is known in the forward) the input side's
-`Z = G Q = delta^T (X Q)` and its Oja action `G^T G Q = X^T (delta Z)`, the
-output side's `Z = Q^T G = (delta Q)^T X` and action `delta^T (X Z^T)` -- exact,
-four skinny GEMMs against one full one, a FLOP ratio of
-`2 r (d_in + d_out) / (d_in d_out)` (~0.1 at rank 0.05). Wired by freezing `W`
-for autograd and taking `X` and `delta` per module, no null gradients. Tracking
-the frame from `X` (S3) is then needed only to not hold `X` at all. Not holding
-`X` does not retire checkpointing: `dX = delta W` needs no `X`, but SwiGLU,
-attention, conv and norm internals keep their own saves, and down/o_proj (output
-side) need the full `X` for `Z`. Old evidence (`../optimizers`,
-`PROJECTED_ACTIVATION.md`, 350M bs8): a custom-autograd version, all frames
-input-side, saved ~275 MB on top of checkpointing and ran 9% slower in eager
-wrappers. Open: the wiring under `torch.compile` (module hooks vs a zero
-adapter `y = x W^T + (x Q) A^T` whose `A.grad` is `Z`, vs a `torch.library`
-custom op); and the speed.
+The goal (user, 2026-10-30): a FLOP win under checkpointing, not a VRAM win.
+`Z` and the exact Oja action come from `X` and `delta` in four skinny GEMMs
+wherever autograd would form `dW`, at ~0.1 of its FLOPs at rank 0.05. Design,
+wiring candidates and the order of work: `docs/PROJECTED_ACTIVATION_2.md`.
+Open: whether compile and fused launches collect the FLOP saving, where the
+first pass's eager wrappers ran 9% slower.
 
 ### S3. Tracking input-side frames from activations
 
