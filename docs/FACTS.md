@@ -898,6 +898,7 @@ means over steps (wandb history):
 | `lfm25-c5e5-s1` | +0.475 | +0.056 | +0.0018 | -0.0051 | -0.0066 | 1.664033 | 3.041894 |
 | `lfm25-c2e5-s1` | +0.604 | +0.176 | +0.034 | +0.0083 | +0.0017 | 1.692191 | 3.010912 |
 | `lfm25-cos2e5-s1` (2e-5, cosine to 0.2) | +0.604 | +0.177 | +0.039 | +0.0195 | +0.0173 | 1.717568 | 2.997595 |
+| `lfm25-cos4e5-s1` (4e-5, cosine to 0.2) | +0.513 | +0.079 | +0.0106 | +0.0059 | +0.0080 | 1.680789 | 3.018701 |
 | `lfm25-cos5e5-s1` (5e-5, cosine to 0.2) | +0.475 | +0.057 | +0.0055 | +0.0032 | +0.0059 | 1.671939 | 3.026230 |
 | `release-clean-s1` (1e-4, decay 0.2) | +0.351 | +0.017 | -0.004 | -0.003 | +0.0002 | 1.652230 | 3.057482 |
 
@@ -911,7 +912,9 @@ both: neither depends on lr. 1.12 s/step. Cosine decay to 0.2 of 2e-5
 0.025 less target and forgets 0.013 less source than constant 2e-5, the
 direction a lower constant lr would also take. Cosine decay of 5e-5
 (2026-10-30) keeps the cosine positive throughout where constant 5e-5 turns
-negative; it gains 0.008 less target and forgets 0.016 less source.
+negative; it gains 0.008 less target and forgets 0.016 less source. Cosine
+4e-5 sits between the two cosine arms on both losses, positive throughout;
+0.90 s/step on torch 2.15.
 
 ## LFM3-1.7B lane
 
