@@ -1083,6 +1083,16 @@ the residual writers or the rank does not reach the loss.
 PLAN S2, 2026-10-30 (FACTS, "S2's leaves hold no storage"). Expanded zeros
 save the leaves' 0.44 GB; S2's backward peak matches the `G` path's.
 
+## CLOSED -- the magnitude goes at `Z`
+
+PLAN M1, 2026-10-30. The moment keeps blending `Z / ||Z||`; under S2 there is
+no `G` to normalize. The user's reason: unit steps make the moment a rolling
+average over geometry, resilient to loss spikes. Evidence: a 21x gradient
+burst on LFM3 moved capture and liveness only in its window and steered by its
+direction alone; the tracker is magnitude-free too (the tangent is divided by
+its mean Rayleigh quotient). A supervised-token weight would move a step's
+share by ~8%; not run.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

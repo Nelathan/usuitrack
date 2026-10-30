@@ -71,40 +71,6 @@ the whole `dW` cost and ties `G`'s aim on loss. Open:
 
 ---
 
-## Group M. Moment
-
-### M1. Where to throw the magnitude away: `Z`, or `G`?
-
-The moment blends `Z / ||Z||` (SPEC step 5) and the polar map discards scale,
-so every step enters the running average as a unit -- the intent being a
-better blend and a stable geometry, not a weighting. Normalizing `Z` is the
-cheap place to do it. The user's questions (2026-10-29): does a burst in
-gradient magnitude still reach the tracking, in which case the normalization
-belongs on `G`; and if steps are weighted at all, it should be by supervised
-token count, which varies step to step.
-
-Evidence (2026-10-29). Weighting by `||Z|| / ||G||` would weight by capture,
-which is flat (0.77 at 350M, 0.71 on LFM3 at rank 0.05), and a constant weight
-cancels in the polar map: no use. Supervised tokens per bs16 step vary with CV
-0.073 (350M) / 0.076 (LFM3), p01-p99 0.82-1.16 of the mean (FACTS): a
-token-count weight moves a step's share by ~8%. By construction magnitude does
-not reach the tracker either: the Oja tangent is divided by its mean Rayleigh
-quotient, the live floor is relative to `sigma_max`, and the turn is a constant
-`eta`. `lfm3-cos2e5-r05-s1`'s burst (window 550-575, `projected_grad_norm` 21x
-its neighbours) still read: `tangent_live_fraction` 0.821 against ~0.846 around
-it, `grad_capture` 0.703 against 0.708, back the next window; then
-`grad_moment_cosine` rose from 0.002 to 0.062 and decayed over ~150 steps.
-What a burst can do is steer by its direction -- one step's turn and one
-`1 - beta` share of the moment, as any step -- and through the fallback AdamW,
-which does see magnitude. Which of those made the cosine rise is unmeasured.
-The burst is not in the data: the same-seed redo (`lfm3-cos2e5-r05-s1-redo`)
-matches the first run to 4-5 digits through step 550 and reads 0.0897 in the
-burst's window, with no cosine rise after. Something nondeterministic produced
-a 21x gradient once. Open: whether a token-count weight is worth an arm
-(prediction: below the noise floor).
-
----
-
 ## Group T. Side
 
 ### T1. Anima under `auto`, with a few exceptions
