@@ -964,6 +964,37 @@ for one window, then raised the plateau cosine (bins 500-750 / 750-1000:
 +0.0197 / +0.0118 against the redo's +0.0035 / +0.0060) for ~150 steps. Final
 losses 1.345078 / 2.683056, 1.9e-3 / 1.4e-3 from the redo: at the noise floor.
 
+### Input-side frames tracked from activations: 0.81 overlap, no eval cost
+
+2026-10-30, PLAN S3, `--activation-frames` (`experiments/activation_frames.py`)
+on the LFM3 cosine `2e-5` arm at rank 0.05, seed 1, against
+`lfm3-cos2e5-r05-s1-redo` (1.343179 / 2.681620). Input-side matrices only (105
+of 153); `X` masked past each sequence's last supervised label. Bin means over
+steps (0-100 ... 750-1000):
+
+| read | 0-100 | 100-250 | 250-500 | 500-750 | 750-1000 |
+|---|---|---|---|---|---|
+| `xframe_overlap` (shadow) | 0.639 | 0.750 | 0.797 | 0.810 | 0.814 |
+| `grad_capture_input`, G-frame (shadow) | 0.801 | 0.778 | 0.780 | 0.780 | 0.778 |
+| `grad_capture_xframe`, X-frame (shadow) | 0.799 | 0.769 | 0.767 | 0.766 | 0.764 |
+| `act_capture_input`, G-frame (shadow) | 0.694 | 0.726 | 0.732 | 0.733 | 0.734 |
+| `act_capture_xframe`, X-frame (shadow) | 0.729 | 0.744 | 0.745 | 0.745 | 0.746 |
+| `grad_capture_input`, aimed from X (aim) | 0.800 | 0.770 | 0.767 | 0.766 | 0.764 |
+
+The two frames share 81% of their span and still converge slowly; the
+activation frame holds 1.4 points less of the input-side gradient than the
+gradient's own frame, and the gradient frame 1.2 points less of the
+activations than theirs. Aiming the optimizer's input-side frames from `X`
+(`lfm3-s3aim-cos2e5-r05-s1`) lands exactly on the shadow's prediction (0.764),
+moves overall `grad_capture` 0.709 -> 0.699, leaves `grad_moment_cosine`'s bins
+unchanged, and reads 1.344375 / 2.681983: +1.2e-3 target, +3.6e-4 source, inside
+the noise floor. `tangent_live_fraction` rises 0.852 -> 0.869 (the input-side
+tangent spectrum is now X's). The shadow arm leaves training alone end to end:
+1.343303 / 2.681469 against the redo, 1.2e-4 / 1.5e-4. Cost in the harness
+(a graph break per hooked Linear): shadow 4.44 s/step against 3.87, aim 4.16;
+at 350M shadow 1.13 against 0.89. A 300-step 350M shadow smoke read overlap
+0.81, G-frame 0.854 against X-frame 0.825 of input-side `G`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

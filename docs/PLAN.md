@@ -120,6 +120,15 @@ since `delta` concentrates on a few tokens while `X^T X` weighs every token,
 and the activation spectrum carries outlier channels the loss may not care
 about.
 
+Evidence (FACTS, 2026-10-30, LFM3). The guess half held: overlap 0.81, not 1,
+but the activation frame gives up only 1.4 points of input-side gradient
+capture, and an arm aimed from `X` reads the same eval as the standard arm
+(+1.2e-3 target, inside the noise floor). Tracking from `X` is admissible on
+the input side, which makes S2's prerequisite read positive. Open: whether the
+1.4 points cost anything over a longer run or at another lr; one frame per
+norm site (q/k/v and gate/up share `X`) in place of one per matrix, which is
+what S2 would need.
+
 ---
 
 ## Group M. Moment
