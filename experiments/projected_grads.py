@@ -10,8 +10,9 @@ optimizer consumes:
 - the frame's action, from the streams (ARCHIVE, "frames track from the
   streams"): `X^T (w^2 * X Q)` with `w_t = ||delta_t||` on the input side,
   `delta^T (delta Q)` on the output side;
-- `||G P||^2` for 16 Gaussian probes `P`, whose mean over probes is an unbiased
-  estimate of `||G||^2`, for the reads that divide by it.
+- `G P` for 16 Gaussian probes `P`: the mean over probes of `||G p||^2` is an
+  unbiased estimate of `||G||^2`, for the reads that divide by it. Squared in
+  `prepare`, not in the backward, so the leaf stays a sum over tokens.
 
 Autograd accumulates the leaves like any gradient: no hooks and no graph
 breaks, and accumulation over micro-batches is exact, since all three are sums
@@ -56,7 +57,7 @@ class _Projected(torch.autograd.Function):
             projected_delta = delta @ basis
             z = stream.mT @ projected_delta
             action = delta.mT @ projected_delta
-        probed = (delta.mT @ (stream @ probes)).float().square().sum(dim=0)
+        probed = (delta.mT @ (stream @ probes)).float()
         return grad_x, None, None, None, None, z, action.float(), probed
 
 
@@ -124,7 +125,7 @@ class ProjectedGrads:
             z, action, probed = module.z.grad, module.action.grad, module.probed.grad
             module.z.grad = module.action.grad = module.probed.grad = None
             z_norm = torch.linalg.vector_norm(z, dtype=torch.float32)
-            estimate = probed.mean().sqrt()
+            estimate = probed.square().sum(dim=0).mean().sqrt()
             raw_norm = torch.where(torch.isfinite(z_norm) & torch.isfinite(estimate), estimate, torch.nan)
             z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
             action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
@@ -149,7 +150,7 @@ class ProjectedGrads:
             module.probes = self._probe(weight.shape[1], weight.device, weight.dtype)
             module.z = _anchor((other, basis.shape[-1]), weight.dtype, weight.device)
             module.action = _anchor(basis.shape, torch.float32, weight.device)
-            module.probed = _anchor((PROBES,), torch.float32, weight.device)
+            module.probed = _anchor((weight.shape[0], PROBES), torch.float32, weight.device)
             weight.requires_grad_(False)
             self._projected.append(module)
         self._waiting = still

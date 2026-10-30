@@ -100,6 +100,7 @@ def test_micro_batches_accumulate_to_the_whole_batch():
         other = joined._pending[next(p for p in joined._pending if p.shape == param.shape)]
         torch.testing.assert_close(prepared.projected, other.projected)
         torch.testing.assert_close(prepared.tangent, other.tangent)
+        torch.testing.assert_close(prepared.raw_norm, other.raw_norm)
 
 
 def test_training_runs_with_projected_grads():
