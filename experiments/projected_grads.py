@@ -46,19 +46,22 @@ class _Projected(torch.autograd.Function):
         if ctx.fit:
             gradient = delta.mT @ stream if ctx.right else stream.mT @ delta
             basis = fitted = frame.fit(gradient, basis.shape[-1])
+        rank = basis.shape[-1]
+        # The probes ride with the frame in one GEMM over each stream: [Q | P].
         if ctx.right:
-            projected_x = stream @ basis
-            z = delta.mT @ projected_x
+            projected_x = stream @ torch.cat([basis, probes], dim=1)
+            z_probed = delta.mT @ projected_x
+            z, probed = z_probed[:, :rank], z_probed[:, rank:]
             # ||delta_t||^2 without an fp32 copy of delta; zero past the last
             # supervised token, so it also masks the rows G never sees.
             weights = torch.linalg.vector_norm(delta, dim=-1, keepdim=True, dtype=torch.float32).square()
-            action = stream.mT @ (projected_x * weights).to(stream.dtype)
+            action = stream.mT @ (projected_x[:, :rank] * weights).to(stream.dtype)
         else:
             projected_delta = delta @ basis
             z = stream.mT @ projected_delta
-            action = delta.mT @ projected_delta
-        probed = (delta.mT @ (stream @ probes)).float()
-        return grad_x, None, fitted, None, None, None, z, action.float(), probed
+            action_probed = delta.mT @ torch.cat([projected_delta, stream @ probes], dim=1)
+            action, probed = action_probed[:, :rank], action_probed[:, rank:]
+        return grad_x, None, fitted, None, None, None, z, action.float(), probed.float()
 
 
 def _anchor(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> Tensor:
