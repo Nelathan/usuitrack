@@ -156,8 +156,8 @@ in the background, never in the foreground.**
 ### LFM3-1.7B — the lab harness
 
 From the repo root on `lab`. `uv sync` installs the `lab` dependency group by
-default; torch is pinned to the build `causal-conv1d`'s CUDA extension loads
-against (`pyproject.toml`). The harness defaults are the standard arm, on
+default, on torch 2.14, the minor astral's `causal-conv1d` wheel is built for
+(`pyproject.toml`); LFM3 does not need that wheel. The harness defaults are the standard arm, on
 `LiquidAI/LFM3-1.7B-Base` pinned to revision `545fc8f`, with
 `expandable_segments` set; spelled out:
 
@@ -185,7 +185,8 @@ telemetry block.
 tables are all at 1k steps, as are the LFM3 tables before 2026-10-30; LFM3
 arms before 2026-10-30 afternoon decayed by cosine to 0.2.
 
-**LFM2.5-350M**, the lane before 2026-10-30, needs more lr than LFM3: pass
+**LFM2.5-350M**, the lane before 2026-10-30, needs its conv kernels (`uv sync
+--group lfm25`) and more lr than LFM3: pass
 `--model LiquidAI/LFM2.5-350M-Base --model-revision main --rank-fraction 0.1
 --usuitrack-lr 1e-4 --lr-decay linear --max-steps 1000`, its standard arm
 (7.5e-5 is a candidate, unmeasured). About 0.89 s/step at bs16 (2.7 GB
