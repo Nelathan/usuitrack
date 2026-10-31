@@ -1195,6 +1195,26 @@ frame's GEMM over each stream, against an 80 ms floor for reading `X` and
 1.431749, capture 0.710; steps 75-100 at 3.290 s/step, where three runs of
 the code before the join spread over 3.294-3.324.
 
+### S2 ties `G` through 1k steps, 12% faster
+
+2026-10-31, the standard arm at 1k steps, seed 1, with the compiled write and
+the `[Q | P]` join: `lfm3-g-1k-s1` (`G`) against `lfm3-s2-1k-s1`
+(`--projected-grads`). `G` reproduces the pre-compile reference
+`lfm3-const4e5-s1` to 1.9e-4 target and 8.5e-4 source.
+
+| arm | target @1k | source @1k | capture | s/step | peak |
+|---|---|---|---|---|---|
+| `G` | 1.322141 | 2.699005 | 0.704 | 3.71 | 7.47 GB |
+| S2 | 1.322050 | 2.698746 | 0.703 | 3.25 | 7.46 GB |
+
+S2 is within 1.4e-3 of `G` at step 100 and within 4e-4 at every eval from 200
+to 1000, below the run-to-run floor throughout: the late plateau does not
+separate the aims.
+
+The global norm of all trainable parameters rises linearly and identically in
+both arms, 906.629 at step 25 to 906.717 at 1k (+0.01%). It is the whole
+model's norm, so it does not read whether a tracked role rises.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

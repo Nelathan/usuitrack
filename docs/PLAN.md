@@ -27,7 +27,9 @@ scratch, where the init is a free variable.
 
 ### N2. Rising weight norms, and weight decay
 
-Weight norms rise over runs (observed, unmeasured as a table). A step at a fixed
+Weight norms rise over runs; the whole model's norm rises linearly and only
++0.01% over 1k LFM3 steps (FACTS, "S2 ties `G` through 1k steps"), which says
+nothing per role. A step at a fixed
 fraction of `||W||` compounds when it correlates with `W`, so the rise may be
 N1's issue seen from the other end. Weight decay is not the remedy for a
 Muon-type step (user, 2026-10-30), though `weight_decay` is in the release. How
@@ -57,7 +59,8 @@ The input-side frame tracks from `X` weighted by `delta`'s token norms
 (ARCHIVE, "frames track from the streams"): its action `X^T (w^2 * X Q)` reuses
 the `X Q` that `Z` needs, one GEMM where the exact action takes two. Built as
 `--projected-grads` (FACTS, "Training without `dW`"): compiled, it collects
-the whole `dW` cost and ties `G`'s aim on loss. Open:
+the whole `dW` cost and ties `G`'s aim on loss through 1k steps (FACTS, "S2
+ties `G` through 1k steps"). Open:
 
 - The next saving (FACTS, "Where the S2 step's time goes"). The weight write
   is compiled on `lab` (R1 asks about the release). Past it the step is
