@@ -58,12 +58,14 @@ path (user, 2026-10-31): `Z` exact and the diagonal aim from `X` and `delta`,
 `docs/PROJECTED_ACTIVATION_2.md`. On LFM3 it ties `G` through 1k steps at 3.25
 against 3.71 s/step (FACTS, "S2 ties `G` through 1k steps"). Open:
 
-- Anima's batch under molegrad: whether accumulation without offloading beats
-  offloading at bs16 (bs8 x 2, and bs4 x 4, the batch Anima's buckets were
-  sized for), and whether the nesting goes from `anima.py` for the `G` path
-  too (it fits unnested at rank 0.05). Batch is the noise lever: `beta` only
-  buys staleness, lower `lr` is the other lever (user, 2026-10-31); for scale,
-  lodestone trains Chroma at bs64.
+- Anima's batch under molegrad. Accumulation without offloading beats
+  offloading: bs8 x 2 is 8% faster, bs4 x 4 3.5% faster at 2.1 GiB less peak
+  (FACTS, "Accumulation beats offloading on Anima"). Open: which split the
+  next run takes, whether bs4 x 4's headroom buys a larger batch, and whether
+  the nesting goes from `anima.py` for the `G` path too (it fits unnested at
+  rank 0.05). Batch is the noise lever: `beta` only buys staleness, lower `lr`
+  is the other lever (user, 2026-10-31); for scale, lodestone trains Chroma at
+  bs64.
 - The early lead: target under `G` at all ten evals, 1.4e-3 at step 100, above
   the LFM3 null pair (FACTS, "Run-to-run noise"). A second seed of both arms
   says whether the diagonal aim buys it.
