@@ -58,16 +58,13 @@ release files onto it, prepared locally after your review; you push.
 
 ## Next
 
-Proposed for the next session, 2026-10-30 late, in order; not yet confirmed:
-1. The `[Q | P]` join in `_Projected.backward`: one `stream @ [Q | P]` on the
-   input side, one `delta^T @ [delta Q | X P]` on the output side. Bench
-   `outputs/tools/s2_bwd_bench.py` (`s2_joint`) reads 247 -> 207 ms/step of
-   backward work against an 80 ms one-read floor. Tests unchanged in
-   behaviour; a 100-step run to check telemetry.
-2. S2 against `G` at 1k steps on the standard arm with today's code (two
-   runs, ~2 h each): does the tie hold on the late plateau?
-3. PLAN N2: `||W||` per role over those two runs. Not a decay arm: decay is
-   not the tool for a Muon-type step (user).
+Done overnight 2026-10-30/31: the `[Q | P]` join (40 ms in the microbench,
+inside a 100-step run's spread); S2 against `G` at 1k steps, tied within 4e-4
+at every eval from 200, 3.25 against 3.71 s/step (FACTS).
+
+Next: PLAN N2 needs `||W||` per role; the harness logs only the whole model's
+norm, flat at +0.01% over 1k. Not a decay arm: decay is not the tool for a
+Muon-type step (user).
 
 Still open:
 - S2 onto `lab`: `ProjectedLinear` is a lab feature, not the optimizer (it
