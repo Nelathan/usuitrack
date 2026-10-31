@@ -1,12 +1,12 @@
-"""PLAN S2 in `experiments/projected_grads.py`: weight gradients without `G`."""
+"""Weight gradients without `G` (SPEC, "Projected gradients")."""
 
 import math
 
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from experiments.projected_grads import ProjectedGrads, ProjectedLinear
-from usuitrack import UsuiTrack, frame
+from usuitrack import ProjectedGrads, UsuiTrack, frame
+from usuitrack.projected import ProjectedLinear
 
 IN, HIDDEN, BATCH, TOKENS = 64, 128, 4, 32
 

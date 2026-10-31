@@ -1,4 +1,4 @@
-"""Weight gradients without `G` (PLAN S2, `docs/PROJECTED_ACTIVATION_2.md`).
+"""Weight gradients without `G` (SPEC, "Projected gradients").
 
 Each tracked Linear's weight is frozen for autograd, so no `dW = delta^T X` is
 ever formed. Its backward has `X` (recomputed under checkpointing) and `delta`
@@ -22,8 +22,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from usuitrack import frame
-from usuitrack import optimizer as usuitrack_optimizer
+from . import frame
+from .optimizer import Prepared, UsuiTrack
 
 PROBES = 16
 
@@ -88,7 +88,7 @@ class ProjectedLinear(torch.nn.Linear):
 
 
 class ProjectedGrads:
-    def __init__(self, model: torch.nn.Module, optimizer: usuitrack_optimizer.UsuiTrack) -> None:
+    def __init__(self, model: torch.nn.Module, optimizer: UsuiTrack) -> None:
         self.optimizer = optimizer
         groups = {param: group for group in optimizer.param_groups for param in group["params"]}
         self._projected: list[ProjectedLinear] = []
@@ -102,8 +102,6 @@ class ProjectedGrads:
                 self._project(module, groups.pop(module.weight))
         if groups:
             raise ValueError(f"ProjectedGrads: {len(groups)} tracked matrices are not Linears and would still form G")
-        # Fit, tracked and eval variants per compiled layer type exceed dynamo's default 8.
-        torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 32)
 
     @torch.no_grad()
     def prepare(self) -> None:
@@ -124,7 +122,7 @@ class ProjectedGrads:
             z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
             action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
             tangent = None if param in self._fitted else frame.aim(action, module.basis)
-            self.optimizer._pending[param] = usuitrack_optimizer.Prepared(z, tangent, raw_norm)
+            self.optimizer._pending[param] = Prepared(z, tangent, raw_norm)
         self._fitted.clear()
         self._draw()
 

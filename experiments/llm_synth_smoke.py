@@ -21,7 +21,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from usuitrack import StochasticAdamW, UsuiTrack
+from usuitrack import ProjectedGrads, StochasticAdamW, UsuiTrack
 from usuitrack import frame as usuitrack_frame
 import usuitrack.optimizer as usuitrack_optimizer
 
@@ -29,7 +29,6 @@ if not __package__:
     # Run by path, which puts experiments/ on sys.path rather than the repo root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from experiments.activation_frames import MODES as ACTIVATION_FRAME_MODES, ActivationFrames
-from experiments.projected_grads import ProjectedGrads
 from experiments.stream_frames import StreamFrames, lfm_sites
 from experiments.lab_diagnostics import LabDiagnostics
 
@@ -1014,6 +1013,8 @@ def run_optimizer(
             activation_frames = StreamFrames(model, optimizer, lfm_sites(model))
         if args.projected_grads:
             projected_grads = ProjectedGrads(model, optimizer)
+            # Fit, tracked and eval variants per compiled layer type exceed dynamo's default 8.
+            torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 32)
         if fallback_params:
             fallback_optimizer = StochasticAdamW(
                 fallback_params,
@@ -1358,7 +1359,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--projected-grads",
         action="store_true",
-        help="PLAN S2: tracked matrices never form G; each backward returns Z and the frame's action from X and delta instead. See experiments/projected_grads.py",
+        help="PLAN S2: tracked matrices never form G; each backward returns Z and the frame's action from X and delta instead. See usuitrack/projected.py",
     )
     parser.add_argument(
         "--trace-backward-memory",
