@@ -58,11 +58,7 @@ path (user, 2026-10-31): `Z` exact and the diagonal aim from `X` and `delta`,
 `docs/PROJECTED_ACTIVATION_2.md`. On LFM3 it ties `G` through 1k steps at 3.25
 against 3.71 s/step (FACTS, "S2 ties `G` through 1k steps"). Open:
 
-- Anima under molegrad, through ai-toolkit: the user's model, the release's
-  deciding check. It trains, 9% faster than the release path at its memory
-  without the nested attention checkpoint (FACTS, "Molegrad on Anima"), and
-  run 29's samples at step 192 are good, some better than run 28's (user,
-  2026-10-31). Open beside it: whether accumulation without offloading beats
+- Anima's batch under molegrad: whether accumulation without offloading beats
   offloading at bs16 (bs8 x 2, and bs4 x 4, the batch Anima's buckets were
   sized for), and whether the nesting goes from `anima.py` for the `G` path
   too (it fits unnested at rank 0.05). Batch is the noise lever: `beta` only

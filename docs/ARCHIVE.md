@@ -1103,6 +1103,17 @@ ignored (user): every `Z` that matters is healthy. The only remedy would be to
 freeze AdaLN or give it to the fallback, a trainer config, not the optimizer.
 SPEC steps 7-8 and the `relative_step` read now say when the step is a unit.
 
+## CLOSED -- Anima trains under molegrad, a clear win
+
+PLAN S2, 2026-10-31 (FACTS, "Molegrad on Anima"; ledger row 29). The
+release's deciding check on the user's model: run 29, molegrad at rank 0.05,
+no nested attention checkpoint, `2e-5` decaying linearly to `1e-5` over 960
+steps, trained at 10.0 s/step against the release path's 11.0 at the same
+9.3 GiB, and its samples evolve more stably and look better than run 28's
+(user). Capture and live fraction rose through the run, so more of the frame
+turned as it went. Rank, lr and aim all changed from run 28, so the win is the
+arm's, not the aim's alone.
+
 ## CLOSED -- the release's weight write is eager
 
 PLAN R1, 2026-10-31 (FACTS, "The compiled weight write saves 0.22 s/step").
