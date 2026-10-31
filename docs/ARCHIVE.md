@@ -1103,6 +1103,14 @@ ignored (user): every `Z` that matters is healthy. The only remedy would be to
 freeze AdaLN or give it to the fallback, a trainer config, not the optimizer.
 SPEC steps 7-8 and the `relative_step` read now say when the step is a unit.
 
+## CLOSED -- the release's weight write is eager
+
+PLAN R1, 2026-10-31 (FACTS, "The compiled weight write saves 0.22 s/step").
+The user's call: the release stays pure PyTorch. Compiling asked every user for
+inductor and a toolchain, a first-step compile, and an 8-graph budget past
+which it ran eager silently; the eager write is the only implementation, on
+`lab` too, and a runner can compile it when lab wants the 0.22 s/step back.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

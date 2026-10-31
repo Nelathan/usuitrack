@@ -97,12 +97,17 @@ ai-toolkit lane gets `LabDiagnostics`, which lives in this repo's `experiments/`
 
 ## Group R. Release
 
-### R1. Does the compiled weight write enter the release?
+### R2. Does today's optimizer beat a memory-matched LoRA?
 
-Compiled on `lab` only (FACTS, "The compiled weight write saves 0.22
-s/step"). Its cost to a user: inductor (Triton, or a C++ toolchain on CPU), a
-first-step compile, and a budget of 8 graphs that a mixed bf16/fp32 model
-fills, past which it runs eager silently.
+README's headline (LoRA rank 44 against UsuiTrack rank 128 on LFM2.5, 1k
+steps) is the prerelease optimizer's (`docs/prerelease/PLAN.md`), so it cannot
+ship. How to settle: LFM3, 1k steps (the old crossing came at 900), seed 1,
+constant lr after warmup, release code: `G`, molegrad, and LoRA at rank 56,
+alpha 56 -- adapters plus both Adam moments hold the frame-plus-moment bytes of
+rank 0.05 -- at `1e-4` and `2e-4`, the harness's sensor-chosen LoRA lr from
+LFM2.5 and half of it. Prediction (2026-10-31, before the runs): `G` and
+molegrad tie inside the noise floor; LoRA leads target early and loses its lead
+by 1k; UsuiTrack keeps more source by more than 3e-3; LoRA peaks higher.
 
 ---
 
