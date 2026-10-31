@@ -182,7 +182,7 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.eval_every, 100)
         self.assertEqual(args.activation_frames, "off")
         self.assertFalse(args.stream_frames)
-        self.assertFalse(args.projected_grads)
+        self.assertFalse(args.molegrad)
         self.assertEqual(args.attn_implementation, "sdpa")
         self.assertTrue(args.activation_checkpointing)
         self.assertTrue(args.torch_compile)
@@ -214,7 +214,7 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
     def test_gradient_release_rejects_incompatible_harness_contracts(self):
         validate_gradient_release_contract(build_parser().parse_args([]))
         validate_gradient_release_contract(build_parser().parse_args(["--no-release-matrix-grads", "--grad-accum-steps", "2"]))
-        validate_gradient_release_contract(build_parser().parse_args(["--projected-grads", "--grad-accum-steps", "2"]))
+        validate_gradient_release_contract(build_parser().parse_args(["--molegrad", "--grad-accum-steps", "2"]))
         with self.assertRaises(ValueError):
             validate_gradient_release_contract(build_parser().parse_args(["--grad-accum-steps", "2"]))
 

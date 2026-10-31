@@ -21,7 +21,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from usuitrack import ProjectedGrads, StochasticAdamW, UsuiTrack
+from usuitrack import Molegrad, StochasticAdamW, UsuiTrack
 from usuitrack import frame as usuitrack_frame
 import usuitrack.optimizer as usuitrack_optimizer
 
@@ -815,7 +815,7 @@ def train_step(
     global_clip_params: Sequence[torch.nn.Parameter] = (),
     global_clip_norm: float | None = None,
     activation_frames: ActivationFrames | StreamFrames | None = None,
-    projected_grads: ProjectedGrads | None = None,
+    molegrad: Molegrad | None = None,
 ) -> dict[str, float | torch.Tensor | None]:
     optimizer.zero_grad(set_to_none=True)
     if fallback_optimizer is not None:
@@ -842,9 +842,9 @@ def train_step(
         if sensors is not None and offset == grad_accum_steps - 1:
             sensors.mark("backward")
         losses.append(loss.detach().float())
-    if projected_grads is not None:
+    if molegrad is not None:
         # Early, so the gradient-norm read below sees the pending raw norms.
-        projected_grads.prepare()
+        molegrad.prepare()
     if collect_norms:
         # Under release_matrix_grads the matrix gradients are already freed; their
         # raw norms wait in the optimizer's pending work until step().
@@ -917,8 +917,8 @@ def apply_lr_schedule(
 
 
 def validate_gradient_release_contract(args) -> None:
-    # Under --projected-grads no tracked matrix forms G, so release has nothing to free.
-    if not args.release_matrix_grads or args.projected_grads:
+    # Under --molegrad no tracked matrix forms G, so release has nothing to free.
+    if not args.release_matrix_grads or args.molegrad:
         return
     if args.grad_accum_steps != 1:
         raise ValueError("--release-matrix-grads requires --grad-accum-steps 1")
@@ -993,7 +993,7 @@ def run_optimizer(
 
     fallback_optimizer = None
     activation_frames = None
-    projected_grads = None
+    molegrad = None
     if optimizer_name == "usuitrack":
         optimizer = UsuiTrack(
             usuitrack_param_groups,
@@ -1012,8 +1012,8 @@ def run_optimizer(
             activation_frames = ActivationFrames(model, optimizer, args.activation_frames)
         if args.stream_frames:
             activation_frames = StreamFrames(model, optimizer, lfm_sites(model))
-        if args.projected_grads:
-            projected_grads = ProjectedGrads(model, optimizer)
+        if args.molegrad:
+            molegrad = Molegrad(model, optimizer)
             # Fit, tracked and eval variants per compiled layer type exceed dynamo's default 8.
             torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 32)
         if fallback_params:
@@ -1091,7 +1091,7 @@ def run_optimizer(
             global_clip_params=[param for _name, param in adapter_named],
             global_clip_norm=args.lora_grad_clip_norm if optimizer_name == "lora" else None,
             activation_frames=activation_frames,
-            projected_grads=projected_grads,
+            molegrad=molegrad,
         )
     if optimizer_name == "lora":
         validate_lora_optimizer_state_dtype(optimizer, adapter_named[0][1].dtype)
@@ -1125,7 +1125,7 @@ def run_optimizer(
             [param for _name, param in adapter_named],
             args.lora_grad_clip_norm if optimizer_name == "lora" else None,
             activation_frames,
-            projected_grads,
+            molegrad,
         )
         measured_steps.append(step_result)
         loss_window.append(step_result["loss"])
@@ -1358,9 +1358,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="prepare each full matrix gradient in a post-accumulate backward hook and release it immediately while retaining batched Oja/Aurora application in optimizer.step() (default on; requires no accumulation)",
     )
     parser.add_argument(
-        "--projected-grads",
+        "--molegrad",
         action="store_true",
-        help="PLAN S2: tracked matrices never form G; each backward returns Z and the frame's action from X and delta instead. See usuitrack/projected.py",
+        help="tracked matrices never form G; each backward returns Z and the diagonal aim from X and delta instead. See usuitrack/molegrad.py",
     )
     parser.add_argument(
         "--trace-backward-memory",
@@ -1402,8 +1402,8 @@ def main() -> None:
             raise ValueError("--stream-frames pairs one batch's streams with its G and requires --grad-accum-steps 1")
         if not args.activation_checkpointing:
             raise ValueError("--stream-frames takes X on the checkpoint recompute and requires --activation-checkpointing")
-    if args.projected_grads and (args.activation_frames != "off" or args.stream_frames):
-        raise ValueError("--projected-grads leaves no G for the S3/S4 instruments to read")
+    if args.molegrad and (args.activation_frames != "off" or args.stream_frames):
+        raise ValueError("--molegrad leaves no G for the S3/S4 instruments to read")
     if args.warmup_steps < 0:
         raise ValueError("warmup_steps must be non-negative")
     if args.max_steps <= 0:
@@ -1508,7 +1508,7 @@ def main() -> None:
     print(
         f"seq_len={args.seq_len} batch_size={args.batch_size} grad_accum_steps={args.grad_accum_steps} "
         f"warmup_steps={args.warmup_steps} max_steps={args.max_steps} param_scope={args.param_scope} "
-        f"rank_fraction={args.rank_fraction} activation_frames={args.activation_frames} stream_frames={args.stream_frames} projected_grads={args.projected_grads} "
+        f"rank_fraction={args.rank_fraction} activation_frames={args.activation_frames} stream_frames={args.stream_frames} molegrad={args.molegrad} "
         f"lora_rank={args.lora_rank} lora_alpha={args.lora_alpha} lora_lr={args.lora_lr} lora_grad_clip_norm={args.lora_grad_clip_norm} "
         f"lr_warmup_steps={args.lr_warmup_steps} lr_final_ratio={args.lr_final_ratio} lr_decay={args.lr_decay} "
         f"orthogonalization=aurora "

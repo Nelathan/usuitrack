@@ -58,7 +58,7 @@ wiring candidates and the order of work: `docs/PROJECTED_ACTIVATION_2.md`.
 The input-side frame tracks from `X` weighted by `delta`'s token norms
 (ARCHIVE, "frames track from the streams"): its action `X^T (w^2 * X Q)` reuses
 the `X Q` that `Z` needs, one GEMM where the exact action takes two. Built as
-`--projected-grads` (FACTS, "Training without `dW`"): compiled, it collects
+`--molegrad` (FACTS, "Training without `dW`"): compiled, it collects
 the whole `dW` cost and ties `G`'s aim on loss through 1k steps (FACTS, "S2
 ties `G` through 1k steps"). Open:
 

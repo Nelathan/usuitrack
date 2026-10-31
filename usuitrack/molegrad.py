@@ -1,6 +1,6 @@
 """Weight gradients without `G`: each tracked Linear's backward returns `Z`,
-the frame's action from its input and output gradient, and a probe sketch of
-`G` (`docs/SPEC.md`, "Projected gradients").
+the diagonal aim from its input and output gradient, and a probe sketch of
+`G` (`docs/SPEC.md`, "Molegrad").
 """
 
 from __future__ import annotations
@@ -61,8 +61,8 @@ def _anchor(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) ->
     return torch.zeros((), dtype=dtype, device=device).expand(shape).requires_grad_()
 
 
-class ProjectedLinear(torch.nn.Linear):
-    """A Linear whose weight gradient arrives projected; `ProjectedGrads` swaps
+class MoleLinear(torch.nn.Linear):
+    """A Linear whose weight gradient arrives projected; `Molegrad` swaps
     every tracked Linear's class to this."""
 
     basis: Tensor
@@ -79,19 +79,19 @@ class ProjectedLinear(torch.nn.Linear):
         return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.right, self.basis.requires_grad, self.z, self.action, self.probed)
 
 
-class ProjectedGrads:
+class Molegrad:
     """Trains `optimizer`'s matrices from projections, never forming `G`; build
     it after the optimizer, before the first backward."""
 
     def __init__(self, model: torch.nn.Module, optimizer: UsuiTrack) -> None:
         self.optimizer = optimizer
         groups = {param: group for group in optimizer.param_groups for param in group["params"]}
-        self._projected: list[ProjectedLinear] = []
+        self._projected: list[MoleLinear] = []
         self._fitted: set[Tensor] = set()
         self._probes: dict[tuple[int, torch.device], Tensor] = {}
         self._generators: dict[torch.device, torch.Generator] = {}
         if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-            raise ValueError("ProjectedGrads: the projected gradients are not all-reduced across processes")
+            raise ValueError("Molegrad: the projected gradients are not all-reduced across processes")
         owners: dict[Tensor, list[tuple[str, torch.nn.Module]]] = collections.defaultdict(list)
         for name, module in model.named_modules():
             for param in module.parameters(recurse=False):
@@ -107,7 +107,7 @@ class ProjectedGrads:
                         raise ValueError(f"{name}: {type(module).__name__} has its own forward, which projecting would replace")
                     self._project(module, groups.pop(param))
         if groups:
-            raise ValueError(f"ProjectedGrads: {len(groups)} tracked matrices are not Linears and would still form G")
+            raise ValueError(f"Molegrad: {len(groups)} tracked matrices are not Linears and would still form G")
         optimizer.register_load_state_dict_post_hook(self._after_load)
         optimizer.register_step_pre_hook(self._before_step)
         # torch has no zero_grad hook, so the optimizer's own is wrapped.
@@ -118,7 +118,7 @@ class ProjectedGrads:
         # `args` starts with the optimizer itself.
         closure = args[1] if len(args) > 1 else kwargs.get("closure")
         if closure is not None:
-            raise ValueError("ProjectedGrads: a closure's backward would run after step() collected the gradients; call backward() before step()")
+            raise ValueError("Molegrad: a closure's backward would run after step() collected the gradients; call backward() before step()")
         self.prepare()
 
     def _after_load(self, optimizer: UsuiTrack) -> None:
@@ -128,7 +128,7 @@ class ProjectedGrads:
     def _discard_then_zero_grad(self, set_to_none: bool = True) -> None:
         dropped = self._discard()
         if dropped:
-            warnings.warn(f"ProjectedGrads: zero_grad() dropped the projected gradients of {dropped} matrices before step() applied them.", stacklevel=2)
+            warnings.warn(f"Molegrad: zero_grad() dropped the projected gradients of {dropped} matrices before step() applied them.", stacklevel=2)
         self._zero_grad(set_to_none)
 
     def _discard(self) -> int:
@@ -153,7 +153,7 @@ class ProjectedGrads:
                 continue
             param = module.weight
             if param in self.optimizer._pending:
-                raise RuntimeError("ProjectedGrads: a matrix was prepared twice before step()")
+                raise RuntimeError("Molegrad: a matrix was prepared twice before step()")
             z, action, probed = module.z.grad, module.action.grad, module.probed.grad
             module.z.grad = module.action.grad = module.probed.grad = None
             z_norm = torch.linalg.vector_norm(z, dtype=torch.float32)
@@ -173,7 +173,7 @@ class ProjectedGrads:
         right = frame.resolve_side(weight.shape, group["side"]) == "right"
         rank = frame.rank(weight.shape, group["rank_fraction"])
         length, other = (weight.shape[1], weight.shape[0]) if right else (weight.shape[0], weight.shape[1])
-        module.__class__ = ProjectedLinear
+        module.__class__ = MoleLinear
         module.right = right
         module.basis = torch.zeros(length, rank, dtype=weight.dtype, device=weight.device)
         module.probes = self._probe(weight.shape[1], weight.device, weight.dtype)
@@ -188,7 +188,7 @@ class ProjectedGrads:
         for module in self._projected:
             self._bind_module(module)
 
-    def _bind_module(self, module: ProjectedLinear) -> None:
+    def _bind_module(self, module: MoleLinear) -> None:
         """The frame lives only in optimizer state, which a load replaces: the
         module reads it from there, or holds a leaf that waits for its fit."""
 
@@ -206,7 +206,7 @@ class ProjectedGrads:
         # Each call of the Linear fits its own frame, and autograd sums them.
         gram = basis.grad.float().mT @ basis.grad.float()
         if not torch.allclose(gram, torch.eye(gram.shape[0], device=gram.device), atol=0.1):
-            raise RuntimeError("ProjectedGrads: a Linear had more than one call in the backward that fits its frame; call it once until its first step")
+            raise RuntimeError("Molegrad: a Linear had more than one call in the backward that fits its frame; call it once until its first step")
         basis.copy_(basis.grad)
         basis.grad = None
         basis.requires_grad_(False)

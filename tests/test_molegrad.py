@@ -1,4 +1,4 @@
-"""Weight gradients without `G` (SPEC, "Projected gradients")."""
+"""Weight gradients without `G` (SPEC, "Molegrad")."""
 
 import copy
 import math
@@ -7,8 +7,8 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from usuitrack import ProjectedGrads, UsuiTrack, frame
-from usuitrack.projected import ProjectedLinear
+from usuitrack import Molegrad, UsuiTrack, frame
+from usuitrack.molegrad import MoleLinear
 
 IN, HIDDEN, BATCH, TOKENS = 64, 128, 4, 32
 
@@ -45,12 +45,12 @@ def _projected_step_two(batches):
     """Step one, which fits the frames; then the leaves of step two's backwards."""
 
     block, optimizer = _setup()
-    projected = ProjectedGrads(block, optimizer)
+    molegrad = Molegrad(block, optimizer)
     _loss(block, _batch(0)).backward()
     optimizer.step()
     for batch in batches:
         _loss(block, batch).backward()
-    projected.prepare()
+    molegrad.prepare()
     return block, optimizer
 
 
@@ -72,8 +72,8 @@ def test_step_one_is_the_optimizers_own_first_step():
     the weights after step one are the ordinary optimizer's."""
 
     block, optimizer = _setup()
-    projected = ProjectedGrads(block, optimizer)
-    assert isinstance(block.w1, ProjectedLinear) and isinstance(block.w2, ProjectedLinear)
+    molegrad = Molegrad(block, optimizer)
+    assert isinstance(block.w1, MoleLinear) and isinstance(block.w2, MoleLinear)
     assert not block.w1.weight.requires_grad
     twin, twin_optimizer = _setup()
     _loss(block, _batch(0)).backward()
@@ -88,12 +88,12 @@ def test_step_one_is_the_optimizers_own_first_step():
 def test_under_accumulation_the_first_micro_batch_fits_the_frame():
     first, second = _batch(1), _batch(2)
     block, optimizer = _setup()
-    projected = ProjectedGrads(block, optimizer)
+    molegrad = Molegrad(block, optimizer)
     from_first = _gradients(block, first)
     from_second = _gradients(block, second)
     for batch in (first, second):
         _loss(block, batch).backward()
-    projected.prepare()
+    molegrad.prepare()
     for module, grad_first, grad_second in zip((block.w1, block.w2), from_first, from_second, strict=True):
         basis = optimizer.state[module.weight]["frame"]
         torch.testing.assert_close(_span(basis), _span(frame.fit(grad_first, basis.shape[-1])))
@@ -143,7 +143,7 @@ def test_micro_batches_accumulate_to_the_whole_batch():
         torch.testing.assert_close(prepared.raw_norm, other.raw_norm)
 
 
-def _train(block, optimizer, projected, steps):
+def _train(block, optimizer, molegrad, steps):
     for step in steps:
         _loss(block, _batch(step)).backward()
         optimizer.step()
@@ -151,21 +151,21 @@ def _train(block, optimizer, projected, steps):
 
 def test_a_resumed_run_continues_the_run_it_was_saved_from():
     block, optimizer = _setup()
-    projected = ProjectedGrads(block, optimizer)
-    _train(block, optimizer, projected, range(3))
+    molegrad = Molegrad(block, optimizer)
+    _train(block, optimizer, molegrad, range(3))
     weights, state = copy.deepcopy(block.state_dict()), copy.deepcopy(optimizer.state_dict())
-    _train(block, optimizer, projected, range(3, 5))
+    _train(block, optimizer, molegrad, range(3, 5))
     # Wrapped before the load, as a trainer resumes, and after it.
     for wrap_first in (True, False):
         resumed, resumed_optimizer = _setup(seed=1)
         resumed.load_state_dict(weights)
         if wrap_first:
-            resumed_projected = ProjectedGrads(resumed, resumed_optimizer)
+            resumed_molegrad = Molegrad(resumed, resumed_optimizer)
         # A load shares tensors that already match, and steps turn frames in place.
         resumed_optimizer.load_state_dict(copy.deepcopy(state))
         if not wrap_first:
-            resumed_projected = ProjectedGrads(resumed, resumed_optimizer)
-        _train(resumed, resumed_optimizer, resumed_projected, range(3, 5))
+            resumed_molegrad = Molegrad(resumed, resumed_optimizer)
+        _train(resumed, resumed_optimizer, resumed_molegrad, range(3, 5))
         for module, resumed_module in ((block.w1, resumed.w1), (block.w2, resumed.w2)):
             torch.testing.assert_close(resumed_optimizer.state[resumed_module.weight]["frame"], optimizer.state[module.weight]["frame"])
             torch.testing.assert_close(resumed_module.weight, module.weight)
@@ -177,12 +177,12 @@ def test_a_bias_gets_its_ordinary_gradient():
     twin = torch.nn.Linear(IN, HIDDEN)
     twin.load_state_dict(layer.state_dict())
     optimizer = UsuiTrack([layer.weight], lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
-    projected = ProjectedGrads(layer, optimizer)
+    molegrad = Molegrad(layer, optimizer)
     inputs, _target = _batch(1)
     target = torch.randn(BATCH, TOKENS, HIDDEN)
     for module in (layer, twin):
         (module(inputs) * target).sum().backward()
-    projected.prepare()
+    molegrad.prepare()
     torch.testing.assert_close(layer.bias.grad, twin.bias.grad)
     basis = optimizer.state[layer.weight]["frame"]
     torch.testing.assert_close(optimizer._pending[layer.weight].projected, frame.orient(twin.weight.grad, "right") @ basis)
@@ -205,12 +205,12 @@ def test_what_it_cannot_project_is_refused():
     for match, model in cases.items():
         optimizer = UsuiTrack(model.parameters(), rank_fraction=0.1)
         with pytest.raises(ValueError, match=match.strip()):
-            ProjectedGrads(model, optimizer)
+            Molegrad(model, optimizer)
 
 
 def test_a_closure_is_refused_and_none_is_no_closure():
     block, optimizer = _setup()
-    ProjectedGrads(block, optimizer)
+    Molegrad(block, optimizer)
     with pytest.raises(ValueError, match="closure"):
         optimizer.step(lambda: _loss(block, _batch(0)).backward())
     for step in (lambda: optimizer.step(None), lambda: optimizer.step(closure=None)):
@@ -225,7 +225,7 @@ def test_zero_grad_discards_an_unconsumed_backward():
     runs = []
     for discard in (True, False):
         block, optimizer = _setup()
-        ProjectedGrads(block, optimizer)
+        Molegrad(block, optimizer)
         _loss(block, _batch(0)).backward()
         optimizer.step()
         if discard:
@@ -240,14 +240,14 @@ def test_zero_grad_discards_an_unconsumed_backward():
 
 def test_a_linear_called_twice_before_its_fit_is_refused():
     layer = torch.nn.Linear(IN, IN, bias=False)
-    ProjectedGrads(layer, UsuiTrack([layer.weight], rank_fraction=0.1))
+    Molegrad(layer, UsuiTrack([layer.weight], rank_fraction=0.1))
     with pytest.raises(RuntimeError, match="more than one call"):
         layer(layer(_batch(0)[0])).sum().backward()
 
 
 def test_a_non_finite_first_gradient_fits_a_finite_frame():
     block, optimizer = _setup()
-    ProjectedGrads(block, optimizer)
+    Molegrad(block, optimizer)
     inputs, target = _batch(0)
     target[0, 0, 0] = torch.nan
     (block(inputs) * target).sum().backward()
@@ -261,15 +261,15 @@ def test_matrices_of_two_dtypes_train_together():
     # fp32 first: the bf16 matrix must not inherit its probes.
     model = torch.nn.ModuleDict({"fp32": torch.nn.Linear(IN, HIDDEN, bias=False), "bf16": torch.nn.Linear(IN, HIDDEN, bias=False).bfloat16()})
     optimizer = UsuiTrack(model.parameters(), rank_fraction=0.1)
-    ProjectedGrads(model, optimizer)
+    Molegrad(model, optimizer)
     inputs = _batch(0)[0]
     (model["bf16"](inputs.bfloat16()).float().sum() + model["fp32"](inputs).sum()).backward()
     optimizer.step()
 
 
-def test_training_runs_with_projected_grads():
+def test_training_runs_with_molegrad():
     block, optimizer = _setup()
-    projected = ProjectedGrads(block, optimizer)
+    molegrad = Molegrad(block, optimizer)
     before = block.w1.weight.detach().clone()
     for step in range(5):
         for micro in range(2):

@@ -89,24 +89,24 @@ only the fallback parameters. `docs/SPEC.md`, "Two-phase execution", has the
 contract.
 
 With activation checkpointing, the weight-gradient GEMMs are a quarter of the
-linear layers' matmul FLOPs. `ProjectedGrads` skips them: each tracked `Linear`'s
+linear layers' matmul FLOPs. `Molegrad` skips them: each tracked `Linear`'s
 backward returns the rank-`r` projection the optimizer consumes, straight from
 the layer's input and output gradient, and the full gradient is never formed.
 On LFM3-1.7B it ties the ordinary path's loss through 1k steps at 12% less
 time per step, and gradient accumulation works without holding any gradient.
 
 ```python
-from usuitrack import ProjectedGrads, UsuiTrack
+from usuitrack import Molegrad, UsuiTrack
 
 matrix_opt = UsuiTrack(matrix_params, lr=1e-4)
-ProjectedGrads(model, matrix_opt)  # after the model's device and dtype and the optimizer
+Molegrad(model, matrix_opt)  # after the model's device and dtype and the optimizer
 ```
 
 The loop is unchanged; `step()` collects the projections. Every matrix must be
 a plain `nn.Linear`'s weight, and the tracked weights have no `.grad`, so
 clipping, `GradScaler` and gradient-norm logging see only the fallback
 parameters. A setup it cannot handle raises with the reason. `docs/SPEC.md`,
-"Projected gradients", has the contract.
+"Molegrad", has the contract.
 
 See [`examples/`](examples) for a plain-PyTorch loop, an HF `Trainer`
 integration, and a full-finetune run through Unsloth's `FastModel` loader
@@ -190,7 +190,7 @@ generic-PyTorch integration surface is not yet fully swept:
 
 - Tested on a single GPU. No DDP, FSDP, or other distributed testing.
 - Gradient accumulation works without `release_matrix_grads`, not with it;
-  under `ProjectedGrads` it works and holds no gradient.
+  under `Molegrad` it works and holds no gradient.
 - Not tested under `autocast`/`GradScaler`, `torch.compile` of the optimizer
   step, or exotic tensor subclasses.
 - Checkpoints from before this release's state layout (`frame`, `moment`) do not

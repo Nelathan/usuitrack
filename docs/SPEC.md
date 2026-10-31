@@ -436,9 +436,9 @@ call, with a warning naming how many. Nothing needs rolling back: neither the
 moment nor the frame moves before `step()`, so what is dropped is the gradients
 themselves, plus a frame fitted on a first step.
 
-## Projected gradients
+## Molegrad
 
-`ProjectedGrads(model, optimizer)` is an opt-in path that never forms `G`.
+`Molegrad(model, optimizer)` is an opt-in path that never forms `G`.
 Every tracked matrix must be the weight of a plain `nn.Linear`, bias allowed;
 the weight is frozen for autograd, so no `dW` GEMM runs. With `X:[T,n]` the
 Linear's input and `delta:[T,m]` the gradient at its output, `G = delta^T X`,
@@ -448,18 +448,18 @@ phase one would have read from `G`:
 | | right | left |
 |---|---|---|
 | `Z` (step 3), exact | `delta^T (X Q)` | `X^T (delta Q)` |
-| action, replacing step 4's `A` | `X^T (||delta_t||^2 * X Q)` | `delta^T (delta Q)` |
+| diagonal aim, replacing step 4's `A` | `X^T (||delta_t||^2 * X Q)` | `delta^T (delta Q)` |
 | `G P`, 16 Gaussian probes | `delta^T (X P)` | `delta^T (X P)` |
 
-**The action comes from the streams.** On the right `G^T G = X^T (delta
-delta^T) X`; its cross-token terms need `G`, and the diagonal does not. Each
-token's row of `X` weighted by `||delta_t||^2` keeps the diagonal, which is the
-selection the loss makes between tokens: rows past the last supervised token
-have `delta_t = 0`, so it is also the mask. On the left `delta^T delta Q`
-captures as much as `G`'s own action. On LFM3 both aims tie on loss through 1k
-steps (`FACTS.md` on `lab`, "S2 ties `G` through 1k steps"). Under it
-`tangent_live_fraction` reads near 1: the stream action has energy in every
-frame direction.
+**The diagonal aim.** Step 4 aims at `G`'s own Gram, `G^T G = X^T (delta
+delta^T) X` on the right; its cross-token terms need `G`, and the token
+diagonal does not. Each token's row of `X` weighted by `||delta_t||^2` keeps
+that diagonal, which is the selection the loss makes between tokens: rows past
+the last supervised token have `delta_t = 0`, so it is also the mask. On the
+left the aim is `delta^T delta Q`, which captures as much as `G`'s Gram. On
+LFM3 the two aims tie on loss through 1k steps (`FACTS.md` on `lab`, "S2 ties
+`G` through 1k steps"); the `G` path keeps step 4's. Under the diagonal aim
+`tangent_live_fraction` reads near 1: it has energy in every frame direction.
 
 `||G||_F^2` is estimated as `||G P||_F^2 / 16`, unbiased; like step 1's norm
 it is telemetry (`grad_capture`) and the non-finite flag, and applied to
