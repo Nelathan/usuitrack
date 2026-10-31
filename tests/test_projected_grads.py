@@ -188,6 +188,23 @@ def test_a_bias_gets_its_ordinary_gradient():
     torch.testing.assert_close(optimizer._pending[layer.weight].projected, frame.orient(twin.weight.grad, "right") @ basis)
 
 
+def test_what_it_cannot_project_is_refused():
+    class Custom(torch.nn.Linear):
+        pass
+
+    tied = torch.nn.Sequential(torch.nn.Linear(IN, IN, bias=False), torch.nn.Linear(IN, IN, bias=False))
+    tied[1].weight = tied[0].weight
+    cases = {
+        "own forward": torch.nn.Sequential(Custom(IN, HIDDEN, bias=False)),
+        "second Linear": tied,
+        "not Linears": torch.nn.Sequential(torch.nn.Embedding(HIDDEN, IN)),
+    }
+    for match, model in cases.items():
+        optimizer = UsuiTrack(model.parameters(), rank_fraction=0.1)
+        with pytest.raises(ValueError, match=match):
+            ProjectedGrads(model, optimizer)
+
+
 def test_a_closure_is_refused():
     block, optimizer = _setup()
     ProjectedGrads(block, optimizer)

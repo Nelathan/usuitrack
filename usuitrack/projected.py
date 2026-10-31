@@ -96,9 +96,20 @@ class ProjectedGrads:
         self._fitted: set[Tensor] = set()
         self._probes: dict[tuple[int, torch.device], Tensor] = {}
         self._generator: torch.Generator | None = None
+        if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+            raise ValueError("ProjectedGrads: the projected gradients are not all-reduced across processes")
+        projected: set[Tensor] = set()
         for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear) and module.weight in groups:
-                self._project(module, groups.pop(module.weight))
+            if not isinstance(module, torch.nn.Linear):
+                continue
+            if module.weight in projected:
+                raise ValueError(f"{name}: a projected weight shared by a second Linear would get no gradient there")
+            if module.weight not in groups:
+                continue
+            if type(module) is not torch.nn.Linear:
+                raise ValueError(f"{name}: {type(module).__name__} has its own forward, which projecting would replace")
+            projected.add(module.weight)
+            self._project(module, groups.pop(module.weight))
         if groups:
             raise ValueError(f"ProjectedGrads: {len(groups)} tracked matrices are not Linears and would still form G")
         optimizer.register_load_state_dict_post_hook(lambda optimizer: self._bind())
