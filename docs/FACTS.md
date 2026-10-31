@@ -1207,9 +1207,10 @@ the `[Q | P]` join: `lfm3-g-1k-s1` (`G`) against `lfm3-s2-1k-s1`
 | `G` | 1.322141 | 2.699005 | 0.704 | 3.71 | 7.47 GB |
 | S2 | 1.322050 | 2.698746 | 0.703 | 3.25 | 7.46 GB |
 
-S2 is within 1.4e-3 of `G` at step 100 and within 4e-4 at every eval from 200
-to 1000, below the run-to-run floor throughout: the late plateau does not
-separate the aims.
+S2 reads lower target than `G` at all ten evals: 1.4e-3 at step 100 and
+6.2e-4 at 200, then within 4.4e-4 from 300 to 1000; source within 5.7e-4 either way.
+The late plateau does not separate the aims; the early lead is a hint, not a
+claim.
 
 The global norm of all trainable parameters rises linearly and identically in
 both arms, 906.629 at step 25 to 906.717 at 1k (+0.01%). It is the whole

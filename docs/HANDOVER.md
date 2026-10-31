@@ -59,8 +59,9 @@ release files onto it, prepared locally after your review; you push.
 ## Next
 
 Done overnight 2026-10-30/31: the `[Q | P]` join (40 ms in the microbench,
-inside a 100-step run's spread); S2 against `G` at 1k steps, tied within 4e-4
-at every eval from 200, 3.25 against 3.71 s/step (FACTS).
+inside a 100-step run's spread); S2 against `G` at 1k steps, under it on target
+at every eval, 1.4e-3 at 100 and within 4.4e-4 from 300, 3.25 against 3.71
+s/step (FACTS).
 
 Next: PLAN N2 needs `||W||` per role; the harness logs only the whole model's
 norm, flat at +0.01% over 1k. Not a decay arm: decay is not the tool for a
