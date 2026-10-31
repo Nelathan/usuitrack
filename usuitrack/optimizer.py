@@ -24,15 +24,6 @@ from .stochastic import round_into
 GEODESIC_STEPSIZE = 0.02
 
 
-@torch.compile(dynamic=True)
-def write_weight(param: Tensor, direction: Tensor, basis: Tensor, side: str, lr: float, decay: float) -> Tensor:
-    """SPEC step 8 on one matrix; returns `||W||` from before the write."""
-    lift = frame.orient(direction @ basis.float().mT, side)
-    weight_norm = torch.linalg.vector_norm(param, dtype=torch.float32)
-    round_into(param, param.float() * (1.0 - lr * decay) - lr * weight_norm * lift)
-    return weight_norm
-
-
 @dataclass
 class Prepared:
     """Phase one's output for one matrix: what `step()` needs once `G` is freed."""
@@ -223,8 +214,9 @@ class UsuiTrack(Optimizer):
         """SPEC step 8: `W -= lr ||W|| lift(O)`, decay folded in, rounded once."""
 
         side = frame.resolve_side(param.shape, group["side"])
-        # A Parameter's shape is static to dynamo: one graph per weight shape.
-        weight_norm = write_weight(param.detach(), direction, self.state[param]["frame"], side, group["lr"], group["weight_decay"])
+        lift = frame.orient(direction @ self.state[param]["frame"].float().mT, side)
+        weight_norm = torch.linalg.vector_norm(param, dtype=torch.float32)
+        round_into(param, param.float() * (1.0 - group["lr"] * group["weight_decay"]) - group["lr"] * weight_norm * lift)
         if self.diagnostics is not None:
             # The lift is an isometry, so `||U|| = ||O|| ||W||` without a pass over `W`.
             self.diagnostics.update(param, direction.norm() * weight_norm * group["lr"])
