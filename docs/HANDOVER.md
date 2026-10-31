@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28, updated 2026-10-31, evening. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-10-31, night. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
@@ -57,17 +57,34 @@ The weight write is compiled on `lab` (-0.22 s/step), not released (PLAN R1).
 `main` is reset to `origin/main`. The release is one squashed commit of `lab`'s
 release files onto it, prepared locally after your review; you push.
 
+Before it (2026-10-31):
+- Your calls: R1 (the weight write is `@torch.compile`d in the package, while
+  README says pure PyTorch); the `rank_fraction` default (0.1; LFM3 and Anima
+  run 0.05); `grad_capture` under molegrad (an estimate; dropping it leaves
+  the probes no consumer but the non-finite count, which `Z` can carry).
+- README's headline (LoRA rank 44 against rank 128 on LFM2.5) is the
+  prerelease optimizer's (`docs/prerelease/PLAN.md`): re-measure on today's,
+  LFM3 standard arm, LoRA, `G` and molegrad (the harness has the LoRA arm).
+- The squash takes a curated file set: `lab`'s `pyproject.toml` (torch
+  2.15 pin, local wheel, lab group) and the harness tests stay behind; `main`'s
+  suite must pass on its own.
+- Run 29's end and the accumulation probe; the suite on the GPU (today's runs
+  were CPU-only, the card was busy); `examples/train_unsloth.py` run or cut.
+
 ## Next
 
 Molegrad toward release, in order:
 1. Your review of the commits below (2026-10-31).
 2. `projected-grads` onto `lab`, after your go.
-3. Run 29, Anima under molegrad (PLAN S2): your sample read. Launched
-   2026-10-31 ~19:55 through `outputs/anima-mole/run29.sh` (the seeded runner,
-   `NESTED=0`), ~3 h; output `/mnt/luna/ai/output/anima_usuitrack_29_molegrad`,
-   log `outputs/anima-mole/run29.log`. Probes in FACTS, "Molegrad on Anima".
-   Your call: drop the nested attention checkpoint from `anima.py` for the `G`
-   path too; until then the runner patches it out.
+3. Run 29, Anima under molegrad (PLAN S2): samples at 192 good, some better
+   than run 28's (you). Launched 2026-10-31 ~19:55 through
+   `outputs/anima-mole/run29.sh` (the seeded runner, `NESTED=0`), ends ~22:40;
+   output `/mnt/luna/ai/output/anima_usuitrack_29_molegrad`, log
+   `outputs/anima-mole/run29.log`. Probes in FACTS, "Molegrad on Anima".
+   Queued behind it (`outputs/anima-mole/queue4.sh`): accumulation without
+   offloading, bs8 x 2 and bs4 x 4, 20 steps each, against run 29's bs16
+   offloaded steps. Your call: drop the nested attention checkpoint from
+   `anima.py` for the `G` path too; until then the runner patches it out.
 4. The early lead on LFM3, if you want it: a second seed of both arms.
 
 Still open:
@@ -182,6 +199,12 @@ Under your handover of 2026-10-29 night, oldest first:
 - this handover and PLAN S2.
 - Runs: `s2-pkg-100`, `s2-review-100` match `s2-join-100` to 1e-4.
 
+2026-10-31 night, `projected-grads`, yours to own (you waived review):
+- `efa4e82` SPEC/READS: a moment that fills k of r planes steps at sqrt(k/r).
+- `3c5b51f` FACTS: AdaLN's empty planes set `relative_step`; run 29 interim.
+- `1848f8e` PLAN/ARCHIVE: S2's Anima bullet; the short step closed as ignored.
+- this handover.
+
 Overnight 2026-10-30/31, `projected-grads`:
 - `447313d`, `dd53c2f` this handover.
 - `1a96068` S2: the `[Q | P]` join; `52a6d61` its FACTS.
@@ -205,8 +228,6 @@ the next Anima run.** The numbered run configs keep their dead keys as records.
 
 ## Open, not in PLAN
 
-- Run 28 read `relative_step` 12% under `lr` on its plateau, where LFM reads
-  `lr`. That is what the read exists to catch; not looked into.
 - The Anima lane has no lab reads now (PLAN T1).
 - What made `lfm3-cos2e5-r05-s1`'s one 21x gradient burst (FACTS); the redo at
   the same seed has none.
