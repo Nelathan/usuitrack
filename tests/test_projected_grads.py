@@ -3,6 +3,7 @@
 import copy
 import math
 
+import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
@@ -46,7 +47,6 @@ def _projected_step_two(batches):
     block, optimizer = _setup()
     projected = ProjectedGrads(block, optimizer)
     _loss(block, _batch(0)).backward()
-    projected.prepare()
     optimizer.step()
     for batch in batches:
         _loss(block, batch).backward()
@@ -77,7 +77,6 @@ def test_step_one_is_the_optimizers_own_first_step():
     assert not block.w1.weight.requires_grad
     twin, twin_optimizer = _setup()
     _loss(block, _batch(0)).backward()
-    projected.prepare()
     optimizer.step()
     _loss(twin, _batch(0)).backward()
     twin_optimizer.step()
@@ -147,7 +146,6 @@ def test_micro_batches_accumulate_to_the_whole_batch():
 def _train(block, optimizer, projected, steps):
     for step in steps:
         _loss(block, _batch(step)).backward()
-        projected.prepare()
         optimizer.step()
 
 
@@ -173,6 +171,13 @@ def test_a_resumed_run_continues_the_run_it_was_saved_from():
             torch.testing.assert_close(resumed_module.weight, module.weight)
 
 
+def test_a_closure_is_refused():
+    block, optimizer = _setup()
+    ProjectedGrads(block, optimizer)
+    with pytest.raises(ValueError, match="closure"):
+        optimizer.step(lambda: _loss(block, _batch(0)).backward())
+
+
 def test_training_runs_with_projected_grads():
     block, optimizer = _setup()
     projected = ProjectedGrads(block, optimizer)
@@ -180,7 +185,6 @@ def test_training_runs_with_projected_grads():
     for step in range(5):
         for micro in range(2):
             _loss(block, _batch(2 * step + micro)).backward()
-        projected.prepare()
         optimizer.step()
     assert not torch.equal(block.w1.weight, before)
     assert all(torch.isfinite(p).all() for p in block.parameters())

@@ -103,12 +103,21 @@ class ProjectedGrads:
         if groups:
             raise ValueError(f"ProjectedGrads: {len(groups)} tracked matrices are not Linears and would still form G")
         optimizer.register_load_state_dict_post_hook(lambda optimizer: self._bind())
+        optimizer.register_step_pre_hook(self._before_step)
+
+    def _before_step(self, optimizer: UsuiTrack, args: tuple, kwargs: dict) -> None:
+        # `args` starts with the optimizer itself.
+        if args[1:] or kwargs.get("closure") is not None:
+            raise ValueError("ProjectedGrads: a closure's backward would run after step() collected the gradients; call backward() before step()")
+        self.prepare()
 
     @torch.no_grad()
     def prepare(self) -> None:
         """Hand each projected matrix's accumulated leaves to the optimizer as
-        its phase-one work; call after the step's backwards, before `step()`."""
+        its phase-one work. `step()` calls it; calling it earlier exposes the
+        pending raw norms, and the step's own call is then a no-op."""
 
+        prepared = False
         for module in self._projected:
             if module.z.grad is None:
                 continue
@@ -124,8 +133,10 @@ class ProjectedGrads:
             action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
             tangent = None if param in self._fitted else frame.aim(action, module.basis)
             self.optimizer._pending[param] = Prepared(z, tangent, raw_norm)
-        self._fitted.clear()
-        self._draw()
+            prepared = True
+        if prepared:
+            self._fitted.clear()
+            self._draw()
 
     def _project(self, module: torch.nn.Linear, group: dict) -> None:
         weight = module.weight

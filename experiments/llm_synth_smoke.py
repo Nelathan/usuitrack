@@ -843,6 +843,7 @@ def train_step(
             sensors.mark("backward")
         losses.append(loss.detach().float())
     if projected_grads is not None:
+        # Early, so the gradient-norm read below sees the pending raw norms.
         projected_grads.prepare()
     if collect_norms:
         # Under release_matrix_grads the matrix gradients are already freed; their
