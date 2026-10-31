@@ -152,6 +152,12 @@ Under your handover of 2026-10-29 night, oldest first:
   weighted the same.
 - `f07ebd4` FACTS/PLAN: accumulation on matched rows.
 
+Overnight 2026-10-30/31, `projected-grads`:
+- `447313d`, `dd53c2f` this handover.
+- `1a96068` S2: the `[Q | P]` join; `52a6d61` its FACTS.
+- `5c7f185` PLAN N2: no decay arm.
+- `553eaa2` FACTS/PLAN: S2 ties `G` through 1k.
+
 Run logs: wandb `pink-marker/usuitrack` (`lfm25-c5e5-s1`, `lfm25-c2e5-s1`,
 `release-trainmode-s1`, `lfm3-*`, ...); local logs, queue tools (`queue.sh`;
 `trajectory.py` for bin means, `window.py` for a step window, `tokens.py`), golden trajectories (`outputs/tools/golden.py check`) and the ai-toolkit
