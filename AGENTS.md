@@ -256,8 +256,10 @@ rank checkpoints here — the verdict is the samples, reviewed by the user.
 - **LR is not anchored across batch changes.** Scale by `sqrt(tokens per step)`:
   at 1/16 the tokens, use 1/4 the LR. Relative comparisons within a sweep
   survive because all arms share it; the absolute losses do not transfer.
-- **Noise floor: unsettled (`PLAN.md` D6).** A same-seed replicate differed by
-  `1.6e-3` on target and `5.6e-3` on source (LFM2.5, 1k steps). Below that, no claim.
+- **Noise floor** (`docs/FACTS.md`, "Run-to-run noise"): a same-seed delta
+  under ~1e-3 target / 2-6e-3 source (LFM2.5 at 1k), 6e-4 / 1e-3 (LFM3), is
+  no claim. Compare at a shared eval step and seed: that cancels the batch
+  wiggle, which is larger.
 
 ## Code style
 

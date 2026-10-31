@@ -382,9 +382,9 @@ poor for judging fresh. `loss_log.db`, 2026-10-04.
 
 ## LFM2.5-350M lane
 
-bs16 x seq1024, seed 1, 1k steps, broad-no-embeddings. Noise floors: target
-`3e-4`, source `2e-3` -- contradicted by a same-seed replicate at 1.6e-3 /
-5.6e-3 (below, "Caution: where it pays").
+bs16 x seq1024, seed 1, 1k steps, broad-no-embeddings. Noise: ~1e-3 target,
+2-6e-3 source at 1k ("Run-to-run noise"; withdraws the `3e-4` / `2e-3`
+floors this line stated).
 
 | arm | target | source | `update_to_param_ratio` |
 |---|---:|---:|---:|
@@ -1208,13 +1208,50 @@ the `[Q | P]` join: `lfm3-g-1k-s1` (`G`) against `lfm3-s2-1k-s1`
 | S2 | 1.322050 | 2.698746 | 0.703 | 3.25 | 7.46 GB |
 
 S2 reads lower target than `G` at all ten evals: 1.4e-3 at step 100 and
-6.2e-4 at 200, then within 4.4e-4 from 300 to 1000; source within 5.7e-4 either way.
+6.2e-4 at 200, above the LFM3 null pair's 6e-4 ("Run-to-run noise"), then
+within 4.4e-4 from 300 to 1000, inside it; source within 5.7e-4 either way.
 The late plateau does not separate the aims; the early lead is a hint, not a
 claim.
 
 The global norm of all trainable parameters rises linearly and identically in
 both arms, 906.629 at step 25 to 906.717 at 1k (+0.01%). It is the whole
 model's norm, so it does not read whether a tracked role rises.
+
+### Run-to-run noise: pairing cancels the batch wiggle, not the drift
+
+2026-10-31, from the eval histories of 273 finished wandb runs
+(`outputs/d6/`). Two kinds of noise, read two ways.
+
+**Batch wiggle**, the eval-to-eval jitter around a curve's trend, read by
+second differences of evals every 100 steps from step 300 (independent noise
+`sigma` gives `Var(d2) = 6 sigma^2`). It is the response to the last batches,
+so arms at the same seed share it: their second differences correlate
+0.94-0.98.
+
+| lane | wiggle sigma, target / source | left after pairing at one seed |
+|---|---|---|
+| LFM2.5, 10 runs | 1.3e-3 / 1.1e-2 | 4.7e-4 / 3.0e-3 |
+| LFM3, 3 runs | 7.1e-4 / 1.7e-3 | 1.8e-4 / 3.9e-4 |
+
+**Drift**, two runs separating smoothly, which second differences cannot see
+and an endpoint comparison feels whole. Read from null pairs, `|delta|` at
+the evals:
+
+| pair | lane | target | source |
+|---|---|---|---|
+| same seed, rescaled `5e-4` arm repeated | LFM2.5 @1k | 1.6e-3 | 5.6e-3 |
+| seed 2 against 1, `mf-none-lin1e-4-b095` | LFM2.5 @1k | 1.0e-3 | 5.2e-3 |
+| seed 2 against 1, `lab-lin1.24e-3-b098` | LFM2.5 @1k | 1.2e-3 | 1.8e-3 |
+| compiled write, other rounding draws (`lfm3-g-1k-s1` / `lfm3-const4e5-s1`) | LFM3, every eval to 1k | <= 5.5e-4 | <= 9.6e-4 |
+| same seed, one with a gradient burst at 550 (`lfm3-cos2e5-r05-s1`) | LFM3 @500 / @1k | 1e-4 / 1.9e-3 | 7e-5 / 1.4e-3 |
+
+A changed seed spreads the 1k endpoint no further than a same-seed replicate
+does on LFM2.5: by 1k any perturbation has drifted to the same scale, ~1e-3
+target and 2-6e-3 source. On LFM3 a null pair stays inside 6e-4 / 1e-3 to
+1k unless an event (a burst) kicks it, which moves it 2e-3. Below those, a
+same-seed delta at one eval is not a claim; a sign held across every eval
+is weak evidence (molegrad sits 9e-5 to 1.4e-3 under `G` on target at all
+ten, "S2 ties `G` through 1k steps"). LFM3 has no seed pair.
 
 ## Run ledger (Anima)
 
