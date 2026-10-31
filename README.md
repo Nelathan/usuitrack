@@ -44,9 +44,9 @@ and other orthogonalized optimizers use. "Everything else" is wider than the
 non-2D tensors: lookup tables (embeddings) are 2D but are not shared linear
 maps, and belong in the fallback. `docs/SPEC.md` has the reasoning.
 
-Rank is not configured per matrix: `rank_fraction` (default `0.1`) sizes each
+Rank is not configured per matrix: `rank_fraction` (default `0.05`) sizes each
 matrix at `rank_fraction * sqrt(m * n)`, capped at half its smaller side, so a
-1024x1024 projection runs at 102 and a 4608x1024 MLP matrix at 217. The tracked
+1024x1024 projection runs at 51 and a 4608x1024 MLP matrix at 109. The tracked
 side defaults to `side="auto"`, the shorter one; a param group can fix it with
 `side="left"` or `"right"` where you know better.
 

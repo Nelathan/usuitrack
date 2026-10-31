@@ -55,7 +55,7 @@ class UsuiTrack(Optimizer):
         lr: float = 4e-5,
         beta: float = 0.95,
         weight_decay: float = 0.0,
-        rank_fraction: float = 0.1,
+        rank_fraction: float = 0.05,
         side: str = "auto",
         release_matrix_grads: bool = False,
         diagnostics: bool = False,

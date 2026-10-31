@@ -38,7 +38,7 @@ Let a matrix parameter and gradient be
 $$W,G\in\mathbb R^{m\times n},\qquad 1\le r\le\min(m,n).$$
 
 Rank is not configured per matrix. One model-wide `rank_fraction` `c`
-(default `0.1`) sizes every matrix by its shape:
+(default `0.05`) sizes every matrix by its shape:
 
 $$r=\min\!\left(\max\!\left(1,\ \operatorname{round}(c\sqrt{mn})\right),\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
 
@@ -56,8 +56,10 @@ every step. And narrow modules are bottlenecks -- they carry the residual
 stream through a small waist, so a large update there destabilizes every block
 downstream, independently of how well-conditioned the step was.
 
-At `c = 0.1` the cap binds only on such shapes: Anima's `(2048, 68)` patch
-embedding asks for 37 planes and runs at 34.
+At `c = 0.05` the cap binds on no shape of LFM's or Anima's; at `0.1`, on
+Anima's `(2048, 68)` patch embedding, which asks for 37 planes and runs at 34.
+The default is the smaller: on LFM3 `0.1` buys capture and no loss under
+either aim (`ARCHIVE.md` on `lab`, "a live aim does not make a larger rank pay").
 
 `Q:[d,r]`, `Q^T Q = I`, is a frame on one side of the matrix, `d = n` for
 `right` and `d = m` for `left`. Orient the gradient so that side is its columns,
