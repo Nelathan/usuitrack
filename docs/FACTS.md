@@ -318,6 +318,25 @@ bs8 x 2 it compiles, but a recompile took 22 minutes. Molegrad also compiles
 slower per new bucket shape than `G` (44 s against 12 s). One 576 MiB request
 per run fails and succeeds on the allocator's retry, as above.
 
+### Accumulation beats offloading on Anima under molegrad
+
+2026-10-31, bs16 per step, molegrad at rank 0.05, unnested, block compile,
+eager weight write, 20 seeded steps each (median of steady steps):
+
+| arm | s/step | peak GiB | reserved GiB |
+|---|---:|---:|---:|
+| bs16, offloaded | 10.78 | 9.29 | 9.97 |
+| bs8 x 2, no offload | 9.88 | 9.12 | 9.57 |
+| bs4 x 4, no offload | 10.40 | 7.16 | 7.52 |
+
+Offloading pins and copies every checkpoint input across PCIe each step, and
+that costs more than splitting the batch. Without it, bs8's inputs stay on the
+card, ~2.1 GiB over 28 blocks, while the per-block recompute transient that
+sets the peak (~4 GiB at bs16) halves: the two cancel. bs4 x 4 leaves 2.8 GiB
+free at the batch Anima's buckets were sized for. The same arm with the
+compiled write ran at 9.97-10.0 s/step (run 29, the probe above): eager costs
+Anima ~0.8 s/step.
+
 ### `relative_step` under `lr` on Anima is AdaLN's empty planes
 
 `unit_polar` scales the polar factor by `1/sqrt(r)`, as if the moment filled
