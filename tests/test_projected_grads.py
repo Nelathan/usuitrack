@@ -171,6 +171,23 @@ def test_a_resumed_run_continues_the_run_it_was_saved_from():
             torch.testing.assert_close(resumed_module.weight, module.weight)
 
 
+def test_a_bias_gets_its_ordinary_gradient():
+    torch.manual_seed(0)
+    layer = torch.nn.Linear(IN, HIDDEN)
+    twin = torch.nn.Linear(IN, HIDDEN)
+    twin.load_state_dict(layer.state_dict())
+    optimizer = UsuiTrack([layer.weight], lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    projected = ProjectedGrads(layer, optimizer)
+    inputs, _target = _batch(1)
+    target = torch.randn(BATCH, TOKENS, HIDDEN)
+    for module in (layer, twin):
+        (module(inputs) * target).sum().backward()
+    projected.prepare()
+    torch.testing.assert_close(layer.bias.grad, twin.bias.grad)
+    basis = optimizer.state[layer.weight]["frame"]
+    torch.testing.assert_close(optimizer._pending[layer.weight].projected, frame.orient(twin.weight.grad, "right") @ basis)
+
+
 def test_a_closure_is_refused():
     block, optimizer = _setup()
     ProjectedGrads(block, optimizer)

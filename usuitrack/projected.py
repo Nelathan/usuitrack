@@ -30,11 +30,11 @@ PROBES = 16
 
 class _Projected(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: Tensor, weight: Tensor, basis: Tensor, probes: Tensor, right: bool, fit: bool, z: Tensor, action: Tensor, probed: Tensor) -> Tensor:
+    def forward(ctx, x: Tensor, weight: Tensor, bias: Tensor | None, basis: Tensor, probes: Tensor, right: bool, fit: bool, z: Tensor, action: Tensor, probed: Tensor) -> Tensor:
         ctx.save_for_backward(x, weight, basis, probes)
         ctx.right = right
         ctx.fit = fit
-        return F.linear(x, weight)
+        return F.linear(x, weight, bias)
 
     @staticmethod
     def backward(ctx, grad: Tensor):
@@ -42,6 +42,7 @@ class _Projected(torch.autograd.Function):
         grad_x = grad @ weight
         stream = x.reshape(-1, x.shape[-1])
         delta = grad.reshape(-1, grad.shape[-1])
+        grad_bias = delta.sum(dim=0) if ctx.needs_input_grad[2] else None
         fitted = None
         if ctx.fit:
             gradient = delta.mT @ stream if ctx.right else stream.mT @ delta
@@ -61,7 +62,7 @@ class _Projected(torch.autograd.Function):
             z = stream.mT @ projected_delta
             action_probed = delta.mT @ torch.cat([projected_delta, stream @ probes], dim=1)
             action, probed = action_probed[:, :rank], action_probed[:, rank:]
-        return grad_x, None, fitted, None, None, None, z, action.float(), probed.float()
+        return grad_x, None, grad_bias, fitted, None, None, None, z, action.float(), probed.float()
 
 
 def _anchor(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> Tensor:
@@ -82,9 +83,9 @@ class ProjectedLinear(torch.nn.Linear):
 
     def forward(self, x: Tensor) -> Tensor:
         if not torch.is_grad_enabled():
-            return F.linear(x, self.weight)
+            return F.linear(x, self.weight, self.bias)
         # A basis that still requires grad is waiting for its fit.
-        return _Projected.apply(x, self.weight, self.basis, self.probes, self.right, self.basis.requires_grad, self.z, self.action, self.probed)
+        return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.right, self.basis.requires_grad, self.z, self.action, self.probed)
 
 
 class ProjectedGrads:
@@ -97,8 +98,6 @@ class ProjectedGrads:
         self._generator: torch.Generator | None = None
         for name, module in model.named_modules():
             if isinstance(module, torch.nn.Linear) and module.weight in groups:
-                if module.bias is not None:
-                    raise ValueError(f"{name}: ProjectedGrads takes bias-free Linears")
                 self._project(module, groups.pop(module.weight))
         if groups:
             raise ValueError(f"ProjectedGrads: {len(groups)} tracked matrices are not Linears and would still form G")
