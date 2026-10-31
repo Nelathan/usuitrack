@@ -44,7 +44,7 @@ $$r=\min\!\left(\max\!\left(1,\ \operatorname{round}(c\sqrt{mn})\right),\ \max\!
 
 The rank sets the subspace, not the step: the step is sized against the
 weight's own norm (step 8), so `rank_fraction` decides which directions a matrix
-moves in and never how far. On LFM the rule matches or beats a
+moves in and, where the moment fills its rank, never how far (step 7). On LFM the rule matches or beats a
 per-role rank sized from measured live planes, with no measurement of its own
 (`FACTS.md` on `lab`, "Rank is a fraction of the matrix's size"). Matrices of one shape
 share one rank.
