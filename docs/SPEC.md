@@ -436,6 +436,50 @@ call, with a warning naming how many. Nothing needs rolling back: neither the
 moment nor the frame moves before `step()`, so what is dropped is the gradients
 themselves, plus a frame fitted on a first step.
 
+## Projected gradients
+
+`ProjectedGrads(model, optimizer)` is an opt-in path that never forms `G`.
+Every tracked matrix must be the weight of a plain `nn.Linear`, bias allowed;
+the weight is frozen for autograd, so no `dW` GEMM runs. With `X:[T,n]` the
+Linear's input and `delta:[T,m]` the gradient at its output, `G = delta^T X`,
+and the Linear's backward returns, as gradients of storage-free leaves, what
+phase one would have read from `G`:
+
+| | right | left |
+|---|---|---|
+| `Z` (step 3), exact | `delta^T (X Q)` | `X^T (delta Q)` |
+| action, replacing step 4's `A` | `X^T (||delta_t||^2 * X Q)` | `delta^T (delta Q)` |
+| `G P`, 16 Gaussian probes | `delta^T (X P)` | `delta^T (X P)` |
+
+**The action comes from the streams.** On the right `G^T G = X^T (delta
+delta^T) X`; its cross-token terms need `G`, and the diagonal does not. Each
+token's row of `X` weighted by `||delta_t||^2` keeps the diagonal, which is the
+selection the loss makes between tokens: rows past the last supervised token
+have `delta_t = 0`, so it is also the mask. On the left `delta^T delta Q`
+captures as much as `G`'s own action. On LFM3 both aims tie on loss through 1k
+steps (`FACTS.md` on `lab`, "S2 ties `G` through 1k steps"). Under it
+`tangent_live_fraction` reads near 1: the stream action has energy in every
+frame direction.
+
+`||G||_F^2` is estimated as `||G P||_F^2 / 16`, unbiased; like step 1's norm
+it is telemetry (`grad_capture`) and the non-finite flag, and applied to
+nothing. All three leaves are token sums, so micro-batches accumulate exactly.
+
+A matrix with no frame fits it in its first backward from that micro-batch's
+`G`, formed and freed inside the backward; under accumulation that is the
+first micro-batch's gradient, not the step's. The frame lives only in
+optimizer state, which the modules read again after every load. `step()`
+collects the leaves itself; a closure would run its backward after that, so it
+raises.
+
+No `weight.grad` ever exists for a tracked matrix: gradient clipping,
+`GradScaler`, gradient-norm logging and anything else that reads it see only
+the fallback parameters. A tracked weight used outside its Linear, as a
+functional call, gets no gradient there and is not detected. Refused with the
+reason, rather than trained wrong: a Linear subclass (its own forward would be
+replaced), a weight shared by a second Linear, a tracked matrix that is not a
+Linear's weight, and more than one process (the leaves are not all-reduced).
+
 ## Parameter eligibility
 
 `ndim == 2` is the structural gate `add_param_group` enforces, and it is not the

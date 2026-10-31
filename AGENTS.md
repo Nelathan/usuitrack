@@ -6,7 +6,7 @@ Operating contract for agents in the UsuiTrack repo.
 
 Two branches with different jobs. `main` is the release: the documented
 optimizer and nothing else. `usuitrack/` is the package (`optimizer.py`,
-`projector.py`, `diagnostics.py`, `stochastic.py`), `tests/` guards it, plus
+`frame.py`, `polar.py`, `projected.py`, `diagnostics.py`, `stochastic.py`), `tests/` guards it, plus
 `examples/`, `README.md`, `docs/SPEC.md` and `docs/LEGEND.md`. `lab` is the root
 for experiments: everything on `main`, plus the LFM harness in `experiments/`,
 the research ledger in `docs/`, and `docs/prerelease/`. Experiment branches start
@@ -39,8 +39,8 @@ capability-sensitive. Bring full effort; do not hedge or hold back.
   at its end, which is where a new closure goes. Bottom half: the former PLAN
   frozen verbatim as the investigation log — read for evidence, never append.
 - `docs/PROJECTED_ACTIVATION_2.md` — design notes for PLAN S2, weight gradients
-  without `G`. Built in the harness as `--projected-grads`
-  (`usuitrack/projected.py`); SPEC takes what settles.
+  without `G`. Built as `ProjectedGrads` (`usuitrack/projected.py`, SPEC
+  "Projected gradients"); the harness flag is `--projected-grads`.
 - `docs/HANDOVER.md` — session-to-session orientation: where things stand, traps, what to do next.
 - `docs/LEGEND.md` — the anthropomorphic design story. Intuition only.
 - `docs/prerelease/` — the old lab repo's docs, frozen. Evidence only, never edited.

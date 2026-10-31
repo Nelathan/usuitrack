@@ -1,19 +1,6 @@
-"""Weight gradients without `G` (SPEC, "Projected gradients").
-
-Each tracked Linear's weight is frozen for autograd, so no `dW = delta^T X` is
-ever formed. Its backward has `X` (recomputed under checkpointing) and `delta`
-in hand and returns, as the "gradients" of persistent leaves, what the
-optimizer consumes:
-
-- `Z`, exact: `delta^T (X Q)` on the input side, `X^T (delta Q)` (oriented) on
-  the output side;
-- the frame's action, from the streams (ARCHIVE, "frames track from the
-  streams"): `X^T (w^2 * X Q)` with `w_t = ||delta_t||` on the input side,
-  `delta^T (delta Q)` on the output side;
-- `G P` for 16 Gaussian probes, an unbiased estimate of `||G||^2`.
-
-All three are token sums, so micro-batches accumulate exactly. An unfitted
-frame is fitted in its matrix's first backward from that micro-batch's own `G`.
+"""Weight gradients without `G`: each tracked Linear's backward returns `Z`,
+the frame's action from its input and output gradient, and a probe sketch of
+`G` (`docs/SPEC.md`, "Projected gradients").
 """
 
 from __future__ import annotations
@@ -89,6 +76,9 @@ class ProjectedLinear(torch.nn.Linear):
 
 
 class ProjectedGrads:
+    """Trains `optimizer`'s matrices from projections, never forming `G`; build
+    it after the optimizer, before the first backward."""
+
     def __init__(self, model: torch.nn.Module, optimizer: UsuiTrack) -> None:
         self.optimizer = optimizer
         groups = {param: group for group in optimizer.param_groups for param in group["params"]}
