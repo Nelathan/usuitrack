@@ -1,5 +1,6 @@
 """Weight gradients without `G` (SPEC, "Projected gradients")."""
 
+import copy
 import math
 
 import torch
@@ -141,6 +142,35 @@ def test_micro_batches_accumulate_to_the_whole_batch():
         torch.testing.assert_close(prepared.projected, other.projected)
         torch.testing.assert_close(prepared.tangent, other.tangent)
         torch.testing.assert_close(prepared.raw_norm, other.raw_norm)
+
+
+def _train(block, optimizer, projected, steps):
+    for step in steps:
+        _loss(block, _batch(step)).backward()
+        projected.prepare()
+        optimizer.step()
+
+
+def test_a_resumed_run_continues_the_run_it_was_saved_from():
+    block, optimizer = _setup()
+    projected = ProjectedGrads(block, optimizer)
+    _train(block, optimizer, projected, range(3))
+    weights, state = copy.deepcopy(block.state_dict()), copy.deepcopy(optimizer.state_dict())
+    _train(block, optimizer, projected, range(3, 5))
+    # Wrapped before the load, as a trainer resumes, and after it.
+    for wrap_first in (True, False):
+        resumed, resumed_optimizer = _setup(seed=1)
+        resumed.load_state_dict(weights)
+        if wrap_first:
+            resumed_projected = ProjectedGrads(resumed, resumed_optimizer)
+        # A load shares tensors that already match, and steps turn frames in place.
+        resumed_optimizer.load_state_dict(copy.deepcopy(state))
+        if not wrap_first:
+            resumed_projected = ProjectedGrads(resumed, resumed_optimizer)
+        _train(resumed, resumed_optimizer, resumed_projected, range(3, 5))
+        for module, resumed_module in ((block.w1, resumed.w1), (block.w2, resumed.w2)):
+            torch.testing.assert_close(resumed_optimizer.state[resumed_module.weight]["frame"], optimizer.state[module.weight]["frame"])
+            torch.testing.assert_close(resumed_module.weight, module.weight)
 
 
 def test_training_runs_with_projected_grads():

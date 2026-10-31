@@ -102,6 +102,7 @@ class ProjectedGrads:
                 self._project(module, groups.pop(module.weight))
         if groups:
             raise ValueError(f"ProjectedGrads: {len(groups)} tracked matrices are not Linears and would still form G")
+        optimizer.register_load_state_dict_post_hook(lambda optimizer: self._bind())
 
     @torch.no_grad()
     def prepare(self) -> None:
@@ -133,14 +134,31 @@ class ProjectedGrads:
         length, other = (weight.shape[1], weight.shape[0]) if right else (weight.shape[0], weight.shape[1])
         module.__class__ = ProjectedLinear
         module.right = right
-        module.basis = torch.zeros(length, rank, dtype=weight.dtype, device=weight.device, requires_grad=True)
-        module.basis.register_post_accumulate_grad_hook(lambda basis: self._store_fit(weight, basis))
+        module.basis = torch.zeros(length, rank, dtype=weight.dtype, device=weight.device)
         module.probes = self._probe(weight.shape[1], weight.device, weight.dtype)
         module.z = _anchor((other, rank), weight.dtype, weight.device)
         module.action = _anchor((length, rank), torch.float32, weight.device)
         module.probed = _anchor((weight.shape[0], PROBES), torch.float32, weight.device)
         weight.requires_grad_(False)
         self._projected.append(module)
+        self._bind_module(module)
+
+    def _bind(self) -> None:
+        for module in self._projected:
+            self._bind_module(module)
+
+    def _bind_module(self, module: ProjectedLinear) -> None:
+        """The frame lives only in optimizer state, which a load replaces: the
+        module reads it from there, or holds a leaf that waits for its fit."""
+
+        weight = module.weight
+        held = self.optimizer.state[weight].get("frame")
+        if held is not None:
+            module.basis = held
+            return
+        basis = torch.zeros_like(module.basis, requires_grad=True)
+        basis.register_post_accumulate_grad_hook(lambda basis: self._store_fit(weight, basis))
+        module.basis = basis
 
     @torch.no_grad()
     def _store_fit(self, weight: Tensor, basis: Tensor) -> None:
