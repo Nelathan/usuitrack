@@ -5,6 +5,9 @@ the frame's action from its input and output gradient, and a probe sketch of
 
 from __future__ import annotations
 
+import collections
+import warnings
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -33,6 +36,7 @@ class _Projected(torch.autograd.Function):
         fitted = None
         if ctx.fit:
             gradient = delta.mT @ stream if ctx.right else stream.mT @ delta
+            gradient = torch.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
             basis = fitted = frame.fit(gradient, basis.shape[-1])
         rank = basis.shape[-1]
         # The probes ride with the frame in one GEMM over each stream: [Q | P].
@@ -85,31 +89,57 @@ class ProjectedGrads:
         self._projected: list[ProjectedLinear] = []
         self._fitted: set[Tensor] = set()
         self._probes: dict[tuple[int, torch.device], Tensor] = {}
-        self._generator: torch.Generator | None = None
+        self._generators: dict[torch.device, torch.Generator] = {}
         if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
             raise ValueError("ProjectedGrads: the projected gradients are not all-reduced across processes")
-        projected: set[Tensor] = set()
+        owners: dict[Tensor, list[tuple[str, torch.nn.Module]]] = collections.defaultdict(list)
         for name, module in model.named_modules():
-            if not isinstance(module, torch.nn.Linear):
-                continue
-            if module.weight in projected:
-                raise ValueError(f"{name}: a projected weight shared by a second Linear would get no gradient there")
-            if module.weight not in groups:
-                continue
-            if type(module) is not torch.nn.Linear:
-                raise ValueError(f"{name}: {type(module).__name__} has its own forward, which projecting would replace")
-            projected.add(module.weight)
-            self._project(module, groups.pop(module.weight))
+            for param in module.parameters(recurse=False):
+                owners[param].append((name, module))
+        for param in groups:
+            if len(owners[param]) > 1:
+                (name, _module), (other, _other_module) = owners[param][:2]
+                raise ValueError(f"{name}: its weight is shared with {other}, which would get no gradient")
+        for param in list(groups):
+            for name, module in owners[param]:
+                if isinstance(module, torch.nn.Linear) and module.weight is param:
+                    if type(module) is not torch.nn.Linear:
+                        raise ValueError(f"{name}: {type(module).__name__} has its own forward, which projecting would replace")
+                    self._project(module, groups.pop(param))
         if groups:
             raise ValueError(f"ProjectedGrads: {len(groups)} tracked matrices are not Linears and would still form G")
-        optimizer.register_load_state_dict_post_hook(lambda optimizer: self._bind())
+        optimizer.register_load_state_dict_post_hook(self._after_load)
         optimizer.register_step_pre_hook(self._before_step)
+        # torch has no zero_grad hook, so the optimizer's own is wrapped.
+        self._zero_grad = optimizer.zero_grad
+        optimizer.zero_grad = self._discard_then_zero_grad
 
     def _before_step(self, optimizer: UsuiTrack, args: tuple, kwargs: dict) -> None:
         # `args` starts with the optimizer itself.
-        if args[1:] or kwargs.get("closure") is not None:
+        closure = args[1] if len(args) > 1 else kwargs.get("closure")
+        if closure is not None:
             raise ValueError("ProjectedGrads: a closure's backward would run after step() collected the gradients; call backward() before step()")
         self.prepare()
+
+    def _after_load(self, optimizer: UsuiTrack) -> None:
+        self._discard()
+        self._bind()
+
+    def _discard_then_zero_grad(self, set_to_none: bool = True) -> None:
+        dropped = self._discard()
+        if dropped:
+            warnings.warn(f"ProjectedGrads: zero_grad() dropped the projected gradients of {dropped} matrices before step() applied them.", stacklevel=2)
+        self._zero_grad(set_to_none)
+
+    def _discard(self) -> int:
+        """Drop leaves no step consumed; a frame they fitted stays, as on the `G` path."""
+
+        dropped = 0
+        for module in self._projected:
+            dropped += module.z.grad is not None
+            module.z.grad = module.action.grad = module.probed.grad = None
+        self._fitted.clear()
+        return dropped
 
     @torch.no_grad()
     def prepare(self) -> None:
@@ -173,6 +203,10 @@ class ProjectedGrads:
 
     @torch.no_grad()
     def _store_fit(self, weight: Tensor, basis: Tensor) -> None:
+        # Each call of the Linear fits its own frame, and autograd sums them.
+        gram = basis.grad.float().mT @ basis.grad.float()
+        if not torch.allclose(gram, torch.eye(gram.shape[0], device=gram.device), atol=0.1):
+            raise RuntimeError("ProjectedGrads: a Linear had more than one call in the backward that fits its frame; call it once until its first step")
         basis.copy_(basis.grad)
         basis.grad = None
         basis.requires_grad_(False)
@@ -180,7 +214,7 @@ class ProjectedGrads:
         self._fitted.add(weight)
 
     def _probe(self, size: int, device: torch.device, dtype: torch.dtype) -> Tensor:
-        key = (size, device)
+        key = (size, device, dtype)
         if key not in self._probes:
             self._probes[key] = torch.empty(size, PROBES, device=device, dtype=dtype)
             self._draw()
@@ -191,6 +225,7 @@ class ProjectedGrads:
         # Fresh probes each step, in place so compiled graphs keep their inputs,
         # from a private generator so training's random stream never shifts.
         for probes in self._probes.values():
-            if self._generator is None:
-                self._generator = torch.Generator(probes.device).manual_seed(0)
-            probes.copy_(torch.randn(probes.shape, device=probes.device, generator=self._generator))
+            if probes.device not in self._generators:
+                self._generators[probes.device] = torch.Generator(probes.device).manual_seed(0)
+            generator = self._generators[probes.device]
+            probes.copy_(torch.randn(probes.shape, device=probes.device, generator=generator))

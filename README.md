@@ -99,7 +99,7 @@ time per step, and gradient accumulation works without holding any gradient.
 from usuitrack import ProjectedGrads, UsuiTrack
 
 matrix_opt = UsuiTrack(matrix_params, lr=1e-4)
-ProjectedGrads(model, matrix_opt)  # after building the optimizer, before training
+ProjectedGrads(model, matrix_opt)  # after the model's device and dtype and the optimizer
 ```
 
 The loop is unchanged; `step()` collects the projections. Every matrix must be

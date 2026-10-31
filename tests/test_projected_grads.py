@@ -194,22 +194,77 @@ def test_what_it_cannot_project_is_refused():
 
     tied = torch.nn.Sequential(torch.nn.Linear(IN, IN, bias=False), torch.nn.Linear(IN, IN, bias=False))
     tied[1].weight = tied[0].weight
+    tied_to_a_table = torch.nn.Sequential(torch.nn.Embedding(HIDDEN, IN), torch.nn.Linear(IN, HIDDEN, bias=False))
+    tied_to_a_table[1].weight = tied_to_a_table[0].weight
     cases = {
         "own forward": torch.nn.Sequential(Custom(IN, HIDDEN, bias=False)),
-        "second Linear": tied,
+        "shared": tied,
+        "shared ": tied_to_a_table,
         "not Linears": torch.nn.Sequential(torch.nn.Embedding(HIDDEN, IN)),
     }
     for match, model in cases.items():
         optimizer = UsuiTrack(model.parameters(), rank_fraction=0.1)
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ValueError, match=match.strip()):
             ProjectedGrads(model, optimizer)
 
 
-def test_a_closure_is_refused():
+def test_a_closure_is_refused_and_none_is_no_closure():
     block, optimizer = _setup()
     ProjectedGrads(block, optimizer)
     with pytest.raises(ValueError, match="closure"):
         optimizer.step(lambda: _loss(block, _batch(0)).backward())
+    for step in (lambda: optimizer.step(None), lambda: optimizer.step(closure=None)):
+        _loss(block, _batch(0)).backward()
+        step()
+
+
+def test_zero_grad_discards_an_unconsumed_backward():
+    """A backward dropped by `zero_grad()` (an OOM retry, a skipped batch)
+    leaves no trace in the next step."""
+
+    runs = []
+    for discard in (True, False):
+        block, optimizer = _setup()
+        ProjectedGrads(block, optimizer)
+        _loss(block, _batch(0)).backward()
+        optimizer.step()
+        if discard:
+            _loss(block, _batch(1)).backward()
+            with pytest.warns(UserWarning, match="dropped"):
+                optimizer.zero_grad()
+        _loss(block, _batch(2)).backward()
+        optimizer.step()
+        runs.append(block)
+    torch.testing.assert_close(runs[0].state_dict(), runs[1].state_dict())
+
+
+def test_a_linear_called_twice_before_its_fit_is_refused():
+    layer = torch.nn.Linear(IN, IN, bias=False)
+    ProjectedGrads(layer, UsuiTrack([layer.weight], rank_fraction=0.1))
+    with pytest.raises(RuntimeError, match="more than one call"):
+        layer(layer(_batch(0)[0])).sum().backward()
+
+
+def test_a_non_finite_first_gradient_fits_a_finite_frame():
+    block, optimizer = _setup()
+    ProjectedGrads(block, optimizer)
+    inputs, target = _batch(0)
+    target[0, 0, 0] = torch.nan
+    (block(inputs) * target).sum().backward()
+    optimizer.step()
+    for module in (block.w1, block.w2):
+        assert torch.isfinite(optimizer.state[module.weight]["frame"]).all()
+        assert torch.isfinite(module.weight).all()
+
+
+def test_matrices_of_two_dtypes_train_together():
+    # fp32 first: the bf16 matrix must not inherit its probes.
+    model = torch.nn.ModuleDict({"fp32": torch.nn.Linear(IN, HIDDEN, bias=False), "bf16": torch.nn.Linear(IN, HIDDEN, bias=False).bfloat16()})
+    optimizer = UsuiTrack(model.parameters(), rank_fraction=0.1)
+    ProjectedGrads(model, optimizer)
+    inputs = _batch(0)[0]
+    (model["bf16"](inputs.bfloat16()).float().sum() + model["fp32"](inputs).sum()).backward()
+    optimizer.step()
 
 
 def test_training_runs_with_projected_grads():

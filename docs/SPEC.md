@@ -467,18 +467,22 @@ nothing. All three leaves are token sums, so micro-batches accumulate exactly.
 
 A matrix with no frame fits it in its first backward from that micro-batch's
 `G`, formed and freed inside the backward; under accumulation that is the
-first micro-batch's gradient, not the step's. The frame lives only in
-optimizer state, which the modules read again after every load. `step()`
-collects the leaves itself; a closure would run its backward after that, so it
-raises.
+first micro-batch's gradient, not the step's, sanitized as in step 1. The
+frame lives only in optimizer state, which the modules read again after every
+load. `step()` collects the leaves itself; a closure would run its backward
+after that, so it raises. `zero_grad()` and a load drop leaves no step
+consumed, with the same warning as pending work.
 
 No `weight.grad` ever exists for a tracked matrix: gradient clipping,
 `GradScaler`, gradient-norm logging and anything else that reads it see only
 the fallback parameters. A tracked weight used outside its Linear, as a
-functional call, gets no gradient there and is not detected. Refused with the
-reason, rather than trained wrong: a Linear subclass (its own forward would be
-replaced), a weight shared by a second Linear, a tracked matrix that is not a
-Linear's weight, and more than one process (the leaves are not all-reduced).
+functional call, gets no gradient there and is not detected. The leaves are
+placed with the weights when it is built, so the model has its device and
+dtype by then. Refused with the reason, rather than trained wrong: a Linear
+subclass (its own forward would be replaced), a weight shared with another
+module, a tracked matrix that is not a Linear's weight, a Linear called more
+than once in the backward that fits its frame (each call fits its own), and
+more than one process (the leaves are not all-reduced).
 
 ## Parameter eligibility
 
