@@ -74,17 +74,17 @@ Decided 2026-10-31 (you): the write is eager, `rank_fraction` 0.05,
 ## Next
 
 Molegrad toward release, in order:
-1. Run 29, Anima under molegrad (PLAN S2): samples at 192 good, some better
-   than run 28's (you). Launched 2026-10-31 ~19:55 through
-   `outputs/anima-mole/run29.sh` (the seeded runner, `NESTED=0`), ends ~22:40;
-   output `/mnt/luna/ai/output/anima_usuitrack_29_molegrad`, log
-   `outputs/anima-mole/run29.log`. Probes in FACTS, "Molegrad on Anima".
-   Queued behind it (`outputs/anima-mole/queue4.sh`): accumulation without
-   offloading, bs8 x 2 and bs4 x 4, 20 steps each, against run 29's bs16
-   offloaded steps. Your call: drop the nested attention checkpoint from
+1. Anima's batch (PLAN S2): `outputs/anima-mole/queue4.sh` runs bs16
+   offloaded, bs8 x 2 and bs4 x 4 unoffloaded, 20 steps each, all on tonight's
+   tree. Your call still: drop the nested attention checkpoint from
    `anima.py` for the `G` path too; until then the runner patches it out.
 2. The release steps above.
-3. The early lead on LFM3, if you want it: a second seed of both arms.
+3. After the release, the next Anima run (yours, 2026-10-31): AdaLN frozen
+   (`ignore_if_contains` gains `norm1.linear`, `norm2.linear`,
+   `norm3.linear`, `norm_out.linear`), `4e-5` decaying linearly to `1e-5`
+   over 1920 steps, twice run 29's epochs. Run 29 (molegrad, 2.83 h) was a
+   clear win; output `/mnt/luna/ai/output/anima_usuitrack_29_molegrad`.
+4. The early lead on LFM3, if you want it: a second seed of both arms.
 
 Still open:
 - PLAN N2 needs `||W||` per role; the harness logs only the whole model's
