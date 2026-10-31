@@ -269,7 +269,8 @@ bs16: it graph-breaks at the saved-tensor hooks, and it holds every gradient
 until its one backward graph ends, where per-block compile lets
 `release_matrix_grads` free a block's gradients as its backward finishes. In
 the trainer the unnested arm fits step 1 and OOMs from step 2, once the
-optimizer state is resident; nested runs at ~12.4 s/step. Gradients agree with
+optimizer state is resident; nested runs at ~12.4 s/step. At rank 0.05 on the
+2026-10-31 tree both paths fit unnested ("Molegrad on Anima"). Gradients agree with
 eager within the compile noise floor (relative grad-norm difference median
 ~1e-2, as for plain compile against eager).
 
@@ -280,6 +281,42 @@ parameters, gone since they moved to UsuiTrack (`optimizer.pt` 1.41 -> 0.97
 GiB). `nvidia-smi` reads reserved allocator cache, not use: 11.4 GB at 20
 steps, and the card is still near full -- a 570 MiB request failed once and
 succeeded on the allocator's retry.
+
+### Molegrad on Anima: 9% faster, the nesting no longer earns its time
+
+2026-10-31, bs16 x 768, `rank_fraction 0.05`, offloaded checkpoints, per-block
+compile, seeded pairs on one tree (usuitrack `projected-grads` = `lab` plus
+molegrad; ai-toolkit `usuitrack-molegrad` on upstream `e9c72b7`). s/step over
+shape-matched steady steps, peak allocated per step:
+
+| arm | nested attn1/attn2 | s/step | peak GiB |
+|---|---|---:|---:|
+| `G`, `release_matrix_grads` | yes | 12.05 | 7.58 |
+| molegrad | yes | 10.93 | 8.09 |
+| `G`, `release_matrix_grads` | no | 11.0 | 9.24 |
+| molegrad | no | 9.97 | 9.29 |
+
+Unnested, molegrad costs 0.05 GiB over the release path: its probe sketches.
+Both carry the projections from backward into the step, 0.61 GiB (`Z`,
+tangent) against 0.67 (`Z`, aim, probes). Nested, molegrad costs 0.5 GiB more,
+and that is not `G`: a CPU eager count of weight-shaped matmuls in a steady
+backward under the trainer's checkpoints finds 452 for `G` and 0 for molegrad,
+nested or flat. Which interaction of the custom Function with the nested
+checkpoint holds it is not located. The nesting costs ~1 s/step on both paths.
+
+The peak is the end of backward, inside block 0's recompute: resident memory
+grows 0.66 GiB through backward (24 MB per block of held projections), and each
+block's recompute and backward adds ~4.04 GiB on top (9.29 at block 0, 8.6 at
+block 27); a block's forward peaks at 8.52. The offloaded checkpoint inputs
+never return to the card together.
+
+Whole-model compile does not reach Anima: its forward calls
+`trainable_model.transformer`, not the `sd.unet` the trainer compiles, so the
+arm runs eager (16.4 s/step, 8.65 GiB). Compiled in place, the graph breaks at
+the offload's saved-tensor hooks and runs at the same speed; without offload at
+bs8 x 2 it compiles, but a recompile took 22 minutes. Molegrad also compiles
+slower per new bucket shape than `G` (44 s against 12 s). One 576 MiB request
+per run fails and succeeds on the allocator's retry, as above.
 
 ### Run 20 against run 18: what the fleet reads say about lr
 
@@ -1277,6 +1314,7 @@ ten, "S2 ties `G` through 1k steps"). LFM3 has no seed pair.
 | 26 `controller` | run 24 with the polar mask and the lr controller (`exp` form, closed), ceiling `1.4e-4`, 960 steps = 5 epochs | very stable, barely changed, arguably above base (user); vote ~0 from ~100 |
 | 27 `last_polar` | bs16, `beta 0.95`, polar-first with the mean of this and the last polar where signs agree (branch `last-polar`), `2.8e-5`, cosine to 10%, 960 steps | improved (user); `relative_step` peaked ~1.3e-5, averaged 7.3e-6 |
 | 28 `moment_first` | run 27's shape on moment-first (`lab` `27e09de`), `1.3e-5` flat, cosine over the last epoch to 10% | samples pending (user); `relative_step` 1.15e-5 on the plateau, 12% under `lr`, against LFM's exact match -- unexplained; fleet cosine -0.04 to +0.03, persistence within 0.003, capture 0.785 to 0.828; 3.2 h, no OOM |
+| 29 `molegrad` | run 28's shape under molegrad, `rank_fraction 0.05`, no nested checkpoint, warmup 50 then linear `2e-5` to `1e-5`, 960 steps | running 2026-10-31; 9.95 s/step, 9.18 GiB at step 50 |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
