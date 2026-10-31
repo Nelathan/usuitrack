@@ -339,8 +339,10 @@ k    a         b         c
 
 The result `O_t` is an approximate leverage-balanced polar direction, not an
 exact SVD polar factor: at five iterations its orthogonality residual is ~1e-2.
-Its polar factor has norm `sqrt(r)`; scaled by `1/sqrt(r)`, every step is a
-unit.
+A moment that fills its `r` planes has a polar factor of norm `sqrt(r)`;
+scaled by `1/sqrt(r)`, its step is a unit. One that fills only `k` of them,
+a frame wider than the gradient's rank, has norm about `sqrt(k)`: five
+iterations leave a plane far below the top near zero.
 
 **Decision (projected balancing):** Aurora's balancing chooses direction inside
 the retained update space. UsuiTrack, not Aurora, owns momentum, basis motion,
@@ -352,7 +354,10 @@ The step is sized against the weight it lands on. `O_t` is a unit and the lift
 is an isometry, so
 
 $$U_t=\|W_{t-1}\|_F\,\Lambda_{Q_t}(O_t),\qquad
-\frac{\|U_t\|_F}{\|W_{t-1}\|_F}=1.$$
+\frac{\|U_t\|_F}{\|W_{t-1}\|_F}=1$$
+
+for a moment that fills its rank, and `sqrt(k/r)` for one that fills `k` of
+`r` planes (step 7).
 
 The learning rate is the relative change per step -- one unit in every module,
 whatever its shape, rank or size: LAMB's trust ratio (You et al. 2019, arXiv
@@ -557,7 +562,7 @@ non-finite gradients are counted from the raw norm.
 
 | key | what it measures |
 |---|---|
-| `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped (step 8): a check that nothing changed the step size |
+| `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped and every moment fills its rank (step 8); below it by the rank the moments leave empty |
 | `grad_capture` | `||G_o Q|| / ||G||`: the share of the gradient's magnitude the frame catches. Reads the basis rather than the model |
 | `grad_moment_cosine` | this step's unit projected gradient against the moment *before* the blend, so the reading is not self-referential. Positive: the step under-travels and the gradient keeps its direction; negative: it overshoots |
 | `tangent_live_fraction` | the share of planes with `sigma_i > sqrt(r eps) sigma_max` (step 4). Below `1` the aim is rank-collapsed against the rank it was given: the rank is too large for what this batch size resolves |

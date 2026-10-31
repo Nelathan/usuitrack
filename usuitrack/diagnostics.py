@@ -20,7 +20,8 @@ from torch import Tensor
 READS = {
     "relative_step": (
         "||dW|| / ||W|| over all matrices, before rounding. Equals lr when every matrix "
-        "stepped; anything else means a code change moved the step size. A sanity check."
+        "stepped and every moment fills its rank; a matrix whose gradient carries k of r "
+        "planes steps at sqrt(k/r) of lr and pulls the read down."
     ),
     "grad_capture": (
         "||G Q|| / ||G||: the share of the gradient the tracked frame holds. Falls when "
