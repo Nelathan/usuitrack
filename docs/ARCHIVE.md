@@ -1093,6 +1093,16 @@ direction alone; the tracker is magnitude-free too (the tangent is divided by
 its mean Rayleigh quotient). A supervised-token weight would move a step's
 share by ~8%; not run.
 
+## CLOSED -- a rank-deficient moment steps short, and that is left alone
+
+Opened and closed 2026-10-31 (FACTS, "`relative_step` under `lr` on Anima").
+A moment that fills `k` of `r` planes steps at `sqrt(k/r)` of `lr`; on Anima
+that is the AdaLN pairs alone, a LoRA whose gradient is a batch of timestep
+embeddings, and it sets the fleet `relative_step` at 0.83-0.89 `lr`. Noted and
+ignored (user): every `Z` that matters is healthy. The only remedy would be to
+freeze AdaLN or give it to the fallback, a trainer config, not the optimizer.
+SPEC steps 7-8 and the `relative_step` read now say when the step is a unit.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

@@ -60,10 +60,14 @@ against 3.71 s/step (FACTS, "S2 ties `G` through 1k steps"). Open:
 
 - Anima under molegrad, through ai-toolkit: the user's model, the release's
   deciding check. It trains, 9% faster than the release path at its memory
-  without the nested attention checkpoint (FACTS, "Molegrad on Anima"); run 29
-  is the sample verdict. Open beside it: whether the nesting goes from
-  `anima.py` for the `G` path too (it fits unnested at rank 0.05), and what
-  holds molegrad's extra 0.5 GiB when nested.
+  without the nested attention checkpoint (FACTS, "Molegrad on Anima"), and
+  run 29's samples at step 192 are good, some better than run 28's (user,
+  2026-10-31). Open beside it: whether accumulation without offloading beats
+  offloading at bs16 (bs8 x 2, and bs4 x 4, the batch Anima's buckets were
+  sized for), and whether the nesting goes from `anima.py` for the `G` path
+  too (it fits unnested at rank 0.05). Batch is the noise lever: `beta` only
+  buys staleness, lower `lr` is the other lever (user, 2026-10-31); for scale,
+  lodestone trains Chroma at bs64.
 - The early lead: target under `G` at all ten evals, 1.4e-3 at step 100, above
   the LFM3 null pair (FACTS, "Run-to-run noise"). A second seed of both arms
   says whether the diagonal aim buys it.
