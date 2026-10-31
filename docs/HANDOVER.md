@@ -62,10 +62,12 @@ release files onto it, prepared locally after your review; you push.
 Molegrad toward release, in order:
 1. Your review of the commits below (2026-10-31).
 2. `projected-grads` onto `lab`, after your go.
-3. Anima under molegrad through ai-toolkit (PLAN S2): the deciding check.
-   Unchecked there: whether `block_compile`, activation offloading and its
-   gradient clipping (if any) sit with frozen weights and a class swap; the
-   DiT's Linears carrying biases is now fine.
+3. Run 29, Anima under molegrad (PLAN S2): your sample read. Launched
+   2026-10-31 ~19:55 through `outputs/anima-mole/run29.sh` (the seeded runner,
+   `NESTED=0`), ~3 h; output `/mnt/luna/ai/output/anima_usuitrack_29_molegrad`,
+   log `outputs/anima-mole/run29.log`. Probes in FACTS, "Molegrad on Anima".
+   Your call: drop the nested attention checkpoint from `anima.py` for the `G`
+   path too; until then the runner patches it out.
 4. The early lead on LFM3, if you want it: a second seed of both arms.
 
 Still open:
@@ -75,6 +77,18 @@ Still open:
 - The release `rank_fraction` default is still 0.1; the harness runs 0.05.
 
 ## To review
+
+ai-toolkit, branch `usuitrack-molegrad` (2026-10-31): our 19 commits rebased
+onto upstream `e9c72b7`; `usuitrack-release-surface` is the pre-rebase branch.
+Conflicts: the vae guard (ours handles None), an import, and `SDTrainer.py`
+taken whole from upstream, since our branch's net change there was empty (it
+brings upstream's 1/n accumulation scaling). Then:
+- `7d94c45` `molegrad` in `optimizer_params`, attached after the training
+  placement; the raw-norm check collects first.
+- `fc46f38` `warmup_stable_linear_decay`.
+- Config `config/anima_usuitrack_29_molegrad.yaml` (untracked, like the others).
+
+usuitrack: `ebf58b7` FACTS "Molegrad on Anima", `e6e3fa6` PLAN S2.
 
 On `lab`, oldest first, each read by a review subagent:
 - `8e226b1` release surface: package, tests, lab diagnostics, harness.
