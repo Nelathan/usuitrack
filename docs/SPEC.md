@@ -465,11 +465,14 @@ that diagonal, which is the selection the loss makes between tokens: rows past
 the last supervised token have `delta_t = 0`, so it is also the mask. On the
 left the aim is `delta^T delta Q`, which captures as much as `G`'s Gram. On
 LFM3 the two aims tie on loss through 1k steps (`FACTS.md` on `lab`, "S2 ties
-`G` through 1k steps"); the `G` path keeps step 4's. Under the diagonal aim
-`tangent_live_fraction` reads near 1: it has energy in every frame direction.
+`G` through 1k steps"); the `G` path keeps step 4's. The diagonal aim has
+energy in every frame direction, so more planes are live and more of the frame
+turns: 0.996 against 0.845 on LFM3.
 
-`||G||_F^2` is estimated as `||G P||_F^2 / 16`, unbiased; like step 1's norm
-it is telemetry (`grad_capture`) and the non-finite flag, and applied to
+`||G||_F^2` is estimated as `||G P||_F^2 / 16`, unbiased; across a model's
+matrices it reads `||G||` to within 1% (`FACTS.md` on `lab`, "Training without
+`dW`"), so `grad_capture` reads the same under molegrad as on the `G` path.
+Like step 1's norm it is telemetry and the non-finite flag, and applied to
 nothing. All three leaves are token sums, so micro-batches accumulate exactly.
 
 A matrix with no frame fits it in its first backward from that micro-batch's
