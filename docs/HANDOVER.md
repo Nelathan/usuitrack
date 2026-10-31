@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28, updated 2026-10-30, late. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-10-31, evening. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
@@ -14,23 +14,24 @@ sizes, the release defaults to `4e-5`, LFM3's; S3 and S4, frames track from
 the streams, the input side from `X` weighted by `delta`'s token norms; the
 residual writers keep their output side; a live aim does not make rank 0.1 pay.
 
-**S2 is built**, on branch `projected-grads` (rebased onto `lab`; no
-upstream): `--projected-grads` trains with no `dW` and ties `G`'s aim on loss.
-Its leaves are expanded zeros (no storage; backward peak equals `G`'s), each
-frame is fitted in its matrix's first backward, so no step ever holds `G`, and
-`--grad-accum-steps` works under it (1.2 GB less at bs8 x 2, 6e-4 from the
-unsplit step). M1 closed: the magnitude goes at `Z`. The weight write is
-compiled on `lab` (-0.22 s/step), not released (PLAN R1).
+**Molegrad is in the package**, on branch `projected-grads` (rebased onto
+`lab`; no upstream): `Molegrad(model, optimizer)`, opt-in beside the `G` path
+(user's choice A, 2026-10-31), SPEC "Molegrad", README. No `dW`, the diagonal
+aim, no step ever holds `G`, accumulation works; ties `G` through 1k steps on
+LFM3 at 3.25 against 3.71 s/step. Resume is tested; a review subagent's five
+silent bugs are fixed, each with a test. M1 closed: the magnitude goes at `Z`.
+The weight write is compiled on `lab` (-0.22 s/step), not released (PLAN R1).
 
 - **Package:** `frame.py` (fit, Oja aim, constant-angle turn, retraction),
-  `polar.py` (balanced Newton-Schulz), `optimizer.py`, `diagnostics.py`,
-  `stochastic.py`. Left is right on the transpose; state per matrix is `frame`
+  `polar.py` (balanced Newton-Schulz), `optimizer.py`, `molegrad.py`,
+  `diagnostics.py`, `stochastic.py`. Left is right on the transpose; state per matrix is `frame`
   and `moment`. **Old checkpoints do not load** (a `left` moment is now
   `[n,r]`). Polar and turn run per matrix; only the `[r,r]` tangent-Gram `eigh`
   is stacked, by rank (FACTS: 0.887 s/step at 350M; LFM3's peak is backward).
 - **Surface:** `lr`, `beta`, `weight_decay`, `rank_fraction`, `side`,
-  `release_matrix_grads`, `diagnostics`. Accumulation works without release,
-  raises with it. The lr schedule is the trainer's.
+  `release_matrix_grads`, `diagnostics`; `Molegrad` wraps a model and the
+  optimizer. Accumulation works without release, raises with it, works under
+  molegrad. The lr schedule is the trainer's.
 - **Telemetry:** on/off, six self-describing reads (`READS`). Transport,
   concentration, persistence and role breakouts are `LabDiagnostics`, installed
   by the harness; `transport_spin` is gone.
@@ -45,7 +46,7 @@ compiled on `lab` (-0.22 s/step), not released (PLAN R1).
   group index after `load_state_dict`; hooks missing on later param groups;
   `pop()` making two transfers; a NaN gradient turning `grad_capture` NaN; lab
   frame-motion reads sampling only the first param group.
-- **Verified:** 85 tests on `projected-grads`, 79 on `lab`; golden trajectories from the old code reproduced to
+- **Verified:** 93 tests on `projected-grads`, 79 on `lab`; golden trajectories from the old code reproduced to
   ~5e-6 relative; `release-clean-s1`, the standard arm: 1.652230 / 3.057482 against the
   reference 1.652199 / 3.058867, 1.133 s/step (FACTS).
   `examples/train_pytorch.py` and `train_hf_trainer.py` run in both modes.
@@ -58,21 +59,19 @@ release files onto it, prepared locally after your review; you push.
 
 ## Next
 
-Done overnight 2026-10-30/31: the `[Q | P]` join (40 ms in the microbench,
-inside a 100-step run's spread); S2 against `G` at 1k steps, under it on target
-at every eval, 1.4e-3 at 100 and within 4.4e-4 from 300, 3.25 against 3.71
-s/step (FACTS).
-
-Next: PLAN N2 needs `||W||` per role; the harness logs only the whole model's
-norm, flat at +0.01% over 1k. Not a decay arm: decay is not the tool for a
-Muon-type step (user).
+Molegrad toward release, in order:
+1. Your review of the commits below (2026-10-31).
+2. `projected-grads` onto `lab`, after your go.
+3. Anima under molegrad through ai-toolkit (PLAN S2): the deciding check.
+   Unchecked there: whether `block_compile`, activation offloading and its
+   gradient clipping (if any) sit with frozen weights and a class swap; the
+   DiT's Linears carrying biases is now fine.
+4. The early lead on LFM3, if you want it: a second seed of both arms.
 
 Still open:
-- S2 onto `lab`: `ProjectedLinear` is a lab feature, not the optimizer (it
-  swaps the user's module class and freezes weight grads).
-- Triton: the write as one pass (77 ms against a 12 ms floor); S2's backward
-  reading `X` and `delta` once. Total ceiling ~7% of the step, likely half.
-  The CUDA graph is optional; clean code first.
+- PLAN N2 needs `||W||` per role; the harness logs only the whole model's
+  norm. Not a decay arm (user).
+- Triton and the CUDA graph: optional, clean code first.
 - The release `rank_fraction` default is still 0.1; the harness runs 0.05.
 
 ## To review
@@ -152,6 +151,22 @@ Under your handover of 2026-10-29 night, oldest first:
 - `7bc2422` harness: accumulation splits the step's batch, every token
   weighted the same.
 - `f07ebd4` FACTS/PLAN: accumulation on matched rows.
+
+2026-10-31, `projected-grads`, oldest first:
+- `f7e64e2` S2 moves into the package, behaviour unchanged.
+- `1240cfa` resume: the frame lives only in optimizer state; test.
+- `ab512be` `step()` collects the projections; closure raises.
+- `300e961` bias support.
+- `5ada349` refusals for what it cannot project.
+- `cc4d745` SPEC/README section.
+- `63467b3` review fixes: zero_grad discards leaves, a Linear called twice at
+  its fit raises, the fit sanitizes, `step(None)`, ties with any module,
+  probes per dtype. Bundled as one review response; each has its own test.
+- `6845808` rename: `Molegrad`, `MoleLinear`, `--molegrad`, the diagonal aim.
+- `5bf13a5` FACTS correction: the 1k tie figure.
+- `e4024fd` FACTS/AGENTS: run-to-run noise (D6) from 273 runs.
+- this handover and PLAN S2.
+- Runs: `s2-pkg-100`, `s2-review-100` match `s2-join-100` to 1e-4.
 
 Overnight 2026-10-30/31, `projected-grads`:
 - `447313d`, `dd53c2f` this handover.

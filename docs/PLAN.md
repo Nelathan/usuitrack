@@ -52,25 +52,27 @@ this one's prior.
 ### S2. Weight gradients without `G` (molegrad)
 
 The goal (user, 2026-10-30): a FLOP win under checkpointing, not a VRAM win.
-`Z` and the exact Oja action come from `X` and `delta` in four skinny GEMMs
-wherever autograd would form `dW`, at ~0.1 of its FLOPs at rank 0.05. Design,
-wiring candidates and the order of work: `docs/PROJECTED_ACTIVATION_2.md`.
-The input-side frame tracks from `X` weighted by `delta`'s token norms
-(ARCHIVE, "frames track from the streams"): its action `X^T (w^2 * X Q)` reuses
-the `X Q` that `Z` needs, one GEMM where the exact action takes two. Built as
-`--molegrad` (FACTS, "Training without `dW`"): compiled, it collects
-the whole `dW` cost and ties `G`'s aim on loss through 1k steps (FACTS, "S2
-ties `G` through 1k steps"). Open:
+Built as `Molegrad` in the package (SPEC, "Molegrad"), opt-in beside the `G`
+path (user, 2026-10-31): `Z` exact and the diagonal aim from `X` and `delta`,
+~0.1 of `dW`'s FLOPs at rank 0.05; design notes in
+`docs/PROJECTED_ACTIVATION_2.md`. On LFM3 it ties `G` through 1k steps at 3.25
+against 3.71 s/step (FACTS, "S2 ties `G` through 1k steps"). Open:
 
+- Anima under molegrad, through ai-toolkit: the user's model, the release's
+  deciding check.
+- The early lead: target under `G` at all ten evals, 1.4e-3 at step 100, above
+  the LFM3 null pair (FACTS, "Run-to-run noise"). A second seed of both arms
+  says whether the diagonal aim buys it.
 - The next saving (FACTS, "Where the S2 step's time goes"). The weight write
   is compiled on `lab` (R1 asks about the release). Past it the step is
   host-bound, ~155 ms of idle GPU in the optimizer and ~37 ms in `prepare`,
   which only a CUDA graph over the post-backward work reaches. That needs the
   release diagnostics to accumulate in place with static counts, `lr` as a
-  device tensor, and S2's leaves to keep their grads; optional (user,
+  device tensor, and molegrad's leaves to keep their grads; optional (user,
   2026-10-30: ~5%, clean code first).
-- Accumulation works under S2 (FACTS, "S2 accumulates"), 6e-4 from the
-  unsplit step; which may answer S1 for the harness.
+- Accumulation works under molegrad (FACTS, "S2 accumulates"), 6e-4 from the
+  unsplit step, holding no gradient: S1's answer for a user who opts in. S1
+  stays open for the `G` path.
 
 ---
 
