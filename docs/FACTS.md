@@ -318,6 +318,28 @@ bs8 x 2 it compiles, but a recompile took 22 minutes. Molegrad also compiles
 slower per new bucket shape than `G` (44 s against 12 s). One 576 MiB request
 per run fails and succeeds on the allocator's retry, as above.
 
+### `relative_step` under `lr` on Anima is AdaLN's empty planes
+
+`unit_polar` scales the polar factor by `1/sqrt(r)`, as if the moment filled
+every plane; five Newton-Schulz iterations leave a plane far below the top near
+zero, so a moment that fills `k` of `r` planes steps at `sqrt(k/r)` of `lr`.
+Polar norms of saved moments, by role (`optimizer.pt`, 2026-10-31):
+
+| role | run 28, rank 0.025, step 960 | run 29, rank 0.05, step 192 |
+|---|---:|---:|
+| attention, FF, stream ends | 0.996-1.001 | 0.995 |
+| AdaLN `linear_1` (85) | 0.690 (r 18) | 0.589 (r 36) |
+| AdaLN `linear_2` (84) | 0.887 (r 31) | 0.695 (r 63) |
+| fleet, predicted / read | 0.896 / 0.883-0.890 | 0.829 / 0.827 |
+
+AdaLN's moment fills about 9-12 planes of `linear_1` and 24-30 of `linear_2`,
+the low rank a batch of timestep embeddings gives ("Where the step lands, per role"), so a
+higher rank only adds empty planes. AdaLN holds 52% of `sum ||W||^2` (its RMS is
+2.5-4x the bulk's), so it sets the fleet read: per-role norms weighted by each
+role's share of `sum ||W||^2` (run 29's checkpoint) predict the read to 0.2%.
+Run 28's 12% gap is this. The `relative_step` read says it equals `lr` whenever
+every matrix stepped; that holds only where every moment fills its rank.
+
 ### Run 20 against run 18: what the fleet reads say about lr
 
 Run 20 (bs8, `beta 0.98`, caution, `lr 9e-4`) took a relative step of 2.0e-5
@@ -1313,8 +1335,8 @@ ten, "S2 ties `G` through 1k steps"). LFM3 has no seed pair.
 | 25 `outside_bs16` | run 24 with agreement outside the step, `6.84e-6` = run 24's step | moved less; different rather than worse (user); cosine zero at ~60 |
 | 26 `controller` | run 24 with the polar mask and the lr controller (`exp` form, closed), ceiling `1.4e-4`, 960 steps = 5 epochs | very stable, barely changed, arguably above base (user); vote ~0 from ~100 |
 | 27 `last_polar` | bs16, `beta 0.95`, polar-first with the mean of this and the last polar where signs agree (branch `last-polar`), `2.8e-5`, cosine to 10%, 960 steps | improved (user); `relative_step` peaked ~1.3e-5, averaged 7.3e-6 |
-| 28 `moment_first` | run 27's shape on moment-first (`lab` `27e09de`), `1.3e-5` flat, cosine over the last epoch to 10% | samples pending (user); `relative_step` 1.15e-5 on the plateau, 12% under `lr`, against LFM's exact match -- unexplained; fleet cosine -0.04 to +0.03, persistence within 0.003, capture 0.785 to 0.828; 3.2 h, no OOM |
-| 29 `molegrad` | run 28's shape under molegrad, `rank_fraction 0.05`, no nested checkpoint, warmup 50 then linear `2e-5` to `1e-5`, 960 steps | running 2026-10-31; 9.95 s/step, 9.18 GiB at step 50 |
+| 28 `moment_first` | run 27's shape on moment-first (`lab` `27e09de`), `1.3e-5` flat, cosine over the last epoch to 10% | samples pending (user); `relative_step` 1.15e-5 on the plateau, 12% under `lr`: AdaLN's empty planes ("`relative_step` under `lr` on Anima"); fleet cosine -0.04 to +0.03, persistence within 0.003, capture 0.785 to 0.828; 3.2 h, no OOM |
+| 29 `molegrad` | run 28's shape under molegrad, `rank_fraction 0.05`, no nested checkpoint, warmup 50 then linear `2e-5` to `1e-5`, 960 steps | samples at 192 good, some better than 28's, the rest as good, all different (user); running. 9.6-10.0 s/step, peak 9.18-9.30 GiB, `optimizer.pt` 483 MB. Against 28, with rank, lr and aim all changed (steps 50-345): capture 0.86-0.87 against 0.79-0.81, over the 16-probe `||G||` estimate (bias under 1% on LFM3, unmeasured here); live fraction rising 0.48 to 0.55 against a flat 0.40, so more of the frame turns; `relative_step` 0.83 `lr` (AdaLN, above); `projected_grad_norm`, cosine and loss inside each other's window noise |
 
 Sample reads above are the user's, from wandb, 2026-09-28. Run 15 against run 13
 at step ~300 is not matched on schedule: run 15 decays from 225 and run 13 from
