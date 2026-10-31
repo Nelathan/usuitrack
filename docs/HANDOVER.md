@@ -14,13 +14,13 @@ sizes, the release defaults to `4e-5`, LFM3's; S3 and S4, frames track from
 the streams, the input side from `X` weighted by `delta`'s token norms; the
 residual writers keep their output side; a live aim does not make rank 0.1 pay.
 
-**Molegrad is in the package**, on branch `projected-grads` (rebased onto
-`lab`; no upstream): `Molegrad(model, optimizer)`, opt-in beside the `G` path
+**Molegrad is in the package and on `lab`** (fast-forwarded from
+`projected-grads` 2026-10-31; old `lab` was `068d85c`): `Molegrad(model, optimizer)`, opt-in beside the `G` path
 (user's choice A, 2026-10-31), SPEC "Molegrad", README. No `dW`, the diagonal
 aim, no step ever holds `G`, accumulation works; ties `G` through 1k steps on
 LFM3 at 3.25 against 3.71 s/step. Resume is tested; a review subagent's five
 silent bugs are fixed, each with a test. M1 closed: the magnitude goes at `Z`.
-The weight write is compiled on `lab` (-0.22 s/step), not released (PLAN R1).
+The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
 
 - **Package:** `frame.py` (fit, Oja aim, constant-angle turn, retraction),
   `polar.py` (balanced Newton-Schulz), `optimizer.py`, `molegrad.py`,
@@ -46,7 +46,7 @@ The weight write is compiled on `lab` (-0.22 s/step), not released (PLAN R1).
   group index after `load_state_dict`; hooks missing on later param groups;
   `pop()` making two transfers; a NaN gradient turning `grad_capture` NaN; lab
   frame-motion reads sampling only the first param group.
-- **Verified:** 93 tests on `projected-grads`, 79 on `lab`; golden trajectories from the old code reproduced to
+- **Verified:** 89 tests on `lab` (CPU, torch 2.14); golden trajectories from the old code reproduced to
   ~5e-6 relative; `release-clean-s1`, the standard arm: 1.652230 / 3.057482 against the
   reference 1.652199 / 3.058867, 1.133 s/step (FACTS).
   `examples/train_pytorch.py` and `train_hf_trainer.py` run in both modes.
@@ -57,26 +57,24 @@ The weight write is compiled on `lab` (-0.22 s/step), not released (PLAN R1).
 `main` is reset to `origin/main`. The release is one squashed commit of `lab`'s
 release files onto it, prepared locally after your review; you push.
 
-Before it (2026-10-31):
-- Your calls: R1 (the weight write is `@torch.compile`d in the package, while
-  README says pure PyTorch); the `rank_fraction` default (0.1; LFM3 and Anima
-  run 0.05); `grad_capture` under molegrad (an estimate; dropping it leaves
-  the probes no consumer but the non-finite count, which `Z` can carry).
-- README's headline (LoRA rank 44 against rank 128 on LFM2.5) is the
-  prerelease optimizer's (`docs/prerelease/PLAN.md`): re-measure on today's,
-  LFM3 standard arm, LoRA, `G` and molegrad (the harness has the LoRA arm).
-- The squash takes a curated file set: `lab`'s `pyproject.toml` (torch
-  2.15 pin, local wheel, lab group) and the harness tests stay behind; `main`'s
-  suite must pass on its own.
-- Run 29's end and the accumulation probe; the suite on the GPU (today's runs
-  were CPU-only, the card was busy); `examples/train_unsloth.py` run or cut.
+Decided 2026-10-31 (you): the write is eager, `rank_fraction` 0.05,
+`grad_capture` under molegrad is the read, `lab` on torch 2.14 with
+`causal-conv1d` optional. Before the squash:
+- PLAN R2, the README headline on today's optimizer: queued in
+  `outputs/headline/queue5.sh` behind the Anima queue, four 1k LFM3 runs
+  (`head-g-1k`, `head-mole-1k`, `head-lora56-{1e4,2e4}-1k`), ~4 h; logs and
+  `status` in `outputs/headline/`. Then README's Result section.
+- The squash takes a curated file set: `main`'s `pyproject.toml` keeps
+  `torch>=2.1` and no groups; the harness tests (`test_llm_harness`,
+  `test_activation_frames`, `test_stream_frames`, `test_lab_diagnostics`) stay
+  behind; `main`'s suite must pass on its own.
+- The suite on the GPU once the card is free; `examples/train_unsloth.py` run
+  (env in `outputs/unsloth/env`) or cut.
 
 ## Next
 
 Molegrad toward release, in order:
-1. Your review of the commits below (2026-10-31).
-2. `projected-grads` onto `lab`, after your go.
-3. Run 29, Anima under molegrad (PLAN S2): samples at 192 good, some better
+1. Run 29, Anima under molegrad (PLAN S2): samples at 192 good, some better
    than run 28's (you). Launched 2026-10-31 ~19:55 through
    `outputs/anima-mole/run29.sh` (the seeded runner, `NESTED=0`), ends ~22:40;
    output `/mnt/luna/ai/output/anima_usuitrack_29_molegrad`, log
@@ -85,13 +83,13 @@ Molegrad toward release, in order:
    offloading, bs8 x 2 and bs4 x 4, 20 steps each, against run 29's bs16
    offloaded steps. Your call: drop the nested attention checkpoint from
    `anima.py` for the `G` path too; until then the runner patches it out.
-4. The early lead on LFM3, if you want it: a second seed of both arms.
+2. The release steps above.
+3. The early lead on LFM3, if you want it: a second seed of both arms.
 
 Still open:
 - PLAN N2 needs `||W||` per role; the harness logs only the whole model's
   norm. Not a decay arm (user).
 - Triton and the CUDA graph: optional, clean code first.
-- The release `rank_fraction` default is still 0.1; the harness runs 0.05.
 
 ## To review
 
@@ -203,6 +201,16 @@ Under your handover of 2026-10-29 night, oldest first:
 - `efa4e82` SPEC/READS: a moment that fills k of r planes steps at sqrt(k/r).
 - `3c5b51f` FACTS: AdaLN's empty planes set `relative_step`; run 29 interim.
 - `1848f8e` PLAN/ARCHIVE: S2's Anima bullet; the short step closed as ignored.
+- `9aebd09` this handover; then `lab` fast-forwarded here.
+
+2026-10-31 night, on `lab`, your release calls, yours to own:
+- `a20c2f2` the weight write runs eager; the compile tests and recompile guard go.
+- `79ef159` `rank_fraction` defaults to 0.05 (code, SPEC, README).
+- `bac2c80` SPEC: rank sets how far only where the moment leaves planes empty.
+- `01b326f` SPEC Molegrad: capture reads as on `G`; liveness is how much turns.
+- `9c726fc` FACTS: run 29's capture stands as read.
+- `e4dfc47` torch 2.14, `causal-conv1d` the optional `lfm25` group (uv.lock).
+- `3cf0e60` AGENTS for it; `6f775ae` PLAN/ARCHIVE: R1 closed, R2 opened.
 - this handover.
 
 Overnight 2026-10-30/31, `projected-grads`:
@@ -223,8 +231,8 @@ diagnostics, no role classes, always `StochasticAdamW` for the fallback, reads
 `_pending`). Its config is gitignored, so the record is here:
 `config/train_full_fine_tune_anima_usuitrack.yaml` lost `rank: 64` and
 `compile_tensor_kernels: true`, and `diagnostics: full` became `true`. It now runs
-at the default `rank_fraction` 0.1; runs 27 and 28 used 0.025. **Set it before
-the next Anima run.** The numbered run configs keep their dead keys as records.
+at the default `rank_fraction`, now 0.05, as run 29; runs 27 and 28 used 0.025.
+The numbered run configs keep their dead keys as records.
 
 ## Open, not in PLAN
 
@@ -234,15 +242,13 @@ the next Anima run.** The numbered run configs keep their dead keys as records.
 
 ## Environment
 
-- Python 3.14 (gitignored `.python-version`), torch `2.15.0+cu132`. No
-  published `causal-conv1d` wheel covers torch 2.15 (astral stops at 2.14,
-  upstream 1.7.0 has no cp314), so `pyproject.toml` points at a **local build**:
-  `outputs/wheels/causal_conv1d-1.7.0-cp314-cp314-linux_x86_64.whl`, sm_89 only,
-  this machine only; recipe `outputs/torch215/build.sh` (nvcc 13.3, gcc-15,
-  ~10 min). Only LFM2.5's conv layers use it. Verified on 2.15: 72 tests,
-  golden <= 6.2e-6, `torch215-std-s1` 1.651945 / 3.057546 at 0.895 s/step
-  against `release-eighstack-s1` 1.652025 / 3.059937 at 0.887, LFM3 50 steps
-  equal to 2.14 to 6e-5. Undo: `git revert` the switch commit, `uv sync`.
+- Python 3.14 (gitignored `.python-version`), torch `2.14.1+cu132`, back from
+  2.15 on 2026-10-31 (`e4dfc47`) so everything installs from wheels.
+  `causal-conv1d` is the optional `lfm25` group, astral's wheel; only LFM2.5's
+  conv layers use it, LFM3 has its own kernels. The two minors read the same:
+  `torch215-std-s1` 1.651945 / 3.057546 against `release-eighstack-s1`
+  1.652025 / 3.059937 on 2.14, LFM3 50 steps equal to 6e-5. The local 2.15
+  build (`outputs/wheels/`, `outputs/torch215/build.sh`) is retired.
 - Discord, zapzap and Zed were closed for the card (allowed; never the desktop
   or ghostty).
 - ai-toolkit installs `-e ../usuitrack`: it runs whatever this tree holds.
