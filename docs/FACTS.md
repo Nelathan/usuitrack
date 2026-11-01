@@ -1331,6 +1331,45 @@ same-seed delta at one eval is not a claim; a sign held across every eval
 is weak evidence (molegrad sits 9e-5 to 1.4e-3 under `G` on target at all
 ten, "S2 ties `G` through 1k steps"). LFM3 has no seed pair.
 
+### UsuiTrack against a memory-matched LoRA: LoRA forgets twice as much
+
+2026-11-01, PLAN R2. The standard arm at 1k steps, seed 1, release code (eager
+write): `head-g-1k`, `head-mole-1k` (`--molegrad`), and LoRA at rank 56, alpha
+56, on the same matrix set at `1e-4` and `2e-4` (`head-lora56-{1e4,2e4}-1k`).
+Rank 56 makes adapters plus both Adam moments the size of rank 0.05's frame
+plus moment. Target is SYNTH, source the FineWeb-mix shard; source starts at
+2.649378 for every arm.
+
+| arm | target @1k | source @1k | source rise | s/step | peak | state |
+|---|---|---|---|---|---|---|
+| `G` | 1.322008 | 2.699799 | 0.050 | 4.09 | 7.48 GB | 352.0 MB |
+| molegrad | 1.321333 | 2.699158 | 0.050 | 3.66 | 7.47 GB | 352.0 MB |
+| LoRA `1e-4` | 1.326224 | 2.737972 | 0.089 | 3.34 | 7.64 GB | 347.4 MB |
+| LoRA `2e-4` | 1.323579 | 2.761907 | 0.113 | 3.33 | 7.64 GB | 347.4 MB |
+
+Target by eval, `G` minus LoRA (negative: `G` ahead):
+
+| step | 100 | 200 | 300 | 400 | 500 | 700 | 900 | 1000 |
+|---|---|---|---|---|---|---|---|---|
+| LoRA `1e-4` | +3.4e-2 | +7.9e-3 | +2.4e-3 | -6e-5 | -2.1e-3 | -3.6e-3 | -4.4e-3 | -4.2e-3 |
+| LoRA `2e-4` | +4.9e-2 | +1.8e-2 | +9.9e-3 | +7.2e-3 | +5.1e-3 | +2.2e-3 | -4.7e-4 | -1.6e-3 |
+
+LoRA leads target early and loses the lead, by step 400 at `1e-4` and 900 at
+`2e-4`; at 1k `G` is ahead of both, by 4.2e-3 and 1.6e-3, against a 6e-4
+floor. Source decides it: LoRA's source rise is 1.8x UsuiTrack's at `1e-4` and
+2.2x at `2e-4`, 3.8e-2 and 6.2e-2 past it, 38 and 62 times the floor.
+Doubling LoRA's lr bought 2.6e-3 of target for 2.4e-2 of source. LoRA takes
+9% less time per step than molegrad and 18% less than `G`, and peaks 0.16 GB
+higher: its adapters live in the activations, UsuiTrack's state only in the
+optimizer.
+
+Molegrad sits under `G` on target at all ten evals again, 2.1e-4 to 1.3e-3,
+with other rounding draws than "S2 ties `G` through 1k steps" but the same
+seed. Both arms run 0.38-0.41 s/step slower than in that section, which had
+the compiled write (0.22 s/step, "The compiled weight write saves 0.22
+s/step") on torch 2.15, against eager on 2.14 here; the rest is not split.
+`G` reproduces its loss to 1.3e-4 target and 7.9e-4 source.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
