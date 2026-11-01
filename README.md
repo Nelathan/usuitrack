@@ -13,17 +13,28 @@ subspace itself adapts as training proceeds.
 
 ## Result
 
-Single controlled comparison, matched matrix-parameter set, matched optimizer
-state budget, `LiquidAI/LFM2.5-350M-Base`, 1k steps:
+One controlled comparison on `LiquidAI/LFM3-1.7B-Base`, 1k steps at batch 16
+and sequence 1024, seed 1, the same matrix parameters trained by each arm and
+the same optimizer state: UsuiTrack at `rank_fraction=0.05`, lr `4e-5`, against
+LoRA rank 56 (alpha 56) with AdamW, whose adapters plus both moments hold the
+same bytes. Target is the training set (PleIAs SYNTH); source is held-out
+pretraining-style text (a FineWeb mix) that the model should keep, starting at
+2.649 for every arm.
 
-| | target loss | source retention loss | peak allocated VRAM | matrix state |
-|---|---|---|---|---|
-| LoRA rank 44 + AdamW | 1.674265 | 3.084880 | 3.81 GB | 98.9 MB |
-| UsuiTrack rank 128 | **1.672156** | **3.037444** | **2.88 GB** | 97.4 MB |
+| | target loss | source loss | peak allocated VRAM | optimizer state | s/step |
+|---|---|---|---|---|---|
+| LoRA rank 56, lr `1e-4` | 1.3262 | 2.7380 | 7.64 GB | 347 MB | 3.34 |
+| LoRA rank 56, lr `2e-4` | 1.3236 | 2.7619 | 7.64 GB | 347 MB | 3.33 |
+| UsuiTrack | 1.3220 | **2.6998** | 7.48 GB | 352 MB | 4.09 |
+| UsuiTrack with `Molegrad` | **1.3213** | **2.6992** | 7.47 GB | 352 MB | 3.66 |
 
-LoRA leads target loss early (step 100: 1.770 vs 1.876), UsuiTrack overtakes
-around step 900, and LoRA runs about 1% faster per step. Full methodology and
-the evidence trail this survived are in [`docs/SPEC.md`](docs/SPEC.md).
+LoRA leads target loss early (step 100: 1.384 at `2e-4` against 1.433) and
+UsuiTrack overtakes by step 400 or 900, depending on LoRA's lr. The
+difference that matters is retention: LoRA's source loss rises 1.8x to 2.2x as
+far as UsuiTrack's, and raising its lr buys target at roughly nine times its
+cost in source. LoRA steps faster; its adapters cost activation memory instead.
+One seed and two LoRA learning rates: this is a measured comparison, not a
+sweep.
 
 ## Install
 
