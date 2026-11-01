@@ -7,22 +7,26 @@ basis-tracking path; see the [README](../README.md) for results and usage.
 
 - **Basis != subspace.** `Q` and `QH` span the same subspace, but coordinates in
   those frames differ.
-- **Left != right with renamed shapes.** Derive each projection and lift.
+- **Left is right on the transpose, not with renamed shapes.** Every frame
+  operation takes the matrix oriented so the frame sits on its columns, `G` for
+  `right` and `G^T` for `left`, and derives once.
 - **Overlap reprojection != parallel transport.** Reprojection preserves the
   least-squares part of a fixed ambient vector. UsuiTrack carries momentum with
   its moving frame, so its stored coordinates do not change at refresh.
 - **A healthy polar output can hide a sick input.** Newton--Schulz restores
   semi-orthogonal scale after weak directions have already become noise-dominated.
-- **A downstream operation cannot protect upstream state.** Raw clipping must
-  precede held-frame projection and Oja tangent construction.
 - **`side="auto"` knows shape, not architecture.** It cannot infer a transformer's
-  residual-facing axis.
-- **`ndim == 2` is a shape gate, not the precondition.** Lookup tables and
-  multiplicative gates pass it and break the method, for reasons no numerical
-  guard can see. See "Parameter eligibility".
-- **Raw sigma is the controller, not a raw number to be tamed.** Normalizing or
-  capping the geodesic angle removes the self-annealing that makes the tracker
-  settle. Both have been tried and reverted.
+  residual-facing axis; a param group's `side` says it where it matters.
+- **`ndim == 2` is a shape gate, not the precondition.** Lookup tables pass it
+  and break the method, for reasons no numerical guard can see. See "Parameter
+  eligibility".
+- **The requirement is that frame motion can anneal; raw sigma is one mechanism
+  for that, not the rule itself.** What the tracker owes is the ability to settle
+  -- motion that falls as the frame approaches its equilibrium. Two specific
+  scalar normalizations (by `sigma_max`, by the tangent's Frobenius norm) were
+  tried and reverted for failing that. Do not read those two results as a ban on
+  every reweighting of the tangent's spectrum, and do not read raw `sigma` as the
+  goal.
 - **Passing tests over a mechanism that never fires is not evidence.** Guards
   and code paths that no configuration reaches will pass every test they have.
 - **Exact implementation of a formula does not validate the formula's premise.**
@@ -33,59 +37,43 @@ Let a matrix parameter and gradient be
 
 $$W,G\in\mathbb R^{m\times n},\qquad 1\le r\le\min(m,n).$$
 
-The configured rank is a ceiling, not a promise. Each matrix runs at
+Rank is not configured per matrix. One model-wide `rank_fraction` `c`
+(default `0.05`) sizes every matrix by its shape:
 
-$$r_{\text{eff}}=\min\!\left(r,\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
+$$r=\min\!\left(\max\!\left(1,\ \operatorname{round}(c\sqrt{mn})\right),\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
 
-Two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
+The rank sets the subspace, not the step: the step is sized against the
+weight's own norm (step 8), so `rank_fraction` decides which directions a matrix
+moves in and, where the moment fills its rank, never how far (step 7). On LFM the rule matches or beats a
+per-role rank sized from measured live planes, with no measurement of its own
+(`FACTS.md` on `lab`, "Rank is a fraction of the matrix's size"). Matrices of one shape
+share one rank.
+
+The cap has two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
 has rank at most `min(m,n)`, so a wider basis tracks directions the gradient
 cannot populate; half leaves an orthogonal complement for the Oja residual at
 every step. And narrow modules are bottlenecks -- they carry the residual
 stream through a small waist, so a large update there destabilizes every block
 downstream, independently of how well-conditioned the step was.
 
-Observed on Anima's `(2048, 64)` input and output projections: at rank 64 on
-their 64-wide data side -- full rank, 100% occupancy -- training errored. Two
-things were wrong at once and both fixes were real. The `side` hint moved them
-onto the 2048-wide residual stream, which is where their basis belongs and which
-brought occupancy from 25% into line with every other module at ~3%. And the
-rank still has to be capped, because those modules are bottlenecks: too much
-change in them destabilized the model regardless of which side was tracked.
+At `c = 0.05` the cap binds on no shape of LFM's or Anima's; at `0.1`, on
+Anima's `(2048, 68)` patch embedding, which asks for 37 planes and runs at 34.
+The default is the smaller: on LFM3 `0.1` buys capture and no loss under
+either aim (`ARCHIVE.md` on `lab`, "a live aim does not make a larger rank pay").
 
-Rank itself is a configured hyperparameter picked by parameter size, the same
-way a LoRA rank is; this is a per-parameter cap on that choice. A model trained
-at rank 256 runs a `(2048, 64)` module at 32. Exceeding the cap is not an
-error, but UsuiTrack reports it once at startup rather than silently giving the
-caller something other than what was asked for.
+`Q:[d,r]`, `Q^T Q = I`, is a frame on one side of the matrix, `d = n` for
+`right` and `d = m` for `left`. Orient the gradient so that side is its columns,
+`G_o = G` (right) or `G^T` (left), `[p,d]`; then for both sides
 
-**Migration:** this cap changed stored basis shapes. Checkpoints written before
-it will fail the basis-shape check on resume.
+$$\Pi_Q(G)=G_oQ:[p,r],\qquad \Lambda_Q(Z)=\text{orient}^{-1}(ZQ^\top):[m,n].$$
 
-`Q` is always the canonical column frame, `Q^T Q = I`:
+The moment lives in `[p,r]`, the frame in `[d,r]`; every formula below is the
+right case, and left is it on the transpose.
 
-| side | canonical frame | stored basis | project $\Pi_Q(G)$ | lift $\Lambda_Q(Z)$ |
-|---|---|---|---|---|
-| right | $Q:[n,r]$ | $Q^\top:[r,n]$ | $GQ:[m,r]$ | $ZQ^\top:[m,n]$ |
-| left | $Q:[m,r]$ | $Q:[m,r]$ | $Q^\top G:[r,n]$ | $QZ:[m,n]$ |
-
-`auto` chooses right for `m >= n`, otherwise left: a shape guess, not an
-architectural one (see the trap above). On transformer weights, set `side`
-explicitly per parameter group instead. The rule is **track the residual
-stream**: weights that *read* the stream (q/k/v, the feed-forward
-up/gate-projection, the patch or token embedder's output) track their input
-side, `right`; weights that *write* it (the attention out-projection, the
-feed-forward down-projection, the final projection) track their output side,
-`left`. That puts every tracker's basis in the one space the whole network
-shares, where the gradient really is low-rank, rather than in a per-layer data
-space that happens to be narrow. This measurably beat shape-only `auto` and is
-the recommended production setting; decision 2 below has the reasoning.
-
-The difference concentrates at the edges of the network, where the data side is
-narrow. Shape-only `auto` tracked the 68- and 64-wide data sides of a model's
-input and output projections and produced its two worst-conditioned bases
-(orthonormality error 1.1e-03 and 1.0e-03 against ~5e-04 elsewhere); the hint
-spends the same rank budget inside the 2048-wide stream, where the complement
-the Oja tangent needs is ample.
+`side="auto"` tracks the shorter side, `right` for `m >= n`: a shape guess, not
+an architectural one (see the trap above). A param group can fix `side` to
+`left` or `right`; tracking the residual stream on every weight is one such
+assignment, measured on LFM and Anima (`docs/NOTES.md` on `lab`).
 
 Every `eigh`, Gram, and tangent computation upcasts fp16/bf16 inputs to
 fp32 first. The basis is the one piece of state everything else is built
@@ -96,66 +84,59 @@ accuracy, it corrupts the tracked frame for every step after it.
 
 ```text
 raw gradient G
-  -> sanitize and raw clip
+  -> sanitize
   -> stable EIGH initialization on the first step
   -> held-frame projected gradient Z
   -> Rayleigh-normalized one-state Oja tangent
-  -> projected EMA M
   -> release full gradient; retain rank-sized pending work
-  -> exact Oja frame move with identity moment coordinates
-  -> Aurora leverage balance + Newton-Schulz polar map
-  -> full-parameter Muon scale
-  -> lift through the moved frame Q+
+  -> unit Frobenius norm Z/||Z||_F
+  -> projected EMA M of the unit gradient
+  -> Aurora leverage balance of M (normalization)
+  -> Newton-Schulz polar map of M (orthogonalization)
+  -> unit scale 1/sqrt(r)
+  -> lift through the held frame Q, scaled by ||W||_F
   -> parameter update
+  -> exact Oja frame move
+  -> rotate M by the stored-frame overlap; commit it once
 ```
 
-### 1. Sanitize and raw clip
+The moment is the last thing written, and everything above it reads the held
+frame `Q`. The lift is through `Q`, not `Q_+`: the frame moves after the
+parameter update, so no step lifts through a frame it did not measure in.
 
-Let `S(G)` replace each non-finite entry with zero. With threshold `c=1` by
-default,
+### 1. Sanitize
 
-$$G_c=S(G)\min\left(1,\frac{c}{\max(\|S(G)\|_F,10^{-12})}\right).$$
+Let `G` replace each non-finite entry with zero. The incoming gradient's
+Frobenius norm, taken before the replacement, is measured for telemetry and
+applied to nothing.
 
-This occurs before all matrix consumers, and there is no off switch: `c` has no
-`None`. Clipping the raw gradient is what protects every persistent memory
-downstream of it -- the frame and the projected moment -- and a guard installed
-later cannot protect an earlier one. A single blip batch (grad norm spiking
-~180x) otherwise reaches both at full size, and a frame that has turned toward
-one is wrong for as long as it takes the tracker to turn back.
-
-Making it mandatory also collapses the update to a single implementation.
-Once `c` is always present, the only thing that varies between steps is whether
-the frame exists yet and whether a basis update is due, so the tangent is built
-in exactly one place: the fused per-side kernel. There is no second readable
-copy to drift out of sync with it -- that is what this document is for.
+**There is no gradient clipping, because no consumer can see the magnitude.**
+The Oja tangent is exactly invariant to a uniform rescale (step 4: `action` and
+`rayleigh` are both quadratic in `G` and divide). The update normalizes each
+step's projected gradient to unit Frobenius norm *before* the average (step 5),
+so a per-step rescale -- which is exactly what a clip is -- cannot reach the
+moment either. A blip batch contributes one unit of weight like every other
+step. Pinned by `test_the_update_is_invariant_to_gradient_scale`.
 
 ### 2. Initialize the frame
 
-Normalize `A = G_c / ||G_c||_F` and form the symmetrized side Gram:
-
-$$K=A^\top A\quad\text{(right)},\qquad K=AA^\top\quad\text{(left)}.$$
-
-`Q` is the top-`r` eigenvector frame. On backend failure, retry `eigh` with
-
-$$K\leftarrow K+10^{-6}\max(\operatorname{tr}(K)/d,10^{-12})I.$$
-
-An exactly zero gradient produces the deterministic EIGH frame of the zero side
-Gram.
+Normalize `A = G_o / ||G_o||_F` and form the symmetrized side Gram `K = A^T A`.
+`Q` is its top-`r` eigenvector frame. There is no retry: a failing `eigh` fails.
+An exactly zero gradient produces the deterministic EIGH frame of the zero
+Gram. The fitting step moves no frame; the moment and weight step as usual.
 
 ### 3. Project in the held frame
 
 Using the held frame before the current Oja move,
 
-$$Z_t=\Pi_{Q_t}(\widetilde G_t).$$
+$$Z_t=\Pi_{Q_t}(G_t).$$
 
 ### 4. Track with one-state Oja
 
-After EIGH initialization, the live frame updates on the configured basis-update
-cadence (default every conditioned full gradient). Reuse the held-frame
-projection to form the covariance action:
+On every step after the fit, reuse the held-frame projection to form the
+covariance action
 
-$$A=\widetilde G^\top Z\quad\text{(right)},\qquad
-A=\widetilde GZ^\top\quad\text{(left)},$$
+$$A=G_o^\top Z,$$
 
 and form the symmetrized Rayleigh matrix and horizontal tangent
 
@@ -166,54 +147,121 @@ The denominator is floored at `1e-12`. With
 
 $$\Delta^\top\Delta=V\operatorname{diag}(\sigma_i^2)V^\top,$$
 
-the exact full-rank Grassmann step uses
+the frame does **not** move along `Delta` itself. Two transforms sit between the
+aim and the geodesic, and they are one design: every live plane turns by the
+same constant angle, and the spectrum decides nothing about the motion.
 
-$$\eta_t=\max(0.01, 1/t),$$
+**Polar tangent.** `Delta` is replaced by its polar factor
 
-where `t` counts basis updates, including EIGH initialization. Thus the first
-geodesic uses `1/2`. With `basis_update_interval=k`, phase one still runs for
-every matrix gradient while geodesics occur only on matrix steps divisible by
-`k`; `t` still counts only basis updates. The released harmonic schedule reaches
-its steady `.01` floor at basis update 100. The frame update is
+$$\operatorname{polar}(\Delta)=\Delta V\operatorname{diag}(1/\sigma_i)V^\top,$$
 
-$$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta_t\sigma_i))
+with numerically dead planes -- `sigma_i <= sqrt(r eps) sigma_max`, the Gram's
+own backward error -- held at zero rather than divided by, preserving the
+identity that a zero-singular plane does not move. The zero reaches the angle,
+not merely the tangent column: a dead plane handed a live angle would contract
+the frame's component along that eigenvector against a tangent term that is
+zero, which is not a rotation. This is the same distrust of magnitude the weight update already applies:
+Newton-Schulz discards the projected moment's singular values because direction
+survives a noisy batch and magnitude does not, and the tangent's singular values
+only decide how motion is divided between planes. It costs two `[r,r]` matmuls
+and reuses the eigendecomposition the geodesic already needs.
+
+**The turn is constant.** Every live plane turns by exactly `eta`, and nothing
+scales it. Bare polar has no fixed point -- it turns by `eta` forever, whether or
+not the frame has arrived -- and no measurement has ever supplied one. The
+spectrum cannot: under this transform it is a smooth power law, `sigma^2 ~
+k^{-1.5}` across four decades, with no edge separating signal from noise. It is
+not scaled by time either; `docs/NOTES.md` on `lab` records the sensors that
+were tried and why none is in.
+
+$$\eta=0.02,$$
+
+not scheduled. The frame is in effect an average of its aims over the last
+`~1/eta` basis updates, and the aim -- the leading eigenspace of `G^T G` --
+moves as the model does, fastest early. `eta` sets the trade between lag (a long
+memory holds where the gradient was) and noise (a short one follows each
+batch). The energy aim is a low-variance target, so lag costs only while it
+moves: on LFM `0.02` and `0.04` tie on both losses at 1k, the smaller turn lags
+early (capture 0.750 against 0.760 after warmup) and captures the same from
+mid-run, and it moves the frame half as far per update, so it follows half as
+much batch noise (`FACTS.md` on `lab`). Once the aim
+settles the turn stops mattering -- a smaller late turn buys nothing -- so a
+schedule would add a term and no gain. EIGH initialization already places the
+frame on the first gradient's leading eigenspace rather than at random, so the
+geodesic maintains a fit rather than searching for one. With `ell_i = 1` on
+live planes and `0` on dead ones, the frame update is the exact geodesic along
+the polar tangent:
+
+$$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta\,\ell_i))
 +(\Delta V)\operatorname{diag}
-\left(\frac{\sin(\eta_t\sigma_i)}{\sigma_i}\right)\right]V^\top.$$
+\left(\frac{\ell_i\sin\eta}{\sigma_i}\right)\right]V^\top.$$
 
-The zero-singular-value limit is `sin(eta_t sigma) / sigma -> eta_t`.
-
-`sigma` is raw: neither normalized nor clamped. That is the mechanism, not an
-oversight. A poorly fitted basis produces large `sigma` and turns hard; a
-well-fitted one produces small `sigma` and settles. Normalizing the angle
-(by `sigma_max` or by the tangent's Frobenius norm) forces a constant turn every
-refresh, re-inflates the residual tail, and prevents convergence -- tried,
-rejected. Capping the angle costs the other end, the large-`sigma` acquisition
-the schedule is hot for. Measured on a 2B DiT, the per-step angle anneals
-`0.7 -> 0.11 -> 0.038 -> 0.035` rad over a full run without any bound applied.
-
-Equal-rank tangent-Gram eigendecompositions are batched. With
-`S=Q_raw^T Q_raw`, one near-identity step using the converged steady-state
-coefficient triple from Amsel, Persson, Musco, and Gower, ["The Polar
-Express"](https://arxiv.org/abs/2505.16932) (2025), retracts before storage:
+Tangent-Gram eigendecompositions of one rank share one batched `eigh`: on a
+small `[r,r]` matrix it is launch-overhead-bound. Nothing larger is stacked
+across matrices. With `S=Q_raw^T Q_raw`, one near-identity step using
+the converged steady-state coefficient triple from Amsel, Persson, Musco, and
+Gower, ["The Polar Express"](https://arxiv.org/abs/2505.16932) (2025),
+retracts before storage:
 
 $$Q_+=Q_{raw}(aI+bS+cS^2).$$
 
-The Oja tangent rotates every tracked plane. UsuiTrack stores no target frame or
-second tracker state and requires a full matrix gradient on every step.
+The frame is stored round-to-nearest: it moves by a real angle every update,
+so there is no sub-ulp step to lose, and stochastic rounding measured `sqrt(2)`
+more in-span rotation. UsuiTrack stores no target frame or second tracker
+state. A matrix with no gradient on a step is skipped: its frame, moment and
+weight hold.
 
 ### 5. Accumulate momentum
 
-$$M_t=\beta M_{t-1}+(1-\beta)Z_t,\qquad \beta=0.95.$$
+The moment integrates the projected gradient at unit Frobenius norm:
 
-There is no EMA bias correction.
+$$M_t=\beta M_{t-1}+(1-\beta)\frac{Z_t}{\|Z_t\|_F},\qquad \beta=0.95.$$
+
+There is no EMA bias correction, and none is needed: the polar map of step 7
+discards the moment's size, so an undersized early moment steps as far as a
+full one.
+
+**The average runs on gradients, and the polar map runs once, on the average.**
+A batch's spectrum is information the average needs: the planes a batch
+carries strongly are the planes the expected gradient carries, and its noise
+planes are small. Averaging first keeps that weighting, so `M` estimates the
+expected gradient; a polar map ahead of the average would hand every noise
+plane of every batch full length, and the average of polar factors is not the
+polar factor of the average. The normalization takes out only the batch's
+overall size, so no one batch owns the memory by being large -- a clip's job,
+without a threshold -- and `||M||` stays a persistence read on a constant-norm
+stream (`moment_persistence`, a lab read). The step's size does not follow it (step 8).
+
+**What the moment is for.** Late in an LFM run at bs16 the stream is white --
+`moment_persistence` within `1e-3` of zero -- so there the moment is a variance
+reducer, not a persistence extractor: it buys `sqrt((1+beta)/(1-beta))` in
+signal fraction, 6.2x at `beta = 0.95`, and pays in staleness as the mean
+drifts under the moving parameters. Early in a run it is not white: the
+dominant planes persist while the loss falls fast, and the moment holds them.
+Source damage grows with `beta`: forgetting follows memory length and travel.
+`0.95` holds target against `0.98` under a decaying `lr` on LFM and forgets
+less; `docs/FACTS.md` on `lab` carries the arms. The staleness half is set by
+how far the parameters move, so `beta` and the schedule are read together.
+
+The moment is no substitute for batch. A batch averages its samples at one
+parameter point; the moment averages gradients taken at points the parameters
+have since left. At equal samples the larger batch wins, and raising `beta` to
+match a smaller batch's sample memory makes it worse, not better.
 
 ### 6. Transport momentum through frame motion
+
+The whole step reads one frame. The held frame `Q_t` supplies the projection,
+the Oja tangent, and the lift back to parameter space; the geodesic runs after
+the parameter update, so `Q_{t+1}` is never used to lift an update that `Q_t`
+measured. Ordering the geodesic first would rotate every step's own gradient by
+however far the tracker had just turned -- a systematic error scaling with the
+step size, and one that falls entirely on the current gradient rather than on
+the accumulated history it is correct for.
 
 The geodesic chooses an ambient rotation `R` with `Q_+ = RQ`. UsuiTrack defines
 momentum as moving with that frame:
 
-$$MQ^\top\mapsto MQ_+^\top\quad\text{(right)},$$
-$$QM\mapsto Q_+M\quad\text{(left)}.$$
+$$MQ^\top\mapsto MQ_+^\top.$$
 
 Thus its stored coordinates and singular spectrum are unchanged:
 
@@ -222,29 +270,52 @@ $$M_+=M.$$
 This is parallel transport along the selected lifted Oja path. Multiplication by the
 old/new frame overlap would answer a different question: represent the surviving
 projection of a fixed old ambient vector. It contracts each rotated plane by a
-principal-angle cosine before Aurora.
+principal-angle cosine before the balanced polar map.
 
-### 7. Aurora direction
+`M_+ = M` holds for the geodesic, which gives `Q^T Q_+ = V\cos\theta V^\top`,
+exactly symmetric. It does not hold for the frame that is *stored*: rounding the
+geodesic's result into bf16 rotates the frame's columns inside the span they
+already had, and that rotation moves the subspace not at all while scrambling the
+moment one-for-one. So the overlap is read back from the frames **as stored**,
+its orthogonal polar factor `R_s` taken, and the moment corrected by it:
 
-The leverage-balancing scheme below is
-[Aurora](https://github.com/tilde-research/aurora-release) (Tilde Research).
-Reimplemented here from the method, not a runtime dependency; UsuiTrack takes
-only the rectangular direction map, per the decision note at the end of this
-section.
+$$M_+=MR_s.$$
 
-Aurora acts only on `M`. For a rectangular tensor, orient it as
-`A:[p,q]`, `p >= q`, transposing if needed. Initialize row scaling
+Only the rotation is applied, never the full overlap -- the symmetric part is the
+principal-angle contraction above, which parallel transport is right to discard.
+An exact step returns `R_s = I`, so the correction fires only on the deviation
+between the frame computed and the frame kept.
 
-$$D_{0,ii}=1/\|A_{i,:}\|_2.$$
+The correction is why the moment is committed last. This step's projected
+gradient is measured in `Q_t`, blends into a moment in `Q_t`, and the parameter
+update lifts through `Q_t`; the moment moves to `Q_{t+1}` only once nothing is
+left to read in the old coordinates. Rotating before the blend would add a `Q_t`
+gradient onto a `Q_{t+1}` moment. Because the rotation must come last, the moment
+stays fp32 from its accumulation through the polar map to that commit, and the
+step rounds it exactly once -- stochastically in bf16, since a rotation is a
+rearrangement whose systematic rounding would accumulate against the coordinates
+it exists to preserve; to nearest in any other dtype.
 
-Run one leverage-balancing/polar iteration:
+### 7. Balanced polar direction
 
-$$P_k=\operatorname{NS}(D_kA),$$
-$$D_{k+1,ii}=D_{k,ii}
-\left(\frac{q/p}{\|P_{k,i,:}\|_2^2}\right)^{1/2}$$
+Two operations from two lineages, applied in order and worth keeping apart by
+name. The **leverage balancing** is
+[Aurora](https://github.com/tilde-research/aurora-release) (Tilde Research): a
+diagonal row rescale that changes how force is distributed across rows and
+orthogonalizes nothing. The **orthogonalization** is the Newton-Schulz polar
+map of the Muon lineage, and it is the step that discards `M`'s singular values
+so that the step's size is `lr`'s alone. Both are reimplemented from the
+methods; neither is a runtime dependency. UsuiTrack takes only the rectangular
+direction map from Aurora, per the decision note at the end of this section.
 
-with the diagonal update omitted after the iteration. Transpose back. Square
-tensors skip leverage balancing and use `NS(M)` directly.
+Balancing acts on `M_t`, the moment after this step's blend. For a rectangular tensor, orient it as
+`A:[p,q]`, `p >= q`, transposing if needed. With the row scaling
+`D_ii = 1/||A_{i,:}||_2` (floored at `1e-7`), the direction is
+
+$$P=\operatorname{NS}(DA),$$
+
+transposed back: one leverage-balancing iteration, whose diagonal update is
+never applied. Square tensors skip balancing and use `NS(M)` directly.
 
 `NS` first divides by Frobenius norm and orients its input with rows no greater
 than columns. Five default Newton-Schulz polynomial steps apply, using the
@@ -269,76 +340,169 @@ k    a         b         c
 ```
 
 The result `O_t` is an approximate leverage-balanced polar direction, not an
-exact SVD polar factor.
+exact SVD polar factor: at five iterations its orthogonality residual is ~1e-2.
+A moment that fills its `r` planes has a polar factor of norm `sqrt(r)`;
+scaled by `1/sqrt(r)`, its step is a unit. One that fills only `k` of them,
+a frame wider than the gradient's rank, has norm about `sqrt(k)`: five
+iterations leave a plane far below the top near zero.
 
-**Decision (projected Aurora):** Aurora chooses direction inside the retained
-update space. UsuiTrack, not Aurora, owns momentum, basis motion, scale, and LR.
+**Decision (projected balancing):** Aurora's balancing chooses direction inside
+the retained update space. UsuiTrack, not Aurora, owns momentum, basis motion,
+scale, and LR.
 
 ### 8. Scale, lift, and update
 
-Muon scale uses the original parameter shape, not the projected shape:
+The step is sized against the weight it lands on. `O_t` is a unit and the lift
+is an isometry, so
 
-$$\widehat U_t=O_t\sqrt{\max(1,m/n)},
-U_t=\Lambda_{Q_{t+}}(\widehat U_t).$$
+$$U_t=\|W_{t-1}\|_F\,\Lambda_{Q_t}(O_t),\qquad
+\frac{\|U_t\|_F}{\|W_{t-1}\|_F}=1$$
 
-The selected contract has zero weight decay. Apply the learning rate:
+for a moment that fills its rank, and `sqrt(k/r)` for one that fills `k` of
+`r` planes (step 7).
 
-$$W_t=W_{t-1}-\alpha U_t.$$
+The learning rate is the relative change per step -- one unit in every module,
+whatever its shape, rank or size: LAMB's trust ratio (You et al. 2019, arXiv
+1904.00962), taken against a unit direction rather than the update's own norm.
+The moment decides where each module steps and never how far, so `lr` reads
+directly as `relative_step`, and LoRA-scale learning rates (`1e-5` to `2e-4`)
+are in the right range. A run that should slow down gets that from the
+trainer's `lr` schedule, which the optimizer does not own; a linear decay to a fifth of the peak beat a constant `lr` on LFM
+(`docs/FACTS.md` on `lab`).
+
+**Why the weight's norm and not its shape.** A scale read from shape -- Muon's
+`sqrt(max(1, m/n))`, or the polar factor's own `sqrt(r)` -- fixes the update's
+norm whatever the weight's, so the update's RMS per element grows as the matrix
+shrinks: the module with fewest parameters takes the largest relative step. In
+a diffusion transformer those are the input and output projections, the
+bottlenecks the rank cap exists for (above). Against `||W||`, the update's RMS
+is a fixed fraction of the weight's own.
+
+**Limit.** A matrix with `||W|| = 0` never moves. A zero-initialized matrix
+needs a non-zero init or the fallback optimizer.
+
+With decoupled weight decay `lambda` (default `0`), and `U_t` sized from the
+weight before the decay,
+
+$$W_t=(1-\alpha\lambda)W_{t-1}-\alpha U_t.$$
 
 Matrix parameters retain no full-size first or second moment.
 
-**Rounding.** For bf16 `W`, the lift and the update are accumulated in fp32 and
-written back once through stochastic rounding (`stochastic_rounding=True`,
-default). Orthogonalization means `alpha` alone sets the step size, so a
-well-conditioned run puts `alpha * U` well under a bf16 ulp -- measured at
-~1/76 ulp on a 2B DiT at `alpha=2e-5` -- and round-to-nearest then discards
-every step. `U` is never cast to `W`'s dtype on the way in; a single rounding
-happens at the write, with weight decay folded into the same accumulator so it
-is not rounded twice. See `usuitrack/stochastic.py`.
+**Rounding.** `W`, the lift and the update are accumulated in fp32 and written
+back once: stochastically for bf16, to nearest for fp16, exactly for fp32. A
+LoRA-scale `alpha` puts `alpha * U` well under a bf16 ulp -- measured at ~1/76
+ulp on a 2B DiT at a relative step below `2e-5` -- and round-to-nearest then
+discards every step. `U` is never cast to `W`'s dtype on the way in; a single
+rounding happens at the write, with weight decay folded into the same
+accumulator so it is not rounded twice. See `usuitrack/stochastic.py`.
+
+Stochastic rounding keeps the expectation and pays in variance. A coordinate
+whose update `u` is below its ulp moves by a whole ulp with probability
+`|u| / ulp`, so after `N` steps the weights sit a random walk of variance
+`N |u| ulp` per coordinate away from the path the updates describe. The walk
+grows as `sqrt(N)` and the path at most as `N`, but at a small step the walk
+wins for a long time: at Anima's `relative_step` of `3.7e-6` it is
+several times the fp32 travel after 350 steps, and ~90% of matrix coordinates do
+not move at all in a 50-step window. **Distance from base weights on a bf16 model is
+therefore a read of the walk, not of learning**, until the update approaches a
+ulp. `docs/FACTS.md` on `lab` carries the measurement.
 
 ## Two-phase execution
 
 For each matrix, phase one runs exactly once after its full gradient is complete:
 
-1. sanitize and clip `G` (always);
-2. form the clipped gradient `G_c`;
-3. read `Z_t` and, after initialization, form `Delta_t` in the held frame `Q_t`;
-4. update `M_t`;
-5. retain `M_t`, the optional `Delta_t`, and the frame reference, then release `G`.
+1. sanitize `G`;
+2. read `Z_t` and, after initialization, form `Delta_t` in the held frame `Q_t`;
+3. retain `Z_t` and the optional `Delta_t`, then release `G`.
 
-Phase one does not move the basis or update the parameter. Phase two runs in
-`step()`: it batches tangent-Gram eigendecompositions, moves each frame to
-`Q_{t+}`, applies Aurora to `M_t`, lifts through `Q_{t+}`, and updates `W`.
+Phase one does not move the basis, update the moment, or update the parameter:
+the moment is rotated and committed after the frame moves (step 6), so it is
+written only in `step()`. Phase two runs in `step()`: it blends each unit `Z_t`
+into `M_t`, applies the balanced polar map to each `M_t`, lifts each `O_t`
+through `Q_t`, updates `W`, then takes the tangent-Gram eigendecompositions,
+batched by rank, and moves each frame to `Q_{t+}`.
 
-`prepare(param)` exposes phase one explicitly. A no-accumulation training loop
-can invoke it from a `register_post_accumulate_grad_hook` callback to release
-each full matrix gradient as soon as it is consumed (`release_matrix_grads=True`
-at construction).
+Without `release_matrix_grads`, both phases run in `step()`, on whatever
+gradient has accumulated, so gradient accumulation works. With it, the
+optimizer registers a `register_post_accumulate_grad_hook` per matrix that runs
+phase one as soon as that matrix's gradient is complete and frees it. That
+takes exactly one backward per `step()`: a second gradient for a pending matrix
+raises rather than overwrite or sum into rank-sized work it can no longer
+reconstruct. Gradient clipping and norm logging in a trainer see no matrix
+gradients in this mode.
 
 The split is deliberately not a transaction, and cannot be made one at this
-memory budget. Phase one exists so that `G` can be freed the moment it is
-consumed; deferring the moment update to `step()` would mean
-holding a matrix-sized conditioned gradient per parameter until then, which is
-the cost the two-phase design exists to avoid. So state commits in two places:
-phase one commits the moving averages, phase two commits the weight. Normal
+memory budget: phase one exists so that `G` is freed the moment it is consumed,
+and holding it until `step()` is the cost the design avoids. So state commits
+in two places: phase one commits the projected work and, on a first step, the
+fitted frame; phase two commits the moment, the frame and the weight. Normal
 completion of a step still requires `step()`, not `zero_grad()`. But a caller
 that must bail out mid-step regardless (an OOM-retry loop, say) is allowed to:
 `zero_grad()` drops any pending prepared update rather than rejecting the
-call. This does not roll back the moving-average state prepare() already
-advanced -- that one step's contribution to projected-moment state
-is unrecoverable -- it only clears the retained tangent so the next
-`prepare()`/`step()` starts clean. Repeated preparation, gradient accumulation
-before `step()`, and optimizer closures with pending work remain unsupported.
+call, with a warning naming how many. Nothing needs rolling back: neither the
+moment nor the frame moves before `step()`, so what is dropped is the gradients
+themselves, plus a frame fitted on a first step.
+
+## Molegrad
+
+`Molegrad(model, optimizer)` is an opt-in path that never forms `G`.
+Every tracked matrix must be the weight of a plain `nn.Linear`, bias allowed;
+the weight is frozen for autograd, so no `dW` GEMM runs. With `X:[T,n]` the
+Linear's input and `delta:[T,m]` the gradient at its output, `G = delta^T X`,
+and the Linear's backward returns, as gradients of storage-free leaves, what
+phase one would have read from `G`:
+
+| | right | left |
+|---|---|---|
+| `Z` (step 3), exact | `delta^T (X Q)` | `X^T (delta Q)` |
+| diagonal aim, replacing step 4's `A` | `X^T (||delta_t||^2 * X Q)` | `delta^T (delta Q)` |
+| `G P`, 16 Gaussian probes | `delta^T (X P)` | `delta^T (X P)` |
+
+**The diagonal aim.** Step 4 aims at `G`'s own Gram, `G^T G = X^T (delta
+delta^T) X` on the right; its cross-token terms need `G`, and the token
+diagonal does not. Each token's row of `X` weighted by `||delta_t||^2` keeps
+that diagonal, which is the selection the loss makes between tokens: rows past
+the last supervised token have `delta_t = 0`, so it is also the mask. On the
+left the aim is `delta^T delta Q`, which captures as much as `G`'s Gram. On
+LFM3 the two aims tie on loss through 1k steps (`FACTS.md` on `lab`, "S2 ties
+`G` through 1k steps"); the `G` path keeps step 4's. The diagonal aim has
+energy in every frame direction, so more planes are live and more of the frame
+turns: 0.996 against 0.845 on LFM3.
+
+`||G||_F^2` is estimated as `||G P||_F^2 / 16`, unbiased; across a model's
+matrices it reads `||G||` to within 1% (`FACTS.md` on `lab`, "Training without
+`dW`"), so `grad_capture` reads the same under molegrad as on the `G` path.
+Like step 1's norm it is telemetry and the non-finite flag, and applied to
+nothing. All three leaves are token sums, so micro-batches accumulate exactly.
+
+A matrix with no frame fits it in its first backward from that micro-batch's
+`G`, formed and freed inside the backward; under accumulation that is the
+first micro-batch's gradient, not the step's, sanitized as in step 1. The
+frame lives only in optimizer state, which the modules read again after every
+load. `step()` collects the leaves itself; a closure would run its backward
+after that, so it raises. `zero_grad()` and a load drop leaves no step
+consumed, with the same warning as pending work.
+
+No `weight.grad` ever exists for a tracked matrix: gradient clipping,
+`GradScaler`, gradient-norm logging and anything else that reads it see only
+the fallback parameters. A tracked weight used outside its Linear, as a
+functional call, gets no gradient there and is not detected. The leaves are
+placed with the weights when it is built, so the model has its device and
+dtype by then. Refused with the reason, rather than trained wrong: a Linear
+subclass (its own forward would be replaced), a weight shared with another
+module, a tracked matrix that is not a Linear's weight, a Linear called more
+than once in the backward that fits its frame (each call fits its own), and
+more than one process (the leaves are not all-reduced).
 
 ## Parameter eligibility
 
 `ndim == 2` is the structural gate `add_param_group` enforces, and it is not the
 precondition the method has. UsuiTrack tracks a subspace of a **shared linear
 map**: it assumes a weight's rows (or columns) are coordinates in one common
-space, so a basis fitted from a few batches means something for all of them. Two
-families pass the shape test and break that assumption. Neither failure is
-numerical, so no guard in the update path can catch them; both were found as a
-run going non-finite thousands of steps in.
+space, so a basis fitted from a few batches means something for all of them.
+One family passes the shape test and breaks that assumption. The failure is not
+numerical, so no guard in the update path can catch it; it was found as a run
+going non-finite thousands of steps in.
 
 **Lookup tables.** `nn.Embedding` weights, and any matrix whose rows are
 independent per-token vectors. There is no shared map, and the gradient is
@@ -349,14 +513,12 @@ with a finite gradient and a healthy loss, while the updates it did receive were
 so it carried the risk without training. Muon-lineage optimizers exclude
 embedding tables for the same reason.
 
-**Multiplicative gates.** AdaLN/FiLM modulation linears, and anything whose
-output scales or shifts another layer's output instead of feeding forward. These
-are ordinary, well-conditioned matrices; the problem is that a tracking error in
-a gate is multiplied through everything downstream instead of staying local.
-Observed on a `(6144, 256)` AdaLN modulation linear, clear of any rank or shape
-degeneracy: non-finite one step into training.
+AdaLN/FiLM modulation linears are shared linear maps and are eligible, though
+their output scales another layer's. Their input is one conditioning vector per
+sample rather than per token, so a step's gradient has rank at most the batch
+size.
 
-Both families are named consistently within an architecture and are not cheaply
+Lookup tables are named consistently within an architecture and are not cheaply
 detectable at runtime, so the caller names them. The integration owns that
 policy; the library owns the structural rule.
 
@@ -373,57 +535,49 @@ as a drop-in: the fallback set holds the smallest-stepping weights in a model
 stochastic rounding buys on the matrix side. It is not a memory optimization --
 `torch.optim.AdamW` already stores moments in the parameter dtype -- it moves
 the moment recurrences and the parameter update into fp32 accumulators that are
-rounded once, instead of rounding on every in-place bf16 op. `optimizer_state_bytes_by_category` accounts
-matrix and fallback state separately when both optimizers are inspected.
-Sparse gradients are unsupported.
+rounded once, instead of rounding on every in-place bf16 op. Sparse gradients
+raise.
 
 ## Persistent state
 
 | matrix state | right shape | left shape | dtype |
 |---|---|---|---|
-| basis | `[r,n]` | `[m,r]` | parameter dtype |
-| projected EMA | `[m,r]` | `[r,n]` | gradient dtype |
-| update counts and resolved side | scalar | scalar | Python |
+| `frame` | `[n,r]` | `[m,r]` | parameter dtype |
+| `moment` | `[m,r]` | `[n,r]` | parameter dtype |
 
-Oja tangents are transient pending work. No target frame, second basis, or lag
-snapshot is stored. Fallback parameters retain AdamW's fp32 first moment, second
+That is the whole per-matrix state; the side is resolved from the group each
+step. Projections and Oja tangents are transient pending work. Fallback parameters retain AdamW's fp32 first moment, second
 moment, and step tensor in their separate optimizer.
 
 
 ## Diagnostics
 
-Optional, off by default, and structurally incapable of costing anything when
-off: every accumulation site is guarded by one attribute read. Set
-`diagnostics_enabled = True` and drain with `pop_diagnostics()`, which returns a
-plain dict of floats -- no wandb, no trainer, no assumptions about the caller.
+Optional, off by default, and inert when off: the optimizer calls no event and
+takes no reduction beyond the raw gradient norm phase one always records. `diagnostics=True` installs a `Diagnostics`; drain
+with `pop_diagnostics()`, which returns a plain dict of floats. Reads accumulate
+on-device as 0-dim tensors; `pop` makes the one device-to-host transfer, so a
+drained value is the mean over every matrix and step since the last drain, and
+the intended cadence is the caller's logging cadence. `nonfinite_grads` is a
+total, because a rare event averaged against a quiet window reads as zero.
 
-Measurements accumulate on-device every step; the single device-to-host read
-happens inside `pop_diagnostics()`. A drained value is therefore the mean over
-the interval since the last drain, which is why the intended cadence is the
-caller's logging cadence rather than every step. `nonfinite_grads` is reported as
-a total over the interval rather than a mean, because a rare event averaged
-against a long quiet interval reads as zero.
+No read makes its own pass over a full matrix. Each is a reduction of a
+rank-sized tensor or of a norm the step already took: the update's norm is read
+in frame coordinates, `||U|| = ||O|| ||W||`, since the lift is an isometry, and
+non-finite gradients are counted from the raw norm.
 
 | key | what it measures |
 |---|---|
-| `rotation_rad_sum` | `eta * sum_i sigma_i` of one geodesic: total frame motion summed over all `r` planes, not a per-plane angle |
-| `tangent_concentration` | `lambda_max / sum_i lambda_i` of the tangent Gram, in `[1/r, 1]`: the leading direction's share of the aim |
-| `projected_grad_norm` | norm of the conditioned gradient inside the held frame |
-| `grad_to_moment_ratio` | that norm against the projected moment *after* this step's update: `1/(1-beta)` on the first step, lower once the moment has history |
-| `update_to_param_ratio` | mean per-step weight motion against current weight norm, over matrix parameters only |
-| `nonfinite_grads` | matrix gradients that arrived non-finite and were sanitized |
+| `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped and every moment fills its rank (step 8); below it by the rank the moments leave empty |
+| `grad_capture` | `||G_o Q|| / ||G||`: the share of the gradient's magnitude the frame catches. Reads the basis rather than the model |
+| `grad_moment_cosine` | this step's unit projected gradient against the moment *before* the blend, so the reading is not self-referential. Positive: the step under-travels and the gradient keeps its direction; negative: it overshoots |
+| `tangent_live_fraction` | the share of planes with `sigma_i > sqrt(r eps) sigma_max` (step 4). Below `1` the aim is rank-collapsed against the rank it was given: the rank is too large for what this batch size resolves |
+| `projected_grad_norm` | `||G_o Q||`. The step is blind to it; bursts mark outlier batches the fallback optimizer is not blind to |
+| `nonfinite_grads` | matrix gradients whose raw norm was non-finite and were sanitized |
 
-`rotation_rad_sum` and `tangent_concentration` are read from the eigenvalues the
-geodesic already computes, so they cost nothing beyond two reductions. The pair
-is meant to be read together: the same total rotation is a confident drift when
-concentration is high and a frame spinning on its noise tail when it is low.
-
-The tangent Gram is decomposed bare. There is no jitter and no retry: a failing
-`eigh` fails, because its result steers the frame and a silently rescued
-decomposition is worse than a stopped run. The initial fit in `_side_gram_eigh`
-keeps its try-then-jitter fallback -- different matrix, once per parameter rather
-than once per step.
-
+`usuitrack.diagnostics.READS` carries a one-line reading guide per key. A
+subclass adds reads by overriding the event methods; the lab's
+`experiments/lab_diagnostics.py` is one, with frame-motion, spectrum and
+per-role reads.
 
 ## Decisions and reasons
 
@@ -431,24 +585,32 @@ These choices define the current design; they are redesignable.
 
 1. **One-sided projection:** retains a rank-limited update without a square core
    or second basis.
-2. **Residual-facing side policy:** up/gate and q/k/v use storage-right; down
-   and attention-output use storage-left. Generic `auto` remains shape-only.
-3. **Side-Gram `eigh` initialization:** directly solves the one-sided target and
-   has explicit fp32, finite-input, symmetrization, and jitter behavior.
+2. **Side by shape, overridable:** `auto` tracks the shorter side; a param
+   group fixes `side` where the architecture knows better.
+3. **Side-Gram `eigh` initialization:** directly solves the one-sided target,
+   in fp32, on the sanitized and symmetrized Gram, with no retry.
 4. **One-state full-gradient basis tracking:** the live frame follows the Oja
-   covariance action on its configured cadence, with harmonic geodesic motion
-   `1/2, 1/3, ...` down to `0.01` and no second basis.
+   covariance action on every step, with a constant geodesic step
+   `eta = 0.02` and no second basis.
 5. **Moving-frame momentum:** identity coordinates preserve the projected
    moment's spectrum through the chosen frame rotation.
 6. **No second moment on the full gradient:** the tangent and the moment both
-   read the clipped gradient directly. A frame fitted on `G` is the leading
+   read the sanitized gradient directly. A frame fitted on `G` is the leading
    eigenspace of `G^T G`, so the Oja residual is zero there and the tracker
    converges when the gradient's principal subspace stops moving; any two-sided
    rescale is a congruence rather than a similarity and destroys that property.
-7. **Raw clipping before all consumers:** protects the frame and the projected
-   moment, not just the update.
-8. **Aurora plus full-shape Muon scale:** direction belongs to projected geometry;
-   scale remains tied to parameter geometry.
+7. **Average first, orthogonalize once, and no gradient clip:** the moment
+   averages unit-norm projected gradients, so a batch's spectrum weights the
+   average while its overall size never reaches it, and every consumer is
+   scale-invariant. That retires the clip. The polar map runs once, on the
+   moment, so the step is the expected gradient's direction at unit size. On
+   LFM under the same decaying lr it ties averaging polar factors with a
+   cautious mask on target (`FACTS.md`): the order is chosen for the estimate
+   it makes, not for loss.
+8. **Balanced polar direction, step relative to the weight:** direction belongs
+   to projected geometry; size belongs to the weight it lands on, so `lr` is one
+   relative unit across the fleet, and only the schedule changes it (see
+   step 8).
 9. **Separate AdamW fallback:** non-matrix tensors remain trainable under a
    separate optimizer, with their full state exposed rather than hidden in the
    matrix claim.
@@ -461,6 +623,7 @@ These choices define the current design; they are redesignable.
 | transpose problem and swap left/right | transposed projected and ambient update |
 | Oja covariance action lies inside the current subspace | zero frame motion |
 | Oja tangent is rank-deficient | zero singular planes remain fixed |
-| full rank | projection/lift loses no component; Aurora can still alter direction |
-| gradient rescaling below raw clipping and away from epsilon floors | Rayleigh-normalized Oja tangent unchanged; pre-Aurora magnitude follows the stated conditioning |
-| geodesic frame rotation | stored moment coordinates and singular values unchanged |
+| full rank | projection/lift loses no component; balancing can still alter direction |
+| any shape, rank or weight scale, every step agreeing | `||U||_F / ||W||_F = 1`, so the relative step is `alpha` |
+| gradient rescaling away from epsilon floors | Oja tangent, moment and update unchanged |
+| geodesic frame rotation | stored moment coordinates and singular values unchanged, up to the stored-frame rotation correction |

@@ -8,12 +8,12 @@ quantized weight isn't a plain differentiable 2D tensor. Pass
 ordinary bf16 model with real weights, exactly what UsuiTrack expects.
 
 Verified end to end on `LiquidAI/LFM2.5-350M-Base` (Unsloth ships a patched
-Lfm2 path): 5 real steps, loss 5.31 -> 3.65, 1.86 GB peak on an RTX 4070
-Super. That number is this toy's batch of 4 short sentences, not a claim
-about real training; measure your own shapes.
+Lfm2 path), unsloth 2026.10.11 on torch 2.14.1, RTX 4070 Super: 5 real steps,
+loss 5.29 -> 2.42, and 2.42 with `--release-matrix-grads`. That is this toy's
+batch of 4 short sentences, not a claim about real training.
 
-Run: uv run --with "unsloth" --with torch examples/train_unsloth.py
-     Needs a CUDA GPU. Unsloth pulls its own compatible torch build.
+Run: python examples/train_unsloth.py [--release-matrix-grads]
+     in an environment with Unsloth and this package installed. Needs a CUDA GPU.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def build_optimizers(model: nn.Module, release_matrix_grads: bool) -> tuple[Usui
     matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
     other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
 
-    matrix_opt = UsuiTrack(matrix_params, lr=4e-4, rank=32, release_matrix_grads=release_matrix_grads)
+    matrix_opt = UsuiTrack(matrix_params, lr=1e-4, release_matrix_grads=release_matrix_grads)
     other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
     return matrix_opt, other_opt
 

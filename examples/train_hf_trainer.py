@@ -60,7 +60,7 @@ def build_optimizer(model: nn.Module, release_matrix_grads: bool) -> SplitOptimi
     matrix_params = [p for p in model.parameters() if p.ndim == 2 and id(p) not in embedding_params]
     other_params = [p for p in model.parameters() if p.ndim != 2 or id(p) in embedding_params]
 
-    matrix_opt = UsuiTrack(matrix_params, lr=4e-4, rank=8, release_matrix_grads=release_matrix_grads)
+    matrix_opt = UsuiTrack(matrix_params, lr=1e-4, release_matrix_grads=release_matrix_grads)
     other_opt = torch.optim.AdamW(other_params, lr=1e-4, betas=(0.9, 0.99))
     return SplitOptimizer(matrix_opt, other_opt)
 

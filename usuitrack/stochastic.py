@@ -57,6 +57,17 @@ def wants_stochastic_rounding(tensor: Tensor) -> bool:
     return tensor.dtype is torch.bfloat16
 
 
+@torch.no_grad()
+def round_into(target: Tensor, source: Tensor) -> None:
+    """Write fp32 `source` into `target`: stochastically for bf16, otherwise to
+    nearest. `copy_stochastic_` truncates to bf16's bit layout, so on any other
+    dtype it would round to the bf16 grid."""
+    if wants_stochastic_rounding(target):
+        copy_stochastic_(target, source)
+    else:
+        target.copy_(source)
+
+
 class StochasticAdamW(Optimizer):
     """AdamW that keeps parameters and moments in bf16 with stochastic rounding.
 
