@@ -55,8 +55,8 @@ The goal (user, 2026-10-30): a FLOP win under checkpointing, not a VRAM win.
 Built as `Molegrad` in the package (SPEC, "Molegrad"), opt-in beside the `G`
 path (user, 2026-10-31): `Z` exact and the diagonal aim from `X` and `delta`,
 ~0.1 of `dW`'s FLOPs at rank 0.05; design notes in
-`docs/PROJECTED_ACTIVATION_2.md`. On LFM3 it ties `G` through 1k steps at 3.25
-against 3.71 s/step (FACTS, "S2 ties `G` through 1k steps"). Open:
+`docs/PROJECTED_ACTIVATION_2.md`. On LFM3 it ties `G` through 1k steps at 3.66
+against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
 
 - Anima's batch under molegrad. Accumulation without offloading beats
   offloading: bs8 x 2 is 8% faster, bs4 x 4 3.5% faster at 2.1 GiB less peak
@@ -67,11 +67,12 @@ against 3.71 s/step (FACTS, "S2 ties `G` through 1k steps"). Open:
   is the other lever (user, 2026-10-31); for scale, lodestone trains Chroma at
   bs64.
 - The early lead: target under `G` at all ten evals, 1.4e-3 at step 100, above
-  the LFM3 null pair (FACTS, "Run-to-run noise"). A second seed of both arms
-  says whether the diagonal aim buys it.
+  the LFM3 null pair (FACTS, "Run-to-run noise"); repeated with other rounding
+  draws at the same seed, 1.3e-3 at step 100 and under at all ten. A second
+  seed of both arms says whether the diagonal aim buys it.
 - The next saving (FACTS, "Where the S2 step's time goes"). The weight write
-  is compiled on `lab` (R1 asks about the release). Past it the step is
-  host-bound, ~155 ms of idle GPU in the optimizer and ~37 ms in `prepare`,
+  is eager (ARCHIVE, "the release's weight write is eager"); a runner can
+  compile it for 0.22 s/step. Past it the step is host-bound, ~155 ms of idle GPU in the optimizer and ~37 ms in `prepare`,
   which only a CUDA graph over the post-backward work reaches. That needs the
   release diagnostics to accumulate in place with static counts, `lr` as a
   device tensor, and molegrad's leaves to keep their grads; optional (user,
@@ -90,22 +91,6 @@ ai-toolkit carries a hardcoded side table (residual-facing, plus cross-attention
 K/V). Since liveness masking, `auto` may do as well with one or two exceptions.
 Settling it needs the per-role reads the release no longer has: open is how the
 ai-toolkit lane gets `LabDiagnostics`, which lives in this repo's `experiments/`.
-
----
-
-## Group R. Release
-
-### R2. Does today's optimizer beat a memory-matched LoRA?
-
-README's headline (LoRA rank 44 against UsuiTrack rank 128 on LFM2.5, 1k
-steps) is the prerelease optimizer's (`docs/prerelease/PLAN.md`), so it cannot
-ship. How to settle: LFM3, 1k steps (the old crossing came at 900), seed 1,
-constant lr after warmup, release code: `G`, molegrad, and LoRA at rank 56,
-alpha 56 -- adapters plus both Adam moments hold the frame-plus-moment bytes of
-rank 0.05 -- at `1e-4` and `2e-4`, the harness's sensor-chosen LoRA lr from
-LFM2.5 and half of it. Prediction (2026-10-31, before the runs): `G` and
-molegrad tie inside the noise floor; LoRA leads target early and loses its lead
-by 1k; UsuiTrack keeps more source by more than 3e-3; LoRA peaks higher.
 
 ---
 

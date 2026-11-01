@@ -1122,6 +1122,18 @@ inductor and a toolchain, a first-step compile, and an 8-graph budget past
 which it ran eager silently; the eager write is the only implementation, on
 `lab` too, and a runner can compile it when lab wants the 0.22 s/step back.
 
+## CLOSED -- UsuiTrack beats a memory-matched LoRA on what it keeps
+
+PLAN R2, 2026-11-01 (FACTS, "UsuiTrack against a memory-matched LoRA"). LFM3
+at 1k steps, release code, LoRA at rank 56 holding the state of rank 0.05, at
+`1e-4` and `2e-4`. LoRA leads target early and loses the lead by step 400 or
+900; at 1k `G` and molegrad are ahead on target by 1.6-4.9e-3, and LoRA's
+source loss rises 1.8-2.2x as far. Raising LoRA's lr trades source for target
+at about nine to one. LoRA steps 9-18% faster and peaks 0.16 GB higher. The
+prediction held on every count except the size of the source gap, ten times
+the 3e-3 it named. README's Result is this comparison; the prerelease LFM2.5
+one (LoRA rank 44 against rank 128) is withdrawn from it.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved
