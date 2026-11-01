@@ -8,12 +8,12 @@ quantized weight isn't a plain differentiable 2D tensor. Pass
 ordinary bf16 model with real weights, exactly what UsuiTrack expects.
 
 Verified end to end on `LiquidAI/LFM2.5-350M-Base` (Unsloth ships a patched
-Lfm2 path): 5 real steps, loss 5.31 -> 3.65, 1.86 GB peak on an RTX 4070
-Super. That number is this toy's batch of 4 short sentences, not a claim
-about real training; measure your own shapes.
+Lfm2 path), unsloth 2026.10.11 on torch 2.14.1, RTX 4070 Super: 5 real steps,
+loss 5.29 -> 2.42, and 2.42 with `--release-matrix-grads`. That is this toy's
+batch of 4 short sentences, not a claim about real training.
 
-Run: uv run --with "unsloth" --with torch examples/train_unsloth.py
-     Needs a CUDA GPU. Unsloth pulls its own compatible torch build.
+Run: python examples/train_unsloth.py [--release-matrix-grads]
+     in an environment with Unsloth and this package installed. Needs a CUDA GPU.
 """
 
 from __future__ import annotations
