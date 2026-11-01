@@ -62,10 +62,12 @@ Decided 2026-10-31 (you): the write is eager, `rank_fraction` 0.05,
 `grad_capture` under molegrad is the read, `lab` on torch 2.14 with
 `causal-conv1d` optional. Done since: R2 measured and README's Result
 rewritten on it (logs in `outputs/headline/`), the suite on the GPU, the Unsloth
-example in both modes. Left: the squash, which takes a curated file set:
-`main`'s `pyproject.toml` keeps `torch>=2.1` and no groups; the harness tests
-(`test_llm_harness`, `test_activation_frames`, `test_stream_frames`,
-`test_lab_diagnostics`) stay behind; `main`'s suite must pass on its own.
+example in both modes. The squash is `c1772fe` on local `main`: `lab`'s
+package, examples, README, SPEC and four test files; `main`'s `pyproject.toml`
+and `uv.lock` unchanged (`torch>=2.1`, no groups; the lock holds torch 2.13,
+which has no wheel for Python 3.15); the harness tests stay behind. Its suite
+passes alone, 53 tests on torch 2.13, Python 3.14. You push `main` and `lab`;
+SPEC points to FACTS and ARCHIVE "on `lab`".
 
 ## Next
 
@@ -216,7 +218,8 @@ Under your handover of 2026-10-29 night, oldest first:
 - `0fd464d` FACTS: against a memory-matched LoRA; `f9fc3c9` PLAN/ARCHIVE: R2
   closed, S2's stale lines corrected.
 - `af3fd25` README's Result; `edde9d6` the Unsloth docstring's verified run.
-- this handover.
+- `9b481aa` this handover; `2c986a8` README: molegrad's saving is 11%.
+- `c1772fe` on `main`: the release squash and its message.
 
 Overnight 2026-10-30/31, `projected-grads`:
 - `447313d`, `dd53c2f` this handover.
