@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28, updated 2026-10-31, night. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-11-01, night. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Where it stands
@@ -18,7 +18,8 @@ residual writers keep their output side; a live aim does not make rank 0.1 pay.
 `projected-grads` 2026-10-31; old `lab` was `068d85c`): `Molegrad(model, optimizer)`, opt-in beside the `G` path
 (user's choice A, 2026-10-31), SPEC "Molegrad", README. No `dW`, the diagonal
 aim, no step ever holds `G`, accumulation works; ties `G` through 1k steps on
-LFM3 at 3.25 against 3.71 s/step. Resume is tested; a review subagent's five
+LFM3 at 3.66 against 4.09 s/step, and both beat a memory-matched LoRA (R2
+closed, README's Result). Resume is tested; a review subagent's five
 silent bugs are fixed, each with a test. M1 closed: the magnitude goes at `Z`.
 The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
 
@@ -46,11 +47,11 @@ The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
   group index after `load_state_dict`; hooks missing on later param groups;
   `pop()` making two transfers; a NaN gradient turning `grad_capture` NaN; lab
   frame-motion reads sampling only the first param group.
-- **Verified:** 89 tests on `lab` (CPU, torch 2.14); golden trajectories from the old code reproduced to
+- **Verified:** 89 tests on `lab` (CPU and the GPU, torch 2.14); golden trajectories from the old code reproduced to
   ~5e-6 relative; `release-clean-s1`, the standard arm: 1.652230 / 3.057482 against the
   reference 1.652199 / 3.058867, 1.133 s/step (FACTS).
-  `examples/train_pytorch.py` and `train_hf_trainer.py` run in both modes.
-  **Not verified:** `examples/train_unsloth.py` (unsloth not installed).
+  `examples/train_pytorch.py`, `train_hf_trainer.py` and `train_unsloth.py`
+  (unsloth 2026.10.11, env `outputs/unsloth/env`) run in both modes.
 
 ## Release
 
@@ -59,25 +60,20 @@ release files onto it, prepared locally after your review; you push.
 
 Decided 2026-10-31 (you): the write is eager, `rank_fraction` 0.05,
 `grad_capture` under molegrad is the read, `lab` on torch 2.14 with
-`causal-conv1d` optional. Before the squash:
-- PLAN R2, the README headline on today's optimizer: queued in
-  `outputs/headline/queue5.sh` behind the Anima queue, four 1k LFM3 runs
-  (`head-g-1k`, `head-mole-1k`, `head-lora56-{1e4,2e4}-1k`), ~4 h; logs and
-  `status` in `outputs/headline/`. Then README's Result section.
-- The squash takes a curated file set: `main`'s `pyproject.toml` keeps
-  `torch>=2.1` and no groups; the harness tests (`test_llm_harness`,
-  `test_activation_frames`, `test_stream_frames`, `test_lab_diagnostics`) stay
-  behind; `main`'s suite must pass on its own.
-- The suite on the GPU once the card is free; `examples/train_unsloth.py` run
-  (env in `outputs/unsloth/env`) or cut.
+`causal-conv1d` optional. Done since: R2 measured and README's Result
+rewritten on it (logs in `outputs/headline/`), the suite on the GPU, the Unsloth
+example in both modes. Left: the squash, which takes a curated file set:
+`main`'s `pyproject.toml` keeps `torch>=2.1` and no groups; the harness tests
+(`test_llm_harness`, `test_activation_frames`, `test_stream_frames`,
+`test_lab_diagnostics`) stay behind; `main`'s suite must pass on its own.
 
 ## Next
 
 Molegrad toward release, in order:
-1. Anima's batch (PLAN S2): `outputs/anima-mole/queue4.sh` runs bs16
-   offloaded, bs8 x 2 and bs4 x 4 unoffloaded, 20 steps each, all on tonight's
-   tree. Your call still: drop the nested attention checkpoint from
-   `anima.py` for the `G` path too; until then the runner patches it out.
+1. Anima's batch (PLAN S2): measured (FACTS, "Accumulation beats
+   offloading"); your call which split, bs4 x 4 (my lean, 2.1 GiB of headroom)
+   or bs8 x 2 (8% faster). Also yours: drop the nested attention checkpoint
+   from `anima.py` for the `G` path too; until then the runner patches it out.
 2. The release steps above.
 3. After the release, the next Anima run (yours, 2026-10-31): AdaLN frozen
    (`ignore_if_contains` gains `norm1.linear`, `norm2.linear`,
@@ -211,6 +207,15 @@ Under your handover of 2026-10-29 night, oldest first:
 - `9c726fc` FACTS: run 29's capture stands as read.
 - `e4dfc47` torch 2.14, `causal-conv1d` the optional `lfm25` group (uv.lock).
 - `3cf0e60` AGENTS for it; `6f775ae` PLAN/ARCHIVE: R1 closed, R2 opened.
+- this handover.
+
+2026-10-31 night to 2026-11-01, on `lab`, yours to own:
+- `17f5b3d` FACTS: run 29; `7e03c4a` PLAN/ARCHIVE: Anima under molegrad
+  closed; `4a9ded5` this handover.
+- `6385c54` FACTS: accumulation beats offloading on Anima; `c65f375` PLAN S2.
+- `0fd464d` FACTS: against a memory-matched LoRA; `f9fc3c9` PLAN/ARCHIVE: R2
+  closed, S2's stale lines corrected.
+- `af3fd25` README's Result; `edde9d6` the Unsloth docstring's verified run.
 - this handover.
 
 Overnight 2026-10-30/31, `projected-grads`:
