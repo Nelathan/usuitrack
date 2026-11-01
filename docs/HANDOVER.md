@@ -62,19 +62,19 @@ Decided 2026-10-31 (you): the write is eager, `rank_fraction` 0.05,
 `grad_capture` under molegrad is the read, `lab` on torch 2.14 with
 `causal-conv1d` optional. Done since: R2 measured and README's Result
 rewritten on it (logs in `outputs/headline/`), the suite on the GPU, the Unsloth
-example in both modes. The squash is `c1772fe` on local `main`: `lab`'s
+example in both modes. The squash is `a166a19` on local `main`: `lab`'s
 package, examples, README, SPEC and four test files; `main`'s `pyproject.toml`
-and `uv.lock` unchanged (`torch>=2.1`, no groups; the lock holds torch 2.13,
-which has no wheel for Python 3.15); the harness tests stay behind. Its suite
-passes alone, 53 tests on torch 2.13, Python 3.14. You push `main` and `lab`;
-SPEC points to FACTS and ARCHIVE "on `lab`".
+unchanged (`torch>=2.1`, no groups), `uv.lock` relocked to torch 2.14.1 (no
+wheel for Python 3.15, so a clone syncs with `--python 3.14`); the harness
+tests stay behind. Its suite passes alone, 53 tests. You push `main` and
+`lab`; SPEC points to FACTS and ARCHIVE "on `lab`".
 
 ## Next
 
 Molegrad toward release, in order:
-1. Anima's batch (PLAN S2): bs4 x 4 (yours, 2026-11-01); its `lr` and
-   `beta` want a look before the run. Also yours: drop the nested attention checkpoint
-   from `anima.py` for the `G` path too; until then the runner patches it out.
+1. Anima's batch (PLAN S2): bs4 x 4 (yours, 2026-11-01), changing only the
+   `lr` schedule; `beta 0.9` after it. Also yours: drop the nested attention
+   checkpoint from `anima.py` for the `G` path too; until then the runner patches it out.
 2. The release steps above.
 3. After the release, the next Anima run (yours, 2026-10-31): AdaLN frozen
    (`ignore_if_contains` gains `norm1.linear`, `norm2.linear`,
@@ -218,7 +218,7 @@ Under your handover of 2026-10-29 night, oldest first:
   closed, S2's stale lines corrected.
 - `af3fd25` README's Result; `edde9d6` the Unsloth docstring's verified run.
 - `9b481aa` this handover; `2c986a8` README: molegrad's saving is 11%.
-- `c1772fe` on `main`: the release squash and its message.
+- `a166a19` on `main`: the release squash and its message.
 
 Overnight 2026-10-30/31, `projected-grads`:
 - `447313d`, `dd53c2f` this handover.

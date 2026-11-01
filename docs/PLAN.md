@@ -61,7 +61,8 @@ against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
 - Anima's batch under molegrad. Accumulation without offloading beats
   offloading: bs8 x 2 is 8% faster, bs4 x 4 3.5% faster at 2.1 GiB less peak
   (FACTS, "Accumulation beats offloading on Anima"). The next run takes
-  bs4 x 4 (user, 2026-11-01), and its `lr` and `beta` need a look first (user).
+  bs4 x 4 (user, 2026-11-01) and the new `lr` schedule alone; `beta 0.9` is
+  considered for after it (user).
   Open: whether bs4 x 4's headroom buys a larger batch, and whether
   the nesting goes from `anima.py` for the `G` path too (it fits unnested at
   rank 0.05). Batch is the noise lever: `beta` only buys staleness, lower `lr`
