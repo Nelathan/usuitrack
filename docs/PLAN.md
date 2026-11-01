@@ -78,7 +78,11 @@ against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
   which only a CUDA graph over the post-backward work reaches. That needs the
   release diagnostics to accumulate in place with static counts, `lr` as a
   device tensor, and molegrad's leaves to keep their grads; optional (user,
-  2026-10-30: ~5%, clean code first).
+  2026-10-30: ~5%, clean code first). A Triton write grouped by shape is the
+  other lever (user, 2026-11-01); it needs a GPU-only release or a second
+  implementation. First, a profile of today's tree splitting host time into
+  optimizer, lab diagnostics and molegrad's backward. Parked until the user
+  picks it up.
 - Accumulation works under molegrad (FACTS, "S2 accumulates"), 6e-4 from the
   unsplit step, holding no gradient: S1's answer for a user who opts in. S1
   stays open for the `G` path.
