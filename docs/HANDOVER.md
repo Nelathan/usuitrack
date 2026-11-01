@@ -72,9 +72,8 @@ SPEC points to FACTS and ARCHIVE "on `lab`".
 ## Next
 
 Molegrad toward release, in order:
-1. Anima's batch (PLAN S2): measured (FACTS, "Accumulation beats
-   offloading"); your call which split, bs4 x 4 (my lean, 2.1 GiB of headroom)
-   or bs8 x 2 (8% faster). Also yours: drop the nested attention checkpoint
+1. Anima's batch (PLAN S2): bs4 x 4 (yours, 2026-11-01); its `lr` and
+   `beta` want a look before the run. Also yours: drop the nested attention checkpoint
    from `anima.py` for the `G` path too; until then the runner patches it out.
 2. The release steps above.
 3. After the release, the next Anima run (yours, 2026-10-31): AdaLN frozen
