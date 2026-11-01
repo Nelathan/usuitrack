@@ -103,7 +103,7 @@ With activation checkpointing, the weight-gradient GEMMs are a quarter of the
 linear layers' matmul FLOPs. `Molegrad` skips them: each tracked `Linear`'s
 backward returns the rank-`r` projection the optimizer consumes, straight from
 the layer's input and output gradient, and the full gradient is never formed.
-On LFM3-1.7B it ties the ordinary path's loss through 1k steps at 12% less
+On LFM3-1.7B it ties the ordinary path's loss through 1k steps at 11% less
 time per step, and gradient accumulation works without holding any gradient.
 
 ```python
