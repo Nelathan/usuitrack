@@ -30,7 +30,8 @@ The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
   `[n,r]`). Polar and turn run per matrix; only the `[r,r]` tangent-Gram `eigh`
   is stacked, by rank (FACTS: 0.887 s/step at 350M; LFM3's peak is backward).
 - **Surface:** `lr`, `beta`, `weight_decay`, `rank_fraction`, `side`,
-  `release_matrix_grads`, `diagnostics`; `Molegrad` wraps a model and the
+  `release_matrix_grads`, `diagnostics`; per group also `step_rule`,
+  `frame_init` and `norm_bounds`; `Molegrad` wraps a model and the
   optimizer. Accumulation works without release, raises with it, works under
   molegrad. The lr schedule is the trainer's.
 - **Telemetry:** on/off, six self-describing reads (`READS`). Transport,

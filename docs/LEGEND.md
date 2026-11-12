@@ -143,7 +143,7 @@ his hands do not chase it. His eyes are already through the exit.
 
 That is position control.
 
-At each refresh, `eigh` reads the current conditioned gradient and names a target
+At each refresh, the tracker reads the current conditioned gradient and names a target
 frame. The target is noisy, especially where the last retained eigenvalue trades
 places with the first discarded one. Snapping to it would be panic steering.
 UsuiTrack turns one quarter of the geodesic distance and waits for the next view.

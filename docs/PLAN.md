@@ -24,6 +24,10 @@ can it target a norm rather than inherit one -- size the step against an ideal
 means (an init-scale rule, a measured trained-model norm per role), and whether
 that is the optimizer's job at all. How to settle: a small model trained from
 scratch, where the init is a free variable.
+State: a group's `step_rule="fixed"` moves a zero matrix, and `norm_bounds`
+clamps the norm into multiples of its init norm (SPEC step 8); nanodit pretrains
+under a ceiling. Open still: the fixed rule's lr against the trust rule's, and a
+target norm that is not the init's.
 
 ### N2. Rising weight norms, and weight decay
 
@@ -34,6 +38,34 @@ fraction of `||W||` compounds when it correlates with `W`, so the rise may be
 N1's issue seen from the other end. Weight decay is not the remedy for a
 Muon-type step (user, 2026-10-30), though `weight_decay` is in the release. How
 to settle: `||W||` per role over a standard LFM arm first (cheap, a lab read).
+
+---
+
+## Group R. The first frame and `eigh`
+
+### R1. Range finder against eigh for a finetune's first frame
+
+The first frame is a range finder with one power step, not the exact top-`r`
+eigenspace of the first Gram (SPEC step 2). On a flat spectrum it is approximate.
+Open: how much `grad_capture` it gives up over the first steps of an LFM or Anima
+finetune, where the first gradient carries the subspace. How to settle: a
+first-steps read on the LFM lane against the eigh fit of `lab` at `be3f298`.
+
+### R2. Does the turn need `eigh` at all?
+
+The aim is closed-form; `eigh` is left only in the frame turn, one stacked call
+on the `[r, r]` tangent Grams per step, which reads its status back to the host
+(`frame.tangent_spectra`). Open: whether a polar map of the tangent (Newton-Schulz
+or Polar Express, as the moment already uses) moves the frame as well, without
+the sync. How to settle: on a branch from `lab`, the turn's angle and live planes
+against `eigh` on real gradients, then a standard arm.
+
+### R3. The cost of one padded `eigh`
+
+`tangent_spectra` pads every Gram to the largest rank and runs one call, rather
+than one per rank. Measured nowhere on a lane with mixed ranks (LFM, Anima),
+where a small Gram pays for the largest. How to settle: step time on the standard
+LFM arm against per-rank stacking.
 
 ---
 

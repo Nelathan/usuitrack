@@ -138,9 +138,10 @@ after step 1's sanitizing, which includes one that was entirely non-finite, has
 no leading eigenspace, and the range finder returns an arbitrary orthonormal
 frame from it (the QR of zero); its `Z` is zero, so the moment holds and the
 weight holds but for its decay, and the tracker turns the frame from the next
-step on. The optimizer's fit reads nothing back to the host, so it compiles with
-the rest of the step; Molegrad's once-per-matrix check that the fit is the first
-backward is the one read it keeps. A model trained
+step on. The fit reads nothing back to the host. Molegrad draws the sketch when it
+binds, so its fit traces inside a compiled backward; the optimizer's own fit draws
+the sketch at the fit and runs eager. Molegrad's once-per-matrix check that the fit
+is the first backward is the one read it keeps. A model trained
 from a zero-initialized output (adaLN-zero) sees exactly such gradients upstream
 until the output moves, and gains nothing from a fit: its param groups take
 `"frame_init": "random"`, which draws each frame when the group is added, on the param's device, as the
