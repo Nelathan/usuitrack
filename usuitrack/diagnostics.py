@@ -21,7 +21,8 @@ READS = {
     "relative_step": (
         "||dW|| / ||W|| over all matrices, before rounding. Equals lr when every matrix "
         "stepped and every moment fills its rank; a matrix whose gradient carries k of r "
-        "planes steps at sqrt(k/r) of lr and pulls the read down."
+        "planes steps at sqrt(k/r) of lr and pulls the read down. A fixed-rule group steps "
+        "lr sqrt(max(1, m/n) r) in norm whatever its weight, so it reads that over its ||W||."
     ),
     "grad_capture": (
         "||G Q|| / ||G||: the share of the gradient the tracked frame holds. Falls when "

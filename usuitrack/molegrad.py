@@ -37,6 +37,10 @@ class _Projected(torch.autograd.Function):
         if ctx.fit:
             gradient = delta.mT @ stream if ctx.right else stream.mT @ delta
             gradient = torch.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
+            if not gradient.any():
+                # SPEC step 2: a zero gradient fits no frame. The leaves stay empty and
+                # the basis keeps waiting; the one host read, only while it waits.
+                return grad_x, None, grad_bias, None, None, None, None, None, None, None
             basis = fitted = frame.fit(gradient, basis.shape[-1])
         rank = basis.shape[-1]
         # The probes ride with the frame in one GEMM over each stream: [Q | P].
@@ -203,6 +207,9 @@ class Molegrad:
 
     @torch.no_grad()
     def _store_fit(self, weight: Tensor, basis: Tensor) -> None:
+        if basis.grad is None:
+            # The hook also fires for a backward that fitted nothing (a zero gradient).
+            return
         # Each call of the Linear fits its own frame, and autograd sums them.
         gram = basis.grad.float().mT @ basis.grad.float()
         if not torch.allclose(gram, torch.eye(gram.shape[0], device=gram.device), atol=0.1):

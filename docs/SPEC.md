@@ -85,7 +85,7 @@ accuracy, it corrupts the tracked frame for every step after it.
 ```text
 raw gradient G
   -> sanitize
-  -> stable EIGH initialization on the first step
+  -> stable EIGH initialization on the first nonzero gradient
   -> held-frame projected gradient Z
   -> Rayleigh-normalized one-state Oja tangent
   -> release full gradient; retain rank-sized pending work
@@ -122,8 +122,22 @@ step. Pinned by `test_the_update_is_invariant_to_gradient_scale`.
 
 Normalize `A = G_o / ||G_o||_F` and form the symmetrized side Gram `K = A^T A`.
 `Q` is its top-`r` eigenvector frame. There is no retry: a failing `eigh` fails.
-An exactly zero gradient produces the deterministic EIGH frame of the zero
-Gram. The fitting step moves no frame; the moment and weight step as usual.
+The fitting step moves no frame; the moment and weight step as usual.
+
+**A zero gradient fits no frame.** A gradient that is exactly zero after step 1's
+sanitizing, which includes one that was entirely non-finite, has no leading
+eigenspace: the EIGH of a zero Gram is the coordinate axes, a frame that says
+nothing about the matrix. A matrix with no frame yet and such a gradient fits
+none, creates no moment, and takes no step; its weight, decay included, holds.
+It fits at its first nonzero gradient, exactly as if that were its first step. So
+every frame is fitted from a nonzero gradient, and a model whose upstream matrices
+have zero gradient while a zero-initialized output has yet to move (adaLN-zero)
+fits them when the gradient arrives. That gradient can have rank below the frame's
+-- it is limited by the freshly moved output matrix -- and the planes it does not
+span are arbitrary until the tracker turns them. The decision is a device-to-host
+read of whether the sanitized gradient is zero, made once per `step()` for a matrix
+that has no frame (once per backward of its Linear under Molegrad, step "Molegrad"
+below); once fitted, a matrix is never read back.
 
 ### 3. Project in the held frame
 
@@ -376,10 +390,29 @@ norm whatever the weight's, so the update's RMS per element grows as the matrix
 shrinks: the module with fewest parameters takes the largest relative step. In
 a diffusion transformer those are the input and output projections, the
 bottlenecks the rank cap exists for (above). Against `||W||`, the update's RMS
-is a fixed fraction of the weight's own.
+is a fixed fraction of the weight's own. The shape-scaled step is the `fixed`
+rule below, for matrices that have no norm to be relative to.
 
-**Limit.** A matrix with `||W|| = 0` never moves. A zero-initialized matrix
-needs a non-zero init or the fallback optimizer.
+**The step rule.** A param group's `step_rule` is one of two.
+
+- `"trust"` (default): the rule above, `U_t = ||W_{t-1}||_F Lambda_{Q_t}(O_t)`.
+  A matrix with `||W|| = 0` never moves, since the step is sized against zero.
+- `"fixed"`: the step is sized by the matrix's shape, not its norm. For
+  `W:[m,n]` as stored, whichever side the frame is on,
+
+$$U_t=\sqrt{\max(1,m/n)}\,\sqrt r\;\Lambda_{Q_t}(O_t),\qquad
+\|U_t\|_F=\sqrt{\max(1,m/n)\,r}$$
+
+  for a moment that fills its rank, and `sqrt(k/r)` of that for `k` of `r` planes.
+  It is Muon's aspect factor times `sqrt r`, the norm of the polar factor that
+  `O_t` is the unit of. `lr` is then an absolute step, so a zero-initialized matrix moves from its
+  first nonzero gradient, and the relative step `||U||/||W||` follows from the
+  weight rather than being `lr`. The rank enters the size here, so `rank_fraction`
+  is no longer a pure subspace knob for a fixed group.
+
+Weight decay, the lift and the rounding are the same under both rules, and a
+param group chooses its own, so one optimizer can hold both. `relative_step`
+stays `||dW||/||W||` under either.
 
 With decoupled weight decay `lambda` (default `0`), and `U_t` sized from the
 weight before the decay,
@@ -475,9 +508,14 @@ matrices it reads `||G||` to within 1% (`FACTS.md` on `lab`, "Training without
 Like step 1's norm it is telemetry and the non-finite flag, and applied to
 nothing. All three leaves are token sums, so micro-batches accumulate exactly.
 
-A matrix with no frame fits it in its first backward from that micro-batch's
-`G`, formed and freed inside the backward; under accumulation that is the
-first micro-batch's gradient, not the step's, sanitized as in step 1. The
+A matrix with no frame fits it in the first backward whose `G` is not exactly
+zero, formed and freed inside the backward; under accumulation that is the first
+such micro-batch's gradient, not the step's, sanitized as in step 1. A backward
+whose `G` is zero (step 2) fits nothing and returns none of the three leaves: `G = 0`
+makes its `Z` and probes zero, so it adds nothing to the sums, and the matrix is
+handed to the optimizer only once a backward has fitted it. The zero test is
+step 2's host read, made once per backward of the Linear (per micro-batch and per
+call) while the matrix has no frame. The fitting step has no tangent whichever micro-batch fitted. The
 frame lives only in optimizer state, which the modules read again after every
 load. `step()` collects the leaves itself; a closure would run its backward
 after that, so it raises. `zero_grad()` and a load drop leaves no step
@@ -491,7 +529,8 @@ placed with the weights when it is built, so the model has its device and
 dtype by then. Refused with the reason, rather than trained wrong: a Linear
 subclass (its own forward would be replaced), a weight shared with another
 module, a tracked matrix that is not a Linear's weight, a Linear called more
-than once in the backward that fits its frame (each call fits its own), and
+than once in the backward that fits its frame, when more than one call has a nonzero
+gradient (each fits its own), and
 more than one process (the leaves are not all-reduced).
 
 ## Parameter eligibility
@@ -562,17 +601,17 @@ total, because a rare event averaged against a quiet window reads as zero.
 
 No read makes its own pass over a full matrix. Each is a reduction of a
 rank-sized tensor or of a norm the step already took: the update's norm is read
-in frame coordinates, `||U|| = ||O|| ||W||`, since the lift is an isometry, and
+in frame coordinates, `||U|| = ||O|| S`, `S` the step rule's size, since the lift is an isometry, and
 non-finite gradients are counted from the raw norm.
 
 | key | what it measures |
 |---|---|
-| `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped and every moment fills its rank (step 8); below it by the rank the moments leave empty |
+| `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped under the trust rule and every moment fills its rank (step 8); below it by the rank the moments leave empty. A `fixed` group contributes its shape-sized step over its own `||W||`, so the read is `lr` only by coincidence there |
 | `grad_capture` | `||G_o Q|| / ||G||`: the share of the gradient's magnitude the frame catches. Reads the basis rather than the model |
 | `grad_moment_cosine` | this step's unit projected gradient against the moment *before* the blend, so the reading is not self-referential. Positive: the step under-travels and the gradient keeps its direction; negative: it overshoots |
 | `tangent_live_fraction` | the share of planes with `sigma_i > sqrt(r eps) sigma_max` (step 4). Below `1` the aim is rank-collapsed against the rank it was given: the rank is too large for what this batch size resolves |
 | `projected_grad_norm` | `||G_o Q||`. The step is blind to it; bursts mark outlier batches the fallback optimizer is not blind to |
-| `nonfinite_grads` | matrix gradients whose raw norm was non-finite and were sanitized |
+| `nonfinite_grads` | matrix gradients whose raw norm was non-finite and were sanitized. A matrix still waiting for its frame (step 2) is not read, so an entirely non-finite gradient is not counted there |
 
 `usuitrack.diagnostics.READS` carries a one-line reading guide per key. A
 subclass adds reads by overriding the event methods; the lab's
@@ -624,6 +663,6 @@ These choices define the current design; they are redesignable.
 | Oja covariance action lies inside the current subspace | zero frame motion |
 | Oja tangent is rank-deficient | zero singular planes remain fixed |
 | full rank | projection/lift loses no component; balancing can still alter direction |
-| any shape, rank or weight scale, every step agreeing | `||U||_F / ||W||_F = 1`, so the relative step is `alpha` |
+| any shape, rank or weight scale, every step agreeing, trust rule | `||U||_F / ||W||_F = 1`, so the relative step is `alpha` |
 | gradient rescaling away from epsilon floors | Oja tangent, moment and update unchanged |
 | geodesic frame rotation | stored moment coordinates and singular values unchanged, up to the stored-frame rotation correction |

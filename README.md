@@ -150,9 +150,36 @@ read each key. The two that tell you the most about a new setup are
 size?) and `grad_capture` (how much of the gradient does the frame hold?).
 
 UsuiTrack is built for full-parameter training; LoRA is the comparison point
-above, not a mode of operation. Because the step is relative to `||W||`, **a
-matrix initialized to zero never moves**, and that includes LoRA's `B` matrix.
-Give such weights a non-zero init or the fallback optimizer.
+above, not a mode of operation.
+
+### Step rule and zero-initialized matrices
+
+A param group's `step_rule` chooses how a step is sized. `"trust"`, the default, is
+the relative step above: `lr` is `||dW|| / ||W||`, so **a matrix initialized to
+zero never moves** under it. `"fixed"` sizes the step by the matrix's shape instead:
+`lr * sqrt(max(1, m/n) * r)` in norm for a moment that fills its rank (Muon's
+aspect factor on the stored `[out, in]` shape times the polar factor's `sqrt(r)`),
+whatever the weight's norm. `lr` is then an absolute step, so its sensible value
+differs from the trust rule's, and a zero-initialized matrix, such as an
+adaLN-zero output projection, moves from its first nonzero gradient. Groups choose
+independently:
+
+```python
+matrix_opt = UsuiTrack(
+    [
+        {"params": matrix_params},
+        {"params": [final.weight], "step_rule": "fixed"},
+    ],
+    lr=1e-4,
+)
+```
+
+Everything upstream of a zero-initialized output has an exactly zero gradient
+until it moves. A matrix without a frame whose gradient is exactly zero fits none,
+keeps no moment and does not step; it fits at its first nonzero gradient. This
+costs one device-to-host read per such matrix per `step()` while it waits (per
+micro-batch backward of its Linear under `Molegrad`), and none after.
+`docs/SPEC.md`, steps 2 and 8, has the contract.
 
 ## How it works
 

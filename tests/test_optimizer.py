@@ -446,3 +446,152 @@ def test_agreement_reads_the_moment_before_this_step_not_after():
     params, optimizer = _two_matrix_optimizer(diagnostics=True)
     _run(params, optimizer, 1)
     assert abs(optimizer.pop_diagnostics()["grad_moment_cosine"]) < 1e-6
+
+
+def test_a_zero_matrix_never_moves():
+    """SPEC step 8: the step is sized against `||W||`, which is zero."""
+
+    weight = torch.nn.Parameter(torch.zeros(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.1, rank_fraction=RANK_FRACTION)
+    for _ in range(3):
+        weight.grad = torch.randn(ROWS, COLS)
+        optimizer.step()
+    assert torch.equal(weight, torch.zeros(ROWS, COLS))
+
+
+@pytest.mark.parametrize("release", [False, True])
+def test_a_zero_first_gradient_fits_no_frame_and_the_first_nonzero_one_fits_as_a_first_step(release):
+    """SPEC step 2: a matrix without a frame fits it from its first nonzero
+    gradient, exactly as if that were its first step."""
+
+    torch.manual_seed(0)
+    base = torch.randn(ROWS, COLS)
+    gradient = torch.randn(ROWS, COLS)
+    nonfinite = torch.full((ROWS, COLS), float("nan"))
+
+    def deliver(weight, grad):
+        if release:
+            _backward(weight, grad)
+        else:
+            weight.grad = grad.clone()
+
+    waiting = torch.nn.Parameter(base.clone())
+    optimizer = UsuiTrack([waiting], lr=0.01, rank_fraction=RANK_FRACTION, release_matrix_grads=release, weight_decay=0.1)
+    for empty in (torch.zeros(ROWS, COLS), nonfinite):
+        deliver(waiting, empty)
+        if release:
+            assert waiting.grad is None
+        optimizer.step()
+        assert not optimizer.state[waiting]
+        assert torch.equal(waiting, base)
+        waiting.grad = None
+
+    fresh = torch.nn.Parameter(base.clone())
+    twin = UsuiTrack([fresh], lr=0.01, rank_fraction=RANK_FRACTION, release_matrix_grads=release, weight_decay=0.1)
+    for weight, opt in ((waiting, optimizer), (fresh, twin)):
+        deliver(weight, gradient)
+        opt.step()
+    for key in ("frame", "moment"):
+        assert torch.equal(optimizer.state[waiting][key], twin.state[fresh][key])
+    assert torch.equal(waiting, fresh)
+
+
+def _fixed_size(shape):
+    """SPEC step 8, fixed rule: the norm of a step whose moment fills its rank."""
+
+    rows, cols = shape
+    return math.sqrt(max(1.0, rows / cols) * frame.rank(torch.Size(shape), RANK_FRACTION))
+
+
+@pytest.mark.parametrize("shape", [(ROWS, COLS), (COLS, ROWS), (512, 32), (32, 512)])
+@pytest.mark.parametrize("scale", [1.0, 30.0])
+def test_a_fixed_step_is_sized_by_the_shape_and_not_by_the_weight(shape, scale):
+    torch.manual_seed(0)
+    lr = 1e-2
+    weight = torch.nn.Parameter(scale * torch.randn(*shape))
+    before = weight.detach().clone()
+    optimizer = UsuiTrack([{"params": [weight], "step_rule": "fixed"}], lr=lr, rank_fraction=RANK_FRACTION)
+    weight.grad = torch.randn(*shape)
+    optimizer.step()
+    assert (before - weight.detach()).norm().item() == pytest.approx(lr * _fixed_size(shape), rel=0.1)
+
+
+def test_a_zero_matrix_moves_under_the_fixed_rule_from_its_first_nonzero_gradient():
+    torch.manual_seed(0)
+    lr = 1e-2
+    weight = torch.nn.Parameter(torch.zeros(ROWS, COLS))
+    optimizer = UsuiTrack([{"params": [weight], "step_rule": "fixed"}], lr=lr, rank_fraction=RANK_FRACTION)
+    weight.grad = torch.zeros(ROWS, COLS)
+    optimizer.step()
+    assert torch.equal(weight, torch.zeros(ROWS, COLS))
+    weight.grad = torch.randn(ROWS, COLS)
+    optimizer.step()
+    assert weight.detach().norm().item() == pytest.approx(lr * _fixed_size((ROWS, COLS)), rel=0.1)
+
+
+def test_the_trust_rule_is_the_default_and_the_fixed_rule_changes_only_the_size():
+    torch.manual_seed(0)
+    base = torch.randn(ROWS, COLS)
+    gradients = [torch.randn(ROWS, COLS) for _ in range(3)]
+    ran = {}
+    for rule in (None, "trust", "fixed"):
+        weight = torch.nn.Parameter(base.clone())
+        group = {"params": [weight], **({} if rule is None else {"step_rule": rule})}
+        optimizer = UsuiTrack([group], lr=0.01, rank_fraction=RANK_FRACTION)
+        for gradient in gradients:
+            weight.grad = gradient.clone()
+            optimizer.step()
+        ran[rule] = (weight.detach(), optimizer.state[weight]["frame"].clone())
+    assert torch.equal(ran[None][0], ran["trust"][0])
+    assert not torch.equal(ran[None][0], ran["fixed"][0])
+    # The direction is the same, so the frames (which read only gradients) agree.
+    # They need not be bitwise equal: the weights differ, but nothing reads them.
+    assert torch.equal(ran[None][1], ran["fixed"][1])
+
+
+def test_groups_with_different_rules_step_by_their_own_in_one_optimizer():
+    torch.manual_seed(0)
+    lr = 1e-2
+    trusted = torch.nn.Parameter(30 * torch.randn(ROWS, COLS))
+    fixed = torch.nn.Parameter(30 * torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([{"params": [trusted]}, {"params": [fixed], "step_rule": "fixed"}], lr=lr, rank_fraction=RANK_FRACTION)
+    before = [trusted.detach().clone(), fixed.detach().clone()]
+    for param in (trusted, fixed):
+        param.grad = torch.randn(ROWS, COLS)
+    optimizer.step()
+    trusted_step = (before[0] - trusted.detach()).norm().item()
+    fixed_step = (before[1] - fixed.detach()).norm().item()
+    assert trusted_step == pytest.approx(lr * before[0].norm().item(), rel=0.1)
+    assert fixed_step == pytest.approx(lr * _fixed_size((ROWS, COLS)), rel=0.1)
+
+
+def test_an_unknown_step_rule_is_refused():
+    with pytest.raises(ValueError, match="step_rule"):
+        UsuiTrack([{"params": [torch.nn.Parameter(torch.randn(ROWS, COLS))], "step_rule": "relative"}])
+
+
+def test_the_step_rule_survives_a_checkpoint_round_trip():
+    """A saved rule is the loaded one; a checkpoint from before the key keeps the configured one."""
+
+    saved_from = UsuiTrack([{"params": [torch.nn.Parameter(torch.randn(ROWS, COLS))], "step_rule": "fixed"}], rank_fraction=RANK_FRACTION)
+    restored = UsuiTrack([{"params": [torch.nn.Parameter(torch.randn(ROWS, COLS))]}], rank_fraction=RANK_FRACTION)
+    restored.load_state_dict(saved_from.state_dict())
+    assert restored.param_groups[0]["step_rule"] == "fixed"
+
+    older = saved_from.state_dict()
+    for group in older["param_groups"]:
+        del group["step_rule"]
+    configured = UsuiTrack([{"params": [torch.nn.Parameter(torch.randn(ROWS, COLS))], "step_rule": "fixed"}], rank_fraction=RANK_FRACTION)
+    configured.load_state_dict(older)
+    assert configured.param_groups[0]["step_rule"] == "fixed"
+
+
+def test_relative_step_stays_the_change_over_the_weight_under_the_fixed_rule():
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([{"params": [weight], "step_rule": "fixed"}], lr=0.01, rank_fraction=RANK_FRACTION, diagnostics=True)
+    before = weight.detach().clone()
+    weight.grad = torch.randn(ROWS, COLS)
+    optimizer.step()
+    expected = (weight.detach() - before).norm() / weight.detach().norm()
+    assert optimizer.pop_diagnostics()["relative_step"] == pytest.approx(float(expected), rel=1e-4)

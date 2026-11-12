@@ -5,6 +5,7 @@ weight's norm. `docs/SPEC.md` is the design; the step numbers below are its.
 
 from __future__ import annotations
 
+import math
 import warnings
 import weakref
 from dataclasses import dataclass
@@ -22,6 +23,10 @@ from .stochastic import round_into
 # The frame's turn per basis update, in radians on every live plane. Constant,
 # not scheduled (SPEC step 4, "The turn is constant").
 GEODESIC_STEPSIZE = 0.02
+
+# How a param group sizes its write (SPEC step 8): against the weight's norm, or
+# by the matrix's shape alone.
+STEP_RULES = ("trust", "fixed")
 
 
 @dataclass
@@ -47,6 +52,10 @@ class UsuiTrack(Optimizer):
     as soon as it is complete and frees it, rather than holding every gradient
     until `step()`. It takes exactly one backward per `step()`; gradient
     accumulation needs it off.
+
+    A param group's `step_rule` is `"trust"` (default): `lr` is the relative
+    step, against `||W||`. `"fixed"` sizes the step by the matrix's shape
+    instead, so a zero-initialized matrix moves (SPEC step 8).
     """
 
     def __init__(
@@ -80,7 +89,7 @@ class UsuiTrack(Optimizer):
                 optimizer._prepare(param)
 
         self._release_hook = release
-        defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay, rank_fraction=rank_fraction, side=side)
+        defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay, rank_fraction=rank_fraction, side=side, step_rule="trust")
         super().__init__(params, defaults)
 
     def add_param_group(self, param_group: dict) -> None:
@@ -89,17 +98,23 @@ class UsuiTrack(Optimizer):
         problem = next((f"shape {tuple(p.shape)}" for p in group["params"] if p.ndim != 2), None)
         if group["side"] not in frame.SIDES:
             problem = f"side {group['side']!r}, not one of {frame.SIDES}"
+        if group["step_rule"] not in STEP_RULES:
+            problem = f"step_rule {group['step_rule']!r}, not one of {STEP_RULES}"
         if problem is not None:
             self.param_groups.pop()
-            raise ValueError(f"UsuiTrack takes 2D matrix parameters with a valid side; got {problem}")
+            raise ValueError(f"UsuiTrack takes 2D matrix parameters with a valid side and step_rule; got {problem}")
         for param in group["params"]:
             self._group_of[param] = group
             if self.release_matrix_grads and param.requires_grad:
                 param.register_post_accumulate_grad_hook(self._release_hook)
 
     def load_state_dict(self, state_dict: dict) -> None:
+        rules = [group["step_rule"] for group in self.param_groups]
         super().load_state_dict(state_dict)
         self._pending.clear()
+        # A checkpoint from before `step_rule` carries groups without it; they keep the one configured.
+        for group, rule in zip(self.param_groups, rules, strict=True):
+            group.setdefault("step_rule", rule)
         # torch rebuilds the group dicts, so re-point the index at the live ones.
         self._group_of = {param: group for group in self.param_groups for param in group["params"]}
 
@@ -142,6 +157,11 @@ class UsuiTrack(Optimizer):
         grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
         state = self.state[param]
         if "frame" not in state:
+            # SPEC step 2: a zero gradient fits no frame. The host read of
+            # `any()` is made only while the matrix has no frame.
+            if not grad.any():
+                param.grad = None
+                return
             state["frame"] = frame.fit(grad, frame.rank(param.shape, group["rank_fraction"]))
             self._pending[param] = Prepared(grad @ state["frame"], None, raw_norm)
         else:
@@ -211,12 +231,18 @@ class UsuiTrack(Optimizer):
         return moment
 
     def _write_weight(self, param: Tensor, direction: Tensor, group: dict) -> None:
-        """SPEC step 8: `W -= lr ||W|| lift(O)`, decay folded in, rounded once."""
+        """SPEC step 8: `W -= lr size lift(O)`, decay folded in, rounded once."""
 
         side = frame.resolve_side(param.shape, group["side"])
-        lift = frame.orient(direction @ self.state[param]["frame"].float().mT, side)
-        weight_norm = torch.linalg.vector_norm(param, dtype=torch.float32)
-        round_into(param, param.float() * (1.0 - group["lr"] * group["weight_decay"]) - group["lr"] * weight_norm * lift)
+        frame_q = self.state[param]["frame"]
+        lift = frame.orient(direction @ frame_q.float().mT, side)
+        if group["step_rule"] == "fixed":
+            # Muon's aspect factor on the stored [out, in] shape, times the polar factor's norm.
+            rows, cols = param.shape
+            size = math.sqrt(max(1.0, rows / cols) * frame_q.shape[-1])
+        else:
+            size = torch.linalg.vector_norm(param, dtype=torch.float32)
+        round_into(param, param.float() * (1.0 - group["lr"] * group["weight_decay"]) - group["lr"] * size * lift)
         if self.diagnostics is not None:
-            # The lift is an isometry, so `||U|| = ||O|| ||W||` without a pass over `W`.
-            self.diagnostics.update(param, direction.norm() * weight_norm * group["lr"])
+            # The lift is an isometry, so `||U|| = ||O|| size` without a pass over `W`.
+            self.diagnostics.update(param, direction.norm() * size * group["lr"])
