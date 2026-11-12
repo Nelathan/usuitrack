@@ -152,6 +152,16 @@ size?) and `grad_capture` (how much of the gradient does the frame hold?).
 UsuiTrack is built for full-parameter training; LoRA is the comparison point
 above, not a mode of operation.
 
+### Norm bounds
+
+A param group's `norm_bounds = (low, high)` clamps each matrix's Frobenius norm
+after every write into `[low R, high R]`, `R` its norm at its first step; either
+side may be `None`, and the default `(None, None)` bounds nothing. `(None, 1.5)`
+caps growth at 1.5 times the init norm; `(1, 1)` pins it, so that with the trust
+rule `lr` stays the relative step for the whole run rather than shrinking as the
+weights grow. `R` is optimizer state and travels with the checkpoint. A matrix
+initialized to zero has no `R` and raises under bounds.
+
 ### Step rule and zero-initialized matrices
 
 A param group's `step_rule` chooses how a step is sized. `"trust"`, the default, is

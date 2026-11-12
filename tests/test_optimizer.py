@@ -615,3 +615,78 @@ def test_relative_step_stays_the_change_over_the_weight_under_the_fixed_rule():
     optimizer.step()
     expected = (weight.detach() - before).norm() / weight.detach().norm()
     assert optimizer.pop_diagnostics()["relative_step"] == pytest.approx(float(expected), rel=1e-4)
+
+
+def test_bounds_of_one_pin_the_norm_and_the_step_stays_relative():
+    torch.manual_seed(0)
+    lr = 1e-2
+    weight = torch.nn.Parameter(3.0 * torch.randn(ROWS, COLS))
+    start = weight.detach().norm().item()
+    optimizer = UsuiTrack([{"params": [weight], "norm_bounds": (1.0, 1.0)}], lr=lr, rank_fraction=RANK_FRACTION)
+    for _ in range(20):
+        before = weight.detach().clone()
+        weight.grad = torch.randn(ROWS, COLS)
+        optimizer.step()
+        assert weight.detach().norm().item() == pytest.approx(start, rel=1e-5)
+        assert (weight.detach() - before).norm().item() / start == pytest.approx(lr, rel=0.15)
+
+
+def test_a_ceiling_caps_growth_and_a_floor_holds_against_decay():
+    torch.manual_seed(0)
+    gradients = [torch.randn(ROWS, COLS) for _ in range(30)]
+    for bounds, decay in (((None, 1.1), 0.0), ((0.9, None), 5.0)):
+        weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+        start = weight.detach().norm().item()
+        optimizer = UsuiTrack([{"params": [weight], "norm_bounds": bounds}], lr=0.05, weight_decay=decay, rank_fraction=RANK_FRACTION)
+        for gradient in gradients:
+            weight.grad = gradient.clone()
+            optimizer.step()
+        low, high = bounds
+        ratio = weight.detach().norm().item() / start
+        if high is not None:
+            assert ratio == pytest.approx(high, rel=1e-5)  # unbounded, these steps grow it past 1.1
+        if low is not None:
+            assert ratio == pytest.approx(low, rel=1e-5)  # unbounded, this decay shrinks it below 0.9
+
+
+def test_bounds_that_do_not_bind_leave_the_write_unchanged():
+    torch.manual_seed(0)
+    base = torch.randn(ROWS, COLS)
+    gradients = [torch.randn(ROWS, COLS) for _ in range(3)]
+    ran = []
+    for group in ({}, {"norm_bounds": (None, None)}, {"norm_bounds": (0.01, 100.0)}):
+        weight = torch.nn.Parameter(base.clone())
+        optimizer = UsuiTrack([{"params": [weight], **group}], lr=0.01, rank_fraction=RANK_FRACTION)
+        for gradient in gradients:
+            weight.grad = gradient.clone()
+            optimizer.step()
+        ran.append(weight.detach())
+    assert all(torch.equal(ran[0], other) for other in ran[1:])
+
+
+def test_the_first_norm_of_a_bf16_matrix_survives_a_checkpoint_unrounded():
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter((2.0 * torch.randn(ROWS, COLS)).bfloat16())
+    optimizer = UsuiTrack([{"params": [weight], "norm_bounds": (1.0, 1.0)}], rank_fraction=RANK_FRACTION)
+    weight.grad = torch.randn(ROWS, COLS).bfloat16()
+    optimizer.step()
+    restored_weight = torch.nn.Parameter(weight.detach().clone() * 5.0)  # a drifted copy; the pin must pull it back to the saved norm
+    restored = UsuiTrack([{"params": [restored_weight], "norm_bounds": (1.0, 1.0)}], rank_fraction=RANK_FRACTION)
+    restored.load_state_dict(optimizer.state_dict())
+    assert restored.state[restored_weight]["init_norm"] == optimizer.state[weight]["init_norm"]
+    restored_weight.grad = torch.randn(ROWS, COLS).bfloat16()
+    restored.step()
+    assert restored_weight.detach().float().norm().item() == pytest.approx(optimizer.state[weight]["init_norm"], rel=1e-2)
+
+
+def test_bounds_refuse_a_zero_matrix_and_malformed_settings():
+    weight = torch.nn.Parameter(torch.zeros(ROWS, COLS))
+    optimizer = UsuiTrack([{"params": [weight], "step_rule": "fixed", "norm_bounds": (None, 1.0)}], rank_fraction=RANK_FRACTION)
+    weight.grad = torch.randn(ROWS, COLS)
+    for _ in range(2):  # a caught refusal leaves nothing behind that would zero it on the next step
+        with pytest.raises(ValueError, match="starts at zero"):
+            optimizer.step()
+        weight.grad = torch.randn(ROWS, COLS)
+    for bounds in ((2.0, 1.0), (0.0, 1.0), (1.0,), "pin", (None, -1.0), (True, None)):
+        with pytest.raises(ValueError, match="norm_bounds"):
+            UsuiTrack([{"params": [torch.nn.Parameter(torch.randn(ROWS, COLS))], "norm_bounds": bounds}])

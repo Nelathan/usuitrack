@@ -431,6 +431,23 @@ $$U_t=\sqrt{\max(1,m/n)}\,\sqrt r\;\Lambda_{Q_t}(O_t),\qquad
   weight rather than being `lr`. The rank enters the size here, so `rank_fraction`
   is no longer a pure subspace knob for a fixed group.
 
+**Norm bounds.** A param group's `norm_bounds = (low, high)` (default
+`(None, None)`) bounds each matrix's Frobenius norm in multiples of `R`, its norm
+before its first write (state `init_norm`, a float, so a bf16 checkpoint does not
+round it). The written weight is clamped radially,
+
+$$W_t=\tilde W_t\,\frac{\operatorname{clamp}(\|\tilde W_t\|_F,\ \mathrm{low}\,R,\ \mathrm{high}\,R)}{\|\tilde W_t\|_F},$$
+
+$\tilde W_t$ the right-hand side of the update below, inside the same accumulator and the
+same single rounding; `None` opens a side. A write inside the bounds is unchanged.
+`(1, 1)` pins the norm: under the trust rule `lr` is then the relative step at every
+step, not only the first, and weight decay only rescales the step by
+`1/(1 - lr lambda)`. A ceiling alone lets the norm move below it, so decay acts
+until the floor, if any, holds it. `R` is read to the host once per matrix; a matrix
+whose `R` is zero cannot be bounded relative to it and raises. A checkpoint without
+`init_norm` (saved without bounds) takes `R` from the weights it resumes with. The diagnostics read
+the update before the clamp.
+
 Weight decay, the lift and the rounding are the same under both rules, and a
 param group chooses its own, so one optimizer can hold both. `relative_step`
 stays `||dW||/||W||` under either.
@@ -623,7 +640,7 @@ non-finite gradients are counted from the raw norm.
 
 | key | what it measures |
 |---|---|
-| `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped under the trust rule and every moment fills its rank (step 8); below it by the rank the moments leave empty. A `fixed` group contributes its shape-sized step over its own `||W||`, so the read is `lr` only by coincidence there |
+| `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped under the trust rule and every moment fills its rank (step 8); below it by the rank the moments leave empty. A `fixed` group contributes its shape-sized step over its own `||W||`, so the read is `lr` only by coincidence there. The update is read before a norm bound's clamp (step 8) |
 | `grad_capture` | `||G_o Q|| / ||G||`: the share of the gradient's magnitude the frame catches. Reads the basis rather than the model |
 | `grad_moment_cosine` | this step's unit projected gradient against the moment *before* the blend, so the reading is not self-referential. Positive: the step under-travels and the gradient keeps its direction; negative: it overshoots |
 | `tangent_live_fraction` | the share of planes with `sigma_i > sqrt(r eps) sigma_max` (step 4). Below `1` the aim is rank-collapsed against the rank it was given: the rank is too large for what this batch size resolves |

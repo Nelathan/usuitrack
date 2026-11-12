@@ -66,6 +66,11 @@ class UsuiTrack(Optimizer):
     group is added, on each param's device, so the model is placed first; it is
     for pretraining from a zero-initialized output, whose first gradients carry
     no subspace (SPEC step 2).
+
+    A param group's `norm_bounds` is `(low, high)` in multiples of each
+    matrix's Frobenius norm at its first step, either side `None` for open;
+    the default `(None, None)` bounds nothing. After each write the norm is
+    clamped into the bounds; `(1, 1)` pins it (SPEC step 8).
     """
 
     def __init__(
@@ -100,7 +105,7 @@ class UsuiTrack(Optimizer):
                 optimizer._prepare(param)
 
         self._release_hook = release
-        defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay, rank_fraction=rank_fraction, side=side, step_rule="trust", frame_init="range_finder")
+        defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay, rank_fraction=rank_fraction, side=side, step_rule="trust", frame_init="range_finder", norm_bounds=(None, None))
         super().__init__(params, defaults)
 
     def add_param_group(self, param_group: dict) -> None:
@@ -113,9 +118,12 @@ class UsuiTrack(Optimizer):
             problem = f"step_rule {group['step_rule']!r}, not one of {STEP_RULES}"
         if group["frame_init"] not in FRAME_INITS:
             problem = f"frame_init {group['frame_init']!r}, not one of {FRAME_INITS}"
+        if not _valid_bounds(group["norm_bounds"]):
+            problem = f"norm_bounds {group['norm_bounds']!r}, not (low, high) with each positive or None and low <= high"
         if problem is not None:
             self.param_groups.pop()
-            raise ValueError(f"UsuiTrack takes 2D matrix parameters with a valid side, step_rule and frame_init; got {problem}")
+            raise ValueError(f"UsuiTrack takes 2D matrix parameters with a valid side, step_rule, frame_init and norm_bounds; got {problem}")
+        group["norm_bounds"] = tuple(group["norm_bounds"])
         for param in group["params"]:
             self._group_of[param] = group
             if group["frame_init"] == "random":
@@ -132,13 +140,14 @@ class UsuiTrack(Optimizer):
         return frame.draw(length, frame.rank(param.shape, group["rank_fraction"]), self._frame_generators[param.device], param.dtype)
 
     def load_state_dict(self, state_dict: dict) -> None:
-        settings = [(group["step_rule"], group["frame_init"]) for group in self.param_groups]
+        settings = [(group["step_rule"], group["frame_init"], group["norm_bounds"]) for group in self.param_groups]
         super().load_state_dict(state_dict)
         self._pending.clear()
-        # A checkpoint from before `step_rule` or `frame_init` carries groups without them; they keep the ones configured.
-        for group, (rule, init) in zip(self.param_groups, settings, strict=True):
+        # A checkpoint from before `step_rule`, `frame_init` or `norm_bounds` carries groups without them; they keep the ones configured.
+        for group, (rule, init, bounds) in zip(self.param_groups, settings, strict=True):
             group.setdefault("step_rule", rule)
             group.setdefault("frame_init", init)
+            group["norm_bounds"] = tuple(group.setdefault("norm_bounds", bounds))
         # torch rebuilds the group dicts, so re-point the index at the live ones.
         self._group_of = {param: group for group in self.param_groups for param in group["params"]}
         # A param the checkpoint holds no state for gets its drawn frame back, so it does not fit one.
@@ -266,7 +275,36 @@ class UsuiTrack(Optimizer):
             size = math.sqrt(max(1.0, rows / cols) * frame_q.shape[-1])
         else:
             size = torch.linalg.vector_norm(param, dtype=torch.float32)
-        round_into(param, param.float() * (1.0 - group["lr"] * group["weight_decay"]) - group["lr"] * size * lift)
+        written = param.float() * (1.0 - group["lr"] * group["weight_decay"]) - group["lr"] * size * lift
+        low, high = group["norm_bounds"]
+        if (low, high) != (None, None):
+            written = self._bound_norm(param, written, low, high)
+        round_into(param, written)
         if self.diagnostics is not None:
             # The lift is an isometry, so `||U|| = ||O|| size` without a pass over `W`.
             self.diagnostics.update(param, direction.norm() * size * group["lr"])
+
+    def _bound_norm(self, param: Tensor, written: Tensor, low: float | None, high: float | None) -> Tensor:
+        """SPEC step 8, norm bounds: clamp `||W||` into `[low R, high R]`, `R` the norm before the first write."""
+
+        state = self.state[param]
+        if "init_norm" not in state:
+            # A float, not a tensor: torch casts tensor state to the param's dtype on load,
+            # which would round it to bf16. Read once per matrix.
+            init_norm = torch.linalg.vector_norm(param, dtype=torch.float32).item()
+            if init_norm == 0.0:
+                raise ValueError("UsuiTrack: norm_bounds are relative to a matrix's first norm, and this matrix starts at zero")
+            state["init_norm"] = init_norm
+        reference = state["init_norm"]
+        norm = torch.linalg.vector_norm(written)
+        bounded = norm.clamp(None if low is None else low * reference, None if high is None else high * reference)
+        return written * (bounded / norm.clamp_min(1e-12))
+
+
+def _valid_bounds(bounds) -> bool:
+    if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+        return False
+    low, high = bounds
+    if any(side is not None and not (isinstance(side, (int, float)) and not isinstance(side, bool) and side > 0) for side in bounds):
+        return False
+    return low is None or high is None or low <= high
