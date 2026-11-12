@@ -175,10 +175,16 @@ matrix_opt = UsuiTrack(
 ```
 
 Everything upstream of a zero-initialized output has an exactly zero gradient
-until it moves. A matrix without a frame whose gradient is exactly zero fits none,
-keeps no moment and does not step; it fits at its first nonzero gradient. This
-costs one device-to-host read per such matrix per `step()` while it waits (per
-micro-batch backward of its Linear under `Molegrad`), and none after.
+until it moves, so a first-gradient fit has nothing to find there. Pretraining
+from such an init sets the group's `frame_init` to `"random"`, which draws every
+frame when the group is added, on each param's device, so build the optimizer after
+placing the model; the default `"range_finder"` fits each frame to its first
+gradient, which a short finetune wants:
+
+```python
+matrix_opt = UsuiTrack([{"params": matrix_params, "frame_init": "random"}], lr=1e-4)
+```
+
 `docs/SPEC.md`, steps 2 and 8, has the contract.
 
 ## How it works

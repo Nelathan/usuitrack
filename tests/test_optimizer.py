@@ -460,40 +460,60 @@ def test_a_zero_matrix_never_moves():
 
 
 @pytest.mark.parametrize("release", [False, True])
-def test_a_zero_first_gradient_fits_no_frame_and_the_first_nonzero_one_fits_as_a_first_step(release):
-    """SPEC step 2: a matrix without a frame fits it from its first nonzero
-    gradient, exactly as if that were its first step."""
+def test_a_zero_or_non_finite_first_gradient_fits_an_orthonormal_frame_and_moves_nothing(release):
+    """SPEC step 2: the fit takes the first gradient as it is, sanitized; a zero
+    one fits an arbitrary orthonormal frame, and its zero moment writes nothing,
+    decay aside."""
 
     torch.manual_seed(0)
     base = torch.randn(ROWS, COLS)
-    gradient = torch.randn(ROWS, COLS)
-    nonfinite = torch.full((ROWS, COLS), float("nan"))
-
-    def deliver(weight, grad):
+    for empty in (torch.zeros(ROWS, COLS), torch.full((ROWS, COLS), float("nan"))):
+        weight = torch.nn.Parameter(base.clone())
+        optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, release_matrix_grads=release)
         if release:
-            _backward(weight, grad)
+            _backward(weight, empty)
         else:
-            weight.grad = grad.clone()
-
-    waiting = torch.nn.Parameter(base.clone())
-    optimizer = UsuiTrack([waiting], lr=0.01, rank_fraction=RANK_FRACTION, release_matrix_grads=release, weight_decay=0.1)
-    for empty in (torch.zeros(ROWS, COLS), nonfinite):
-        deliver(waiting, empty)
-        if release:
-            assert waiting.grad is None
+            weight.grad = empty.clone()
         optimizer.step()
-        assert not optimizer.state[waiting]
-        assert torch.equal(waiting, base)
-        waiting.grad = None
+        basis = optimizer.state[weight]["frame"]
+        torch.testing.assert_close(basis.mT @ basis, torch.eye(basis.shape[-1]), atol=1e-5, rtol=0)
+        assert torch.equal(weight, base)
 
-    fresh = torch.nn.Parameter(base.clone())
-    twin = UsuiTrack([fresh], lr=0.01, rank_fraction=RANK_FRACTION, release_matrix_grads=release, weight_decay=0.1)
-    for weight, opt in ((waiting, optimizer), (fresh, twin)):
-        deliver(weight, gradient)
-        opt.step()
-    for key in ("frame", "moment"):
-        assert torch.equal(optimizer.state[waiting][key], twin.state[fresh][key])
-    assert torch.equal(waiting, fresh)
+
+def test_random_frames_are_drawn_at_build_orthonormal_and_reproducible():
+    """`frame_init="random"`: every matrix holds a frame before its first
+    gradient, drawn from a private generator, so the same build draws the same
+    frames and training's random stream never shifts (SPEC step 2)."""
+
+    def build():
+        weights = [torch.nn.Parameter(torch.zeros(ROWS, COLS)), torch.nn.Parameter(torch.zeros(COLS, ROWS))]
+        return weights, UsuiTrack([{"params": weights, "frame_init": "random"}], rank_fraction=RANK_FRACTION)
+
+    torch.manual_seed(0)
+    untouched = torch.rand(4)
+    torch.manual_seed(0)
+    weights, optimizer = build()
+    assert torch.equal(torch.rand(4), untouched)
+    frames = [optimizer.state[weight]["frame"] for weight in weights]
+    for weight, basis in zip(weights, frames, strict=True):
+        side = frame.resolve_side(weight.shape, "auto")
+        assert tuple(basis.shape) == (frame.orient(weight, side).shape[1], frame.rank(weight.shape, RANK_FRACTION))
+        torch.testing.assert_close(basis.mT @ basis, torch.eye(basis.shape[-1]), atol=1e-5, rtol=0)
+    again_weights, again = build()
+    assert all(torch.equal(basis, again.state[weight]["frame"]) for weight, basis in zip(again_weights, frames, strict=True))
+    with pytest.raises(ValueError, match="frame_init"):
+        UsuiTrack([{"params": [torch.nn.Parameter(torch.zeros(ROWS, COLS))], "frame_init": "eigh"}])
+
+
+def test_a_load_without_state_keeps_a_random_frame():
+    """A param the checkpoint holds no state for still starts from a drawn
+    frame after the load, not from a fit to its first gradient."""
+
+    weight = torch.nn.Parameter(torch.zeros(ROWS, COLS))
+    optimizer = UsuiTrack([{"params": [weight], "frame_init": "random"}], rank_fraction=RANK_FRACTION)
+    optimizer.load_state_dict({"state": {}, "param_groups": optimizer.state_dict()["param_groups"]})
+    basis = optimizer.state[weight]["frame"]
+    torch.testing.assert_close(basis.mT @ basis, torch.eye(basis.shape[-1]), atol=1e-5, rtol=0)
 
 
 def _fixed_size(shape):
@@ -520,7 +540,7 @@ def test_a_zero_matrix_moves_under_the_fixed_rule_from_its_first_nonzero_gradien
     torch.manual_seed(0)
     lr = 1e-2
     weight = torch.nn.Parameter(torch.zeros(ROWS, COLS))
-    optimizer = UsuiTrack([{"params": [weight], "step_rule": "fixed"}], lr=lr, rank_fraction=RANK_FRACTION)
+    optimizer = UsuiTrack([{"params": [weight], "step_rule": "fixed", "frame_init": "random"}], lr=lr, rank_fraction=RANK_FRACTION)
     weight.grad = torch.zeros(ROWS, COLS)
     optimizer.step()
     assert torch.equal(weight, torch.zeros(ROWS, COLS))

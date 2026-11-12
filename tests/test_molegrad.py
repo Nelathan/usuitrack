@@ -185,7 +185,8 @@ def test_a_bias_gets_its_ordinary_gradient():
     molegrad.prepare()
     torch.testing.assert_close(layer.bias.grad, twin.bias.grad)
     basis = optimizer.state[layer.weight]["frame"]
-    torch.testing.assert_close(optimizer._pending[layer.weight].projected, frame.orient(twin.weight.grad, "right") @ basis)
+    # `delta^T (X Q)` against `(delta^T X) Q`: the same product in another order, equal up to fp32 rounding
+    torch.testing.assert_close(optimizer._pending[layer.weight].projected, frame.orient(twin.weight.grad, "right") @ basis, rtol=1e-4, atol=1e-4)
 
 
 def test_what_it_cannot_project_is_refused():
@@ -247,7 +248,8 @@ def test_a_linear_called_twice_before_its_fit_is_refused():
 
 def test_a_non_finite_first_gradient_fits_a_finite_frame():
     """One NaN row of `w2`'s gradient is sanitized and fitted; the NaN token
-    poisons every entry of `w1`'s, which sanitizes to zero and fits nothing."""
+    poisons every entry of `w1`'s, which sanitizes to zero and fits an
+    arbitrary frame."""
 
     block, optimizer = _setup()
     Molegrad(block, optimizer)
@@ -255,8 +257,7 @@ def test_a_non_finite_first_gradient_fits_a_finite_frame():
     target[0, 0, 0] = torch.nan
     (block(inputs) * target).sum().backward()
     optimizer.step()
-    assert torch.isfinite(optimizer.state[block.w2.weight]["frame"]).all()
-    assert "frame" not in optimizer.state[block.w1.weight]
+    assert all(torch.isfinite(optimizer.state[module.weight]["frame"]).all() for module in (block.w1, block.w2))
     assert all(torch.isfinite(module.weight).all() for module in (block.w1, block.w2))
 
 
@@ -289,59 +290,20 @@ def _zero_target_batch(seed):
     return inputs, torch.zeros_like(target)
 
 
-def test_a_zero_first_gradient_fits_no_frame_and_the_first_nonzero_one_fits_as_a_first_step():
+def test_a_zero_first_gradient_fits_an_orthonormal_frame_and_moves_no_weight():
+    """SPEC step 2: the fit takes the first gradient as it is; a zero one fits an
+    arbitrary orthonormal frame, and its zero moment writes nothing."""
+
     block, optimizer = _setup()
     Molegrad(block, optimizer)
     before = copy.deepcopy(block.state_dict())
     _loss(block, _zero_target_batch(0)).backward()
     optimizer.step()
-    assert all(not optimizer.state[module.weight] for module in (block.w1, block.w2))
-    assert all(module.basis.requires_grad for module in (block.w1, block.w2))
-    torch.testing.assert_close(block.state_dict(), before, rtol=0, atol=0)
-
-    twin, twin_optimizer = _setup()
-    Molegrad(twin, twin_optimizer)
-    for model, opt in ((block, optimizer), (twin, twin_optimizer)):
-        _loss(model, _batch(1)).backward()
-        opt.step()
-    for module, twin_module in ((block.w1, twin.w1), (block.w2, twin.w2)):
-        for key in ("frame", "moment"):
-            assert torch.equal(optimizer.state[module.weight][key], twin_optimizer.state[twin_module.weight][key])
-        assert torch.equal(module.weight, twin_module.weight)
-
-
-def test_nothing_is_handed_to_the_optimizer_for_an_unfitted_matrix_without_gradient():
-    block, optimizer = _setup()
-    molegrad = Molegrad(block, optimizer)
-    _loss(block, _zero_target_batch(0)).backward()
-    molegrad.prepare()
-    assert not optimizer._pending
-
-
-def test_under_accumulation_a_later_micro_batch_fits_when_the_first_is_zero():
-    """The fit comes from the first nonzero micro-batch; the zero one adds
-    nothing to `Z`, the action or the probes, and the fitting step has no tangent."""
-
-    first, second = _zero_target_batch(1), _batch(2)
-    block, optimizer = _setup()
-    molegrad = Molegrad(block, optimizer)
-    from_second = _gradients(block, second)
-    for batch in (first, second):
-        _loss(block, batch).backward()
-    molegrad.prepare()
-    for module, grad in zip((block.w1, block.w2), from_second, strict=True):
+    for module in (block.w1, block.w2):
         basis = optimizer.state[module.weight]["frame"]
-        torch.testing.assert_close(_span(basis), _span(frame.fit(grad, basis.shape[-1])))
-        prepared = optimizer._pending[module.weight]
-        torch.testing.assert_close(prepared.projected, grad @ basis)
-        assert prepared.tangent is None
-        assert 0.5 < (prepared.raw_norm / grad.norm()).item() < 1.5
-
-    # And the next step is an ordinary one, with a tangent.
-    optimizer.step()
-    _loss(block, _batch(3)).backward()
-    molegrad.prepare()
-    assert all(optimizer._pending[module.weight].tangent is not None for module in (block.w1, block.w2))
+        torch.testing.assert_close(basis.mT @ basis, torch.eye(basis.shape[-1]), atol=1e-5, rtol=0)
+        assert not module.basis.requires_grad
+    torch.testing.assert_close(block.state_dict(), before, rtol=0, atol=0)
 
 
 def test_under_accumulation_a_zero_micro_batch_after_the_fit_adds_nothing():
@@ -360,57 +322,46 @@ def test_under_accumulation_a_zero_micro_batch_after_the_fit_adds_nothing():
         assert prepared.tangent is None
 
 
-def test_a_load_while_a_matrix_waits_leaves_it_waiting_for_its_first_nonzero_gradient():
-    runs = []
-    for load in (True, False):
-        block, optimizer = _setup()
-        Molegrad(block, optimizer)
-        _loss(block, _zero_target_batch(0)).backward()
-        optimizer.step()
-        if load:
-            optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
-        _loss(block, _batch(1)).backward()
-        optimizer.step()
-        runs.append((block, optimizer))
-    (loaded, loaded_optimizer), (plain, plain_optimizer) = runs
-    for module, plain_module in ((loaded.w1, plain.w1), (loaded.w2, plain.w2)):
-        assert torch.equal(loaded_optimizer.state[module.weight]["frame"], plain_optimizer.state[plain_module.weight]["frame"])
-        assert torch.equal(module.weight, plain_module.weight)
-
-
-def test_a_zero_initialized_output_trains_and_the_matrices_upstream_fit_from_a_real_gradient():
+def test_a_zero_initialized_output_trains_from_random_frames():
     """The adaLN-zero setting: with the output Linear at zero, everything
-    upstream has a zero gradient on step one and must not fit a frame from it."""
-
-    def network():
-        return torch.nn.Sequential(torch.nn.Linear(IN, HIDDEN, bias=False), torch.nn.GELU(), torch.nn.Linear(HIDDEN, IN, bias=False))
+    upstream has a zero gradient on step one. Random frames hold it still
+    until the gradient arrives, and then it moves."""
 
     def backward(net, step):
         inputs, target = _batch(step)
         (net(inputs) * target).sum().backward()
 
     torch.manual_seed(0)
-    model = network()
+    model = torch.nn.Sequential(torch.nn.Linear(IN, HIDDEN, bias=False), torch.nn.GELU(), torch.nn.Linear(HIDDEN, IN, bias=False))
     torch.nn.init.zeros_(model[2].weight)
     first, last = model[0].weight, model[2].weight
-    optimizer = UsuiTrack([{"params": [first]}, {"params": [last], "step_rule": "fixed"}], lr=1e-2, rank_fraction=8 / math.sqrt(IN * HIDDEN))
-
-    def twin_gradient(step):
-        twin = network()
-        twin.load_state_dict(model.state_dict())
-        backward(twin, step)
-        return twin[0].weight.grad
-
-    assert twin_gradient(0).abs().max() == 0
+    groups = [{"params": [first], "frame_init": "random"}, {"params": [last], "step_rule": "fixed", "frame_init": "random"}]
+    optimizer = UsuiTrack(groups, lr=1e-2, rank_fraction=8 / math.sqrt(IN * HIDDEN))
     Molegrad(model, optimizer)
+    frame_before, first_before = optimizer.state[first]["frame"].clone(), first.detach().clone()
     backward(model, 0)
     optimizer.step()
-    assert not optimizer.state[first]
+    assert torch.equal(first, first_before)
+    # A zero tangent turns no plane; only the retraction touches the frame.
+    torch.testing.assert_close(optimizer.state[first]["frame"], frame_before, atol=1e-6, rtol=0)
     assert last.abs().max() > 0
 
-    step_two = twin_gradient(1)
-    assert step_two.abs().max() > 0
     backward(model, 1)
     optimizer.step()
-    basis = optimizer.state[first]["frame"]
-    torch.testing.assert_close(_span(basis), _span(frame.fit(step_two, basis.shape[-1])))
+    assert not torch.equal(first, first_before)
+    assert (optimizer.state[first]["frame"] - frame_before).abs().max() > 1e-3
+
+
+def test_a_projected_linear_compiles_whole_from_its_first_step():
+    """Neither the fit nor the held frame branches on data, so the forward and
+    the backward it traces compile without a graph break."""
+
+    model = torch.nn.Sequential(torch.nn.Linear(IN, HIDDEN, bias=False), torch.nn.Tanh(), torch.nn.Linear(HIDDEN, IN, bias=False))
+    optimizer = UsuiTrack(model.parameters(), lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    Molegrad(model, optimizer)
+    compiled = torch.compile(model, fullgraph=True)
+    for step in range(3):
+        inputs, target = _batch(step)
+        (compiled(inputs) * target).sum().backward()
+        optimizer.step()
+    assert all(torch.isfinite(p).all() for p in model.parameters())

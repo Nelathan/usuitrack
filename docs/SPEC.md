@@ -85,7 +85,7 @@ accuracy, it corrupts the tracked frame for every step after it.
 ```text
 raw gradient G
   -> sanitize
-  -> stable EIGH initialization on the first nonzero gradient
+  -> range-finder initialization on the first gradient, or a random frame
   -> held-frame projected gradient Z
   -> Rayleigh-normalized one-state Oja tangent
   -> release full gradient; retain rank-sized pending work
@@ -120,24 +120,37 @@ step. Pinned by `test_the_update_is_invariant_to_gradient_scale`.
 
 ### 2. Initialize the frame
 
-Normalize `A = G_o / ||G_o||_F` and form the symmetrized side Gram `K = A^T A`.
-`Q` is its top-`r` eigenvector frame. There is no retry: a failing `eigh` fails.
+Normalize `A = G_o / ||G_o||_F` and form the side Gram `K = A^T A`. `Q` is a
+randomized range finder's frame on its leading `r`-dim eigenspace, with one power
+step: `Q = qr(K qr(K Omega).Q).Q`, `Omega` an `[n,r]` Gaussian drawn from a fixed
+seed by a private generator, so the fit is a function of the gradient alone and
+the training run's random stream never moves. A gradient of rank at most `r`
+lies wholly in `Q`; past that, `Q` holds the leading eigenspace approximately,
+the shortfall growing as the spectrum flattens beyond `r`. No eigendecomposition
+runs, so a Gram whose eigenvalues fall below fp32 resolution a few hundred deep
+-- a nearly rank-one gradient, as a zero-initialized model's upstream matrices
+see first -- fits like any other. The frame needs the leading eigenspace, not
+its eigenbasis, and not exactly: the tracker turns it from the next step on.
 The fitting step moves no frame; the moment and weight step as usual.
 
-**A zero gradient fits no frame.** A gradient that is exactly zero after step 1's
-sanitizing, which includes one that was entirely non-finite, has no leading
-eigenspace: the EIGH of a zero Gram is the coordinate axes, a frame that says
-nothing about the matrix. A matrix with no frame yet and such a gradient fits
-none, creates no moment, and takes no step; its weight, decay included, holds.
-It fits at its first nonzero gradient, exactly as if that were its first step. So
-every frame is fitted from a nonzero gradient, and a model whose upstream matrices
-have zero gradient while a zero-initialized output has yet to move (adaLN-zero)
-fits them when the gradient arrives. That gradient can have rank below the frame's
--- it is limited by the freshly moved output matrix -- and the planes it does not
-span are arbitrary until the tracker turns them. The decision is a device-to-host
-read of whether the sanitized gradient is zero, made once per `step()` for a matrix
-that has no frame (once per backward of its Linear under Molegrad, step "Molegrad"
-below); once fitted, a matrix is never read back.
+**The fit takes the first gradient as it is.** A gradient that is exactly zero
+after step 1's sanitizing, which includes one that was entirely non-finite, has
+no leading eigenspace, and the range finder returns an arbitrary orthonormal
+frame from it (the QR of zero); its `Z` is zero, so the moment holds and the
+weight holds but for its decay, and the tracker turns the frame from the next
+step on. The optimizer's fit reads nothing back to the host, so it compiles with
+the rest of the step; Molegrad's once-per-matrix check that the fit is the first
+backward is the one read it keeps. A model trained
+from a zero-initialized output (adaLN-zero) sees exactly such gradients upstream
+until the output moves, and gains nothing from a fit: its param groups take
+`"frame_init": "random"`, which draws each frame when the group is added, on the param's device, as the
+QR of an `[n,r]` Gaussian from a private generator seeded once per optimizer and
+device, so the draws follow the param order and the training run's random stream
+never moves. The frame then tracks from step one at the usual `eta`; a
+matrix whose gradient is still zero has a zero tangent and turns no plane.
+`frame_init="range_finder"`, the default, is meant for finetuning, where the first gradient
+already carries the subspace and a short run needs the frame on it from step one
+(unmeasured).
 
 ### 3. Project in the held frame
 
@@ -200,8 +213,8 @@ early (capture 0.750 against 0.760 after warmup) and captures the same from
 mid-run, and it moves the frame half as far per update, so it follows half as
 much batch noise (`FACTS.md` on `lab`). Once the aim
 settles the turn stops mattering -- a smaller late turn buys nothing -- so a
-schedule would add a term and no gain. EIGH initialization already places the
-frame on the first gradient's leading eigenspace rather than at random, so the
+schedule would add a term and no gain. The initial fit already places the
+frame near the first gradient's leading eigenspace rather than at random, so the
 geodesic maintains a fit rather than searching for one. With `ell_i = 1` on
 live planes and `0` on dead ones, the frame update is the exact geodesic along
 the polar tangent:
@@ -210,9 +223,17 @@ $$Q_{raw}=\left[(QV)\operatorname{diag}(\cos(\eta\,\ell_i))
 +(\Delta V)\operatorname{diag}
 \left(\frac{\ell_i\sin\eta}{\sigma_i}\right)\right]V^\top.$$
 
-Tangent-Gram eigendecompositions of one rank share one batched `eigh`: on a
-small `[r,r]` matrix it is launch-overhead-bound. Nothing larger is stacked
-across matrices. With `S=Q_raw^T Q_raw`, one near-identity step using
+A step's tangent-Gram eigendecompositions share one batched `eigh`: on a
+small `[r,r]` matrix it is launch-overhead-bound, and each call reads its
+status back to the host. Grams below the largest rank are padded with `-1` on
+the padded diagonal, a separate block whose eigenpairs sort below the Gram's
+(a scaled Gram is PSD) and are dropped. Nothing larger is stacked across
+matrices. Each Gram is divided by its mean diagonal for the `eigh`, and
+the eigenvalues are multiplied back: on a Gram of tiny entries, as behind a gate
+still near zero, fp32 `eigh` on CUDA returns vectors that are not orthonormal,
+and the turn would leave the manifold.
+
+With `S=Q_raw^T Q_raw`, one near-identity step using
 the converged steady-state coefficient triple from Amsel, Persson, Musco, and
 Gower, ["The Polar Express"](https://arxiv.org/abs/2505.16932) (2025),
 retracts before storage:
@@ -508,14 +529,11 @@ matrices it reads `||G||` to within 1% (`FACTS.md` on `lab`, "Training without
 Like step 1's norm it is telemetry and the non-finite flag, and applied to
 nothing. All three leaves are token sums, so micro-batches accumulate exactly.
 
-A matrix with no frame fits it in the first backward whose `G` is not exactly
-zero, formed and freed inside the backward; under accumulation that is the first
-such micro-batch's gradient, not the step's, sanitized as in step 1. A backward
-whose `G` is zero (step 2) fits nothing and returns none of the three leaves: `G = 0`
-makes its `Z` and probes zero, so it adds nothing to the sums, and the matrix is
-handed to the optimizer only once a backward has fitted it. The zero test is
-step 2's host read, made once per backward of the Linear (per micro-batch and per
-call) while the matrix has no frame. The fitting step has no tangent whichever micro-batch fitted. The
+A matrix with no frame fits it in its first backward, formed and freed inside
+the backward; under accumulation that is the first micro-batch's gradient, not
+the step's, sanitized as in step 1. The range finder's Gaussian is drawn when
+the waiting basis is bound, outside the backward, so a compiled backward traces
+the fit whole. The fitting step has no tangent. The
 frame lives only in optimizer state, which the modules read again after every
 load. `step()` collects the leaves itself; a closure would run its backward
 after that, so it raises. `zero_grad()` and a load drop leaves no step
@@ -529,8 +547,7 @@ placed with the weights when it is built, so the model has its device and
 dtype by then. Refused with the reason, rather than trained wrong: a Linear
 subclass (its own forward would be replaced), a weight shared with another
 module, a tracked matrix that is not a Linear's weight, a Linear called more
-than once in the backward that fits its frame, when more than one call has a nonzero
-gradient (each fits its own), and
+than once in the backward that fits its frame (each call fits its own), and
 more than one process (the leaves are not all-reduced).
 
 ## Parameter eligibility
@@ -611,7 +628,7 @@ non-finite gradients are counted from the raw norm.
 | `grad_moment_cosine` | this step's unit projected gradient against the moment *before* the blend, so the reading is not self-referential. Positive: the step under-travels and the gradient keeps its direction; negative: it overshoots |
 | `tangent_live_fraction` | the share of planes with `sigma_i > sqrt(r eps) sigma_max` (step 4). Below `1` the aim is rank-collapsed against the rank it was given: the rank is too large for what this batch size resolves |
 | `projected_grad_norm` | `||G_o Q||`. The step is blind to it; bursts mark outlier batches the fallback optimizer is not blind to |
-| `nonfinite_grads` | matrix gradients whose raw norm was non-finite and were sanitized. A matrix still waiting for its frame (step 2) is not read, so an entirely non-finite gradient is not counted there |
+| `nonfinite_grads` | matrix gradients whose raw norm was non-finite and were sanitized. |
 
 `usuitrack.diagnostics.READS` carries a one-line reading guide per key. A
 subclass adds reads by overriding the event methods; the lab's
@@ -626,16 +643,17 @@ These choices define the current design; they are redesignable.
    or second basis.
 2. **Side by shape, overridable:** `auto` tracks the shorter side; a param
    group fixes `side` where the architecture knows better.
-3. **Side-Gram `eigh` initialization:** directly solves the one-sided target,
-   in fp32, on the sanitized and symmetrized Gram, with no retry.
+3. **Side-Gram range-finder initialization:** fits the one-sided target's
+   leading eigenspace in fp32 from the sanitized gradient, with no
+   eigendecomposition to fail on a nearly rank-one Gram.
 4. **One-state full-gradient basis tracking:** the live frame follows the Oja
    covariance action on every step, with a constant geodesic step
    `eta = 0.02` and no second basis.
 5. **Moving-frame momentum:** identity coordinates preserve the projected
    moment's spectrum through the chosen frame rotation.
 6. **No second moment on the full gradient:** the tangent and the moment both
-   read the sanitized gradient directly. A frame fitted on `G` is the leading
-   eigenspace of `G^T G`, so the Oja residual is zero there and the tracker
+   read the sanitized gradient directly. A frame on the leading eigenspace of
+   `G^T G` has zero Oja residual, so the tracker
    converges when the gradient's principal subspace stops moving; any two-sided
    rescale is a congruence rather than a similarity and destroys that property.
 7. **Average first, orthogonalize once, and no gradient clip:** the moment

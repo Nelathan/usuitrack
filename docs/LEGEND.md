@@ -270,7 +270,7 @@ No component is heroic alone. The build works because the parts agree:
 ```text
 raw clip              protects every later memory
 factored variance     reads traction cheaply
-EIGH initialization   finds the first line
+random range finder   finds the first line
 one-state Oja         reads and turns on every contact patch
 identity transport    keeps speed through the slide
 projected EMA         holds the line

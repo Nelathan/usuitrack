@@ -43,13 +43,39 @@ def rank(shape: torch.Size, rank_fraction: float) -> int:
 
 
 def fit(grad: Tensor, rank: int) -> Tensor:
-    """Top-`rank` eigenvectors of the side Gram `G^T G` (SPEC step 2), in `grad`'s dtype."""
+    """A `rank`-dim orthonormal frame on the leading eigenspace of the side Gram `G^T G`, in `grad`'s dtype:
+    `range_find` on the fixed `sketch` (SPEC step 2)."""
+
+    return range_find(grad, sketch(grad.shape[1], rank, grad.device))
+
+
+def sketch(length: int, rank: int, device: torch.device) -> Tensor:
+    """The range finder's Gaussian test matrix `[length, rank]`, fp32, from a fixed seed: the fit is then a
+    function of the gradient alone, and training's random stream never shifts."""
+
+    generator = torch.Generator(device).manual_seed(0)
+    return torch.randn(length, rank, device=device, dtype=torch.float32, generator=generator)
+
+
+def range_find(grad: Tensor, test: Tensor) -> Tensor:
+    """The frame `fit` returns, from a drawn `sketch`: a random range finder with one power step. No
+    eigendecomposition, so nothing to fail on a nearly rank-one Gram, and nothing a compiled backward cannot
+    trace; a zero `grad` gives an arbitrary orthonormal frame (QR of zero)."""
 
     work = grad.float()
     work = work / work.norm().clamp_min(1e-12)
     gram = work.mT @ work
-    _values, vectors = torch.linalg.eigh(0.5 * (gram + gram.mT))
-    return vectors[:, -rank:].to(grad.dtype).contiguous()
+    q = torch.linalg.qr(gram @ test).Q
+    q = torch.linalg.qr(gram @ q).Q
+    return q.to(grad.dtype).contiguous()
+
+
+def draw(length: int, rank: int, generator: torch.Generator, dtype: torch.dtype) -> Tensor:
+    """A random `rank`-dim orthonormal frame on a side of `length`, in `dtype`: the QR of a Gaussian draw from
+    `generator`, for a matrix whose first gradients carry no subspace to fit (SPEC step 2, `frame_init`)."""
+
+    gaussian = torch.randn(length, rank, device=generator.device, dtype=torch.float32, generator=generator)
+    return torch.linalg.qr(gaussian).Q.to(dtype).contiguous()
 
 
 def project_and_aim(grad: Tensor, frame: Tensor) -> tuple[Tensor, Tensor]:
@@ -101,19 +127,30 @@ class Turned(NamedTuple):
 def tangent_spectra(tangents: list[Tensor]) -> list[tuple[Tensor, Tensor]]:
     """`eigh` of each tangent Gram `Delta^T Delta`: eigenvalues ascending, vectors.
 
-    The Grams are `[r, r]`, where `eigh` is launch-bound, so Grams of one rank
-    share one call; they are the only per-matrix tensors stacked, and they are
-    small.
+    The Grams are `[r, r]`, where `eigh` is launch-bound and reads its status
+    back to the host, so all of them share one call: each is padded to the
+    largest rank with `-1` on the padded diagonal, a block apart whose
+    eigenpairs sort first and are dropped. They are the only per-matrix tensors
+    stacked, and they are small. Each Gram is divided by its mean diagonal for
+    the `eigh` and its eigenvalues multiplied back: cuSOLVER's fp32 `eigh`
+    returns non-orthonormal vectors for a Gram whose entries are tiny (a matrix
+    behind a still-closed gate, ~1e-22), and the turn then throws the frame off
+    the manifold. A scaled Gram is PSD, so its eigenvalues stay above the
+    padding's.
     """
 
+    if not tangents:
+        return []
     grams = [tangent.mT @ tangent for tangent in tangents]
-    spectra: list[tuple[Tensor, Tensor]] = [None] * len(grams)  # type: ignore[list-item]
-    for rank in {gram.shape[-1] for gram in grams}:
-        indices = [index for index, gram in enumerate(grams) if gram.shape[-1] == rank]
-        stacked = torch.stack([grams[index] for index in indices])
-        eigenvalues, vectors = torch.linalg.eigh(0.5 * (stacked + stacked.mT))
-        for index, values, basis in zip(indices, eigenvalues, vectors, strict=True):
-            spectra[index] = (values, basis)
+    width = max(gram.shape[-1] for gram in grams)
+    padding = -torch.eye(width, device=grams[0].device)
+    scales = [gram.diagonal().mean().clamp_min(1e-30) for gram in grams]
+    stacked = torch.stack([torch.block_diag(gram / scale, padding[gram.shape[-1] :, gram.shape[-1] :]) for gram, scale in zip(grams, scales, strict=True)])
+    eigenvalues, vectors = torch.linalg.eigh(0.5 * (stacked + stacked.mT))
+    spectra = []
+    for gram, scale, values, basis in zip(grams, scales, eigenvalues, vectors, strict=True):
+        rank = gram.shape[-1]
+        spectra.append((values[width - rank :] * scale, basis[:rank, width - rank :]))
     return spectra
 
 

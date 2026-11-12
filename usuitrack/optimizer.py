@@ -28,6 +28,10 @@ GEODESIC_STEPSIZE = 0.02
 # by the matrix's shape alone.
 STEP_RULES = ("trust", "fixed")
 
+# Where a param group's frames start (SPEC step 2): a range finder on the first
+# gradient, or drawn at random when the group is added.
+FRAME_INITS = ("range_finder", "random")
+
 
 @dataclass
 class Prepared:
@@ -56,6 +60,12 @@ class UsuiTrack(Optimizer):
     A param group's `step_rule` is `"trust"` (default): `lr` is the relative
     step, against `||W||`. `"fixed"` sizes the step by the matrix's shape
     instead, so a zero-initialized matrix moves (SPEC step 8).
+
+    A param group's `frame_init` is `"range_finder"` (default): each frame is
+    fitted to its matrix's first gradient. `"random"` draws the frames when the
+    group is added, on each param's device, so the model is placed first; it is
+    for pretraining from a zero-initialized output, whose first gradients carry
+    no subspace (SPEC step 2).
     """
 
     def __init__(
@@ -81,6 +91,7 @@ class UsuiTrack(Optimizer):
         self.diagnostics: Diagnostics | None = Diagnostics() if diagnostics else None
         self._pending: dict[Tensor, Prepared] = {}
         self._group_of: dict[Tensor, dict] = {}
+        self._frame_generators: dict[torch.device, torch.Generator] = {}
         owner = weakref.ref(self)
 
         def release(param: Tensor) -> None:
@@ -89,7 +100,7 @@ class UsuiTrack(Optimizer):
                 optimizer._prepare(param)
 
         self._release_hook = release
-        defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay, rank_fraction=rank_fraction, side=side, step_rule="trust")
+        defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay, rank_fraction=rank_fraction, side=side, step_rule="trust", frame_init="range_finder")
         super().__init__(params, defaults)
 
     def add_param_group(self, param_group: dict) -> None:
@@ -100,23 +111,41 @@ class UsuiTrack(Optimizer):
             problem = f"side {group['side']!r}, not one of {frame.SIDES}"
         if group["step_rule"] not in STEP_RULES:
             problem = f"step_rule {group['step_rule']!r}, not one of {STEP_RULES}"
+        if group["frame_init"] not in FRAME_INITS:
+            problem = f"frame_init {group['frame_init']!r}, not one of {FRAME_INITS}"
         if problem is not None:
             self.param_groups.pop()
-            raise ValueError(f"UsuiTrack takes 2D matrix parameters with a valid side and step_rule; got {problem}")
+            raise ValueError(f"UsuiTrack takes 2D matrix parameters with a valid side, step_rule and frame_init; got {problem}")
         for param in group["params"]:
             self._group_of[param] = group
+            if group["frame_init"] == "random":
+                self.state[param]["frame"] = self._draw_frame(param, group)
             if self.release_matrix_grads and param.requires_grad:
                 param.register_post_accumulate_grad_hook(self._release_hook)
 
+    def _draw_frame(self, param: Tensor, group: dict) -> Tensor:
+        # One private generator per device, so the draws follow the param order
+        # and training's random stream never shifts.
+        if param.device not in self._frame_generators:
+            self._frame_generators[param.device] = torch.Generator(param.device).manual_seed(0)
+        length = frame.orient(param, frame.resolve_side(param.shape, group["side"])).shape[1]
+        return frame.draw(length, frame.rank(param.shape, group["rank_fraction"]), self._frame_generators[param.device], param.dtype)
+
     def load_state_dict(self, state_dict: dict) -> None:
-        rules = [group["step_rule"] for group in self.param_groups]
+        settings = [(group["step_rule"], group["frame_init"]) for group in self.param_groups]
         super().load_state_dict(state_dict)
         self._pending.clear()
-        # A checkpoint from before `step_rule` carries groups without it; they keep the one configured.
-        for group, rule in zip(self.param_groups, rules, strict=True):
+        # A checkpoint from before `step_rule` or `frame_init` carries groups without them; they keep the ones configured.
+        for group, (rule, init) in zip(self.param_groups, settings, strict=True):
             group.setdefault("step_rule", rule)
+            group.setdefault("frame_init", init)
         # torch rebuilds the group dicts, so re-point the index at the live ones.
         self._group_of = {param: group for group in self.param_groups for param in group["params"]}
+        # A param the checkpoint holds no state for gets its drawn frame back, so it does not fit one.
+        for group in self.param_groups:
+            for param in group["params"]:
+                if group["frame_init"] == "random" and "frame" not in self.state[param]:
+                    self.state[param]["frame"] = self._draw_frame(param, group)
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         # A loop that bails out between backward and step (an OOM retry) may
@@ -157,11 +186,6 @@ class UsuiTrack(Optimizer):
         grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
         state = self.state[param]
         if "frame" not in state:
-            # SPEC step 2: a zero gradient fits no frame. The host read of
-            # `any()` is made only while the matrix has no frame.
-            if not grad.any():
-                param.grad = None
-                return
             state["frame"] = frame.fit(grad, frame.rank(param.shape, group["rank_fraction"]))
             self._pending[param] = Prepared(grad @ state["frame"], None, raw_norm)
         else:

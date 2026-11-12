@@ -20,15 +20,15 @@ PROBES = 16
 
 class _Projected(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: Tensor, weight: Tensor, bias: Tensor | None, basis: Tensor, probes: Tensor, right: bool, fit: bool, z: Tensor, action: Tensor, probed: Tensor) -> Tensor:
-        ctx.save_for_backward(x, weight, basis, probes)
+    def forward(ctx, x: Tensor, weight: Tensor, bias: Tensor | None, basis: Tensor, probes: Tensor, test: Tensor | None, right: bool, fit: bool, z: Tensor, action: Tensor, probed: Tensor) -> Tensor:
+        ctx.save_for_backward(x, weight, basis, probes, test)
         ctx.right = right
         ctx.fit = fit
         return F.linear(x, weight, bias)
 
     @staticmethod
     def backward(ctx, grad: Tensor):
-        x, weight, basis, probes = ctx.saved_tensors
+        x, weight, basis, probes, test = ctx.saved_tensors
         grad_x = grad @ weight
         stream = x.reshape(-1, x.shape[-1])
         delta = grad.reshape(-1, grad.shape[-1])
@@ -37,11 +37,7 @@ class _Projected(torch.autograd.Function):
         if ctx.fit:
             gradient = delta.mT @ stream if ctx.right else stream.mT @ delta
             gradient = torch.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
-            if not gradient.any():
-                # SPEC step 2: a zero gradient fits no frame. The leaves stay empty and
-                # the basis keeps waiting; the one host read, only while it waits.
-                return grad_x, None, grad_bias, None, None, None, None, None, None, None
-            basis = fitted = frame.fit(gradient, basis.shape[-1])
+            basis = fitted = frame.range_find(gradient, test)
         rank = basis.shape[-1]
         # The probes ride with the frame in one GEMM over each stream: [Q | P].
         if ctx.right:
@@ -57,7 +53,7 @@ class _Projected(torch.autograd.Function):
             z = stream.mT @ projected_delta
             action_probed = delta.mT @ torch.cat([projected_delta, stream @ probes], dim=1)
             action, probed = action_probed[:, :rank], action_probed[:, rank:]
-        return grad_x, None, grad_bias, fitted, None, None, None, z, action.float(), probed.float()
+        return grad_x, None, grad_bias, fitted, None, None, None, None, z, action.float(), probed.float()
 
 
 def _anchor(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> Tensor:
@@ -71,6 +67,8 @@ class MoleLinear(torch.nn.Linear):
 
     basis: Tensor
     probes: Tensor
+    test: Tensor | None
+    """The range finder's draw while the basis waits for its fit, drawn outside any compiled region."""
     right: bool
     z: Tensor
     action: Tensor
@@ -80,7 +78,7 @@ class MoleLinear(torch.nn.Linear):
         if not torch.is_grad_enabled():
             return F.linear(x, self.weight, self.bias)
         # A basis that still requires grad is waiting for its fit.
-        return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.right, self.basis.requires_grad, self.z, self.action, self.probed)
+        return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.test, self.right, self.basis.requires_grad, self.z, self.action, self.probed)
 
 
 class Molegrad:
@@ -199,17 +197,16 @@ class Molegrad:
         weight = module.weight
         held = self.optimizer.state[weight].get("frame")
         if held is not None:
-            module.basis = held
+            module.basis, module.test = held, None
             return
+        module.test = frame.sketch(*module.basis.shape, module.basis.device)
         basis = torch.zeros_like(module.basis, requires_grad=True)
-        basis.register_post_accumulate_grad_hook(lambda basis: self._store_fit(weight, basis))
+        basis.register_post_accumulate_grad_hook(lambda basis: self._store_fit(module, basis))
         module.basis = basis
 
     @torch.no_grad()
-    def _store_fit(self, weight: Tensor, basis: Tensor) -> None:
-        if basis.grad is None:
-            # The hook also fires for a backward that fitted nothing (a zero gradient).
-            return
+    def _store_fit(self, module: MoleLinear, basis: Tensor) -> None:
+        weight = module.weight
         # Each call of the Linear fits its own frame, and autograd sums them.
         gram = basis.grad.float().mT @ basis.grad.float()
         if not torch.allclose(gram, torch.eye(gram.shape[0], device=gram.device), atol=0.1):
@@ -218,6 +215,7 @@ class Molegrad:
         basis.grad = None
         basis.requires_grad_(False)
         self.optimizer.state[weight]["frame"] = basis
+        module.test = None
         self._fitted.add(weight)
 
     def _probe(self, size: int, device: torch.device, dtype: torch.dtype) -> Tensor:
