@@ -39,6 +39,16 @@ N1's issue seen from the other end. Weight decay is not the remedy for a
 Muon-type step (user, 2026-10-30), though `weight_decay` is in the release. How
 to settle: `||W||` per role over a standard LFM arm first (cheap, a lab read).
 
+### N3. A per-matrix angular rate, as a generalization of the trust step
+
+Under the trust rule every matrix turns by about `lr` per step, whatever its
+shape or radius. The generalization: an angle `lr * f(shape, ||W||)` per
+matrix, giving more movement to the matrices that carry a large step well. The
+`fixed` rule is one such `f`, `sqrt(max(1, m/n) r) / ||W||`, picked by shape
+rather than by what a matrix tolerates. *Hypothesis:* a principled `f` exists
+(from dimensions and the radius a norm bound holds). An optional feature, not a
+default; nothing is planned until an `f` with a reason behind it is written down.
+
 ---
 
 ## Group R. The first frame and `eigh`
