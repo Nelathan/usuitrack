@@ -527,7 +527,7 @@ phase one would have read from `G`:
 | | right | left |
 |---|---|---|
 | `Z` (step 3), exact | `delta^T (X Q)` | `X^T (delta Q)` |
-| diagonal aim, replacing step 4's `A` | `X^T (||delta_t||^2 * X Q)` | `delta^T (delta Q)` |
+| the aim, replacing step 4's `A` | the token diagonal, `X^T (||delta_t||^2 * X Q)` | `delta` alone, `delta^T (delta Q)` |
 | `G P`, 16 Gaussian probes | `delta^T (X P)` | `delta^T (X P)` |
 
 **The diagonal aim.** Step 4 aims at `G`'s own Gram, `G^T G = X^T (delta
@@ -535,7 +535,9 @@ delta^T) X` on the right; its cross-token terms need `G`, and the token
 diagonal does not. Each token's row of `X` weighted by `||delta_t||^2` keeps
 that diagonal, which is the selection the loss makes between tokens: rows past
 the last supervised token have `delta_t = 0`, so it is also the mask. On the
-left the aim is `delta^T delta Q`, which captures as much as `G`'s Gram. On
+left the aim is `delta^T delta Q`, which captures as much as `G`'s Gram; it is
+`delta` unweighted, not the token diagonal of `G G^T`, which would weight each
+row by `||x_t||^2` (`PLAN.md` on `lab`, S3). On
 LFM3 the two aims tie on loss through 1k steps (`FACTS.md` on `lab`, "S2 ties
 `G` through 1k steps"); the `G` path keeps step 4's. The diagonal aim has
 energy in every frame direction, so more planes are live and more of the frame

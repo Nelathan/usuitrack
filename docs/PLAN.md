@@ -129,6 +129,19 @@ against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
   unsplit step, holding no gradient: S1's answer for a user who opts in. S1
   stays open for the `G` path.
 
+### S3. Molegrad's left aim is not the right aim's mirror
+
+On the right the aim keeps the token diagonal of `G^T G`,
+`X^T diag(||delta_t||^2) X Q`. The same diagonal of `G G^T = delta^T (X X^T)
+delta` is `delta^T diag(||x_t||^2) delta Q`; the left side runs `delta^T delta
+Q`, `delta` alone (`molegrad.py`, SPEC "Molegrad"). It was taken on capture,
+0.547 against `G`'s 0.541 (ARCHIVE, "frames track from the streams"); the
+weighted form was never read. `X` alone on the right gave up 1.2-1.4 points,
+and the left side serves the residual writers, whose inputs are not normalized.
+The fix is a row norm of `X` and a multiply. How to settle: capture and live
+fraction of both left aims against `G`'s on the LFM lane's left-side matrices,
+then a standard arm if they differ.
+
 ---
 
 ## Group T. Side
