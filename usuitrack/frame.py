@@ -43,8 +43,8 @@ def rank(shape: torch.Size, rank_fraction: float) -> int:
 
 
 def fit(grad: Tensor, rank: int) -> Tensor:
-    """A `rank`-dim orthonormal frame on the leading eigenspace of the side Gram `G^T G`, in `grad`'s dtype:
-    `range_find` on the fixed `sketch` (SPEC step 2)."""
+    """A `rank`-dim orthonormal frame approximating the leading eigenspace of the side Gram `G^T G`, in
+    `grad`'s dtype: `range_find` on the fixed `sketch` (SPEC step 2)."""
 
     return range_find(grad, sketch(grad.shape[1], rank, grad.device))
 
