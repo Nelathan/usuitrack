@@ -61,22 +61,6 @@ Open: how much `grad_capture` it gives up over the first steps of an LFM or Anim
 finetune, where the first gradient carries the subspace. How to settle: a
 first-steps read on the LFM lane against the eigh fit of `lab` at `be3f298`.
 
-### R2. Does the turn need `eigh` at all?
-
-The aim is closed-form; `eigh` is left only in the frame turn, one stacked call
-on the `[r, r]` tangent Grams per step, which reads its status back to the host
-(`frame.tangent_spectra`). Open: whether a polar map of the tangent (Newton-Schulz
-or Polar Express, as the moment already uses) moves the frame as well, without
-the sync. How to settle: on a branch from `lab`, the turn's angle and live planes
-against `eigh` on real gradients, then a standard arm.
-
-### R3. The cost of one padded `eigh`
-
-`tangent_spectra` pads every Gram to the largest rank and runs one call, rather
-than one per rank. Measured nowhere on a lane with mixed ranks (LFM, Anima),
-where a small Gram pays for the largest. How to settle: step time on the standard
-LFM arm against per-rank stacking.
-
 ---
 
 ## Group S. Subspace gradients

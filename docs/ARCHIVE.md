@@ -1144,6 +1144,16 @@ overlaps `G`'s frame 0.741 against 0.738, with every plane live under both.
 The user's choice: the current shape stays, and SPEC says what it is and that
 the weighting tracks the same frame.
 
+## CLOSED -- the turn keeps `eigh`, one padded call
+
+PLAN R2 and R3, 2026-11-13 (FACTS, "The turn's `eigh` is 20 ms"). The stacked
+`eigh` with its Grams is 20 ms of a 3.9 s LFM3 step, and padding to the largest
+rank costs nothing against per-rank stacks (20.1 against 21.2 ms). A
+Newton-Schulz polar map of the tangent has no hard liveness floor, turns 0.98
+of the planes against 0.845 and ends a third of a step from the `eigh` turn:
+a different liveness rule for at most 0.5% of the step. Accepted by the user:
+`eigh` stays, padded.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

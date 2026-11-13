@@ -1397,6 +1397,32 @@ and 0.567 on the 48 output-side ones; either `delta` shadow turns all of them
 and holds as much of `G`. Training untouched: 1.340802 / 2.685818 against the
 `G` arm's 1.340820 / 2.686102. The instrument costs 5.88 s/step.
 
+### The turn's `eigh` is 20 ms; a polar map of the tangent is another tracker
+
+2026-11-13, PLAN R2 and R3. Timed on the tangents of `s3r2-streams-s1-500` at
+step 400 (153 matrices, ranks 8 to 198; step 100 reads the same), between two
+device syncs (`outputs/tools/r2_turn_bench.py`):
+
+| | per step |
+|---|---|
+| the release's turn, whole | 72.6 ms |
+| its `tangent_spectra`: Grams and one padded `eigh` per group | 19.9 ms |
+| the same `eigh` stacked per rank instead of padded | 21.2 ms |
+| Newton-Schulz on each tangent, then the geodesic | 69.1 ms |
+
+`eigh` is 0.5% of the step and padding to the largest rank costs nothing
+against per-rank stacks. The other 53 ms is `frame.turn`'s per-matrix
+arithmetic, which a polar map does not remove.
+
+Read in the run, each step from the held frame and tangent, none stored
+(`outputs/tools/r2_polar_turn.py`), means over steps 275-500: the moment's
+quintic on the tangent turns 0.98 of the planes against `eigh`'s 0.845 live,
+travels 1.13 as far, and its moved span ends 0.33 of a step's travel from the
+`eigh` turn's. The quintic has a soft knee near `1.5e-3 ||Delta||_F` where
+`eigh` has a hard floor at `sqrt(r eps) sigma_max`, and 0.57 of the planes sit
+within ten floors of the floor, so the knee decides which planes turn. This
+measures difference from the `eigh` turn, not which frame tracks better.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
