@@ -1397,6 +1397,31 @@ and 0.567 on the 48 output-side ones; either `delta` shadow turns all of them
 and holds as much of `G`. Training untouched: 1.340802 / 2.685818 against the
 `G` arm's 1.340820 / 2.686102. The instrument costs 5.88 s/step.
 
+### Output-side capture is low because the span does not persist, not for rank
+
+2026-11-13, `oracle-capture-s1-125` (standard arm, seed 1, a runner,
+`outputs/tools/oracle_capture.py`). Per matrix, on one step's own `G`: the
+tracked frame's capture; the oracle, what the best rank-`r` frame on that side
+holds (`G`'s top singular values); and the stale oracle, the previous step's
+best frame on this step's `G`. Means of steps 101 and 121:
+
+| matrices | `r` | tracked | oracle | stale oracle | random floor |
+|---|---|---|---|---|---|
+| left, 2048x2048 (24) | 102 | 0.49 | 0.92 | 0.42 | 0.22 |
+| left, `w2` 2048x7680 (24) | 198 | 0.52 | 0.87 | 0.46 | 0.31 |
+| right, 2048x2048 (11) | 102 | 0.84 | 0.94 | 0.80 | 0.22 |
+| right, 512x2048 (22) | 51 | 0.85 | 0.94 | 0.81 | 0.16 |
+| right, 6144x2048 (13) | 177 | 0.79 | 0.92 | 0.75 | 0.29 |
+| right, `w1` 7680x2048 (48) | 198 | 0.74 | 0.89 | 0.69 | 0.31 |
+
+One step's gradient is low-rank on either side (effective rank 8-30), and the
+frame's rank would hold 0.87-0.94 of it: rank is not what the output side
+lacks. What it lacks is persistence. The best frame of one batch holds 0.42-0.46
+of the next batch's gradient on the output side and 0.69-0.81 on the input
+side, and the tracked frame beats that by 0.04-0.07 everywhere. Not measured:
+the best frame of many batches at fixed weights, the ceiling for any frame
+built from the past. One seed, two steps.
+
 ### The turn's `eigh` is 20 ms; a polar map of the tangent is another tracker
 
 2026-11-13, PLAN R2 and R3. Timed on the tangents of `s3r2-streams-s1-500` at
