@@ -101,3 +101,45 @@ def test_delta_weighting_holds_the_gradient_span_where_x_drifts_off_it():
     assert drained["stream_weighted_overlap"] > 0.9
     assert drained["stream_agreement_overlap"] > 0.95
     assert drained["stream_delta_overlap"] > 0.95
+
+
+class _Writer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.feed_forward = torch.nn.Module()
+        self.feed_forward.w2 = torch.nn.Linear(HIDDEN, IN, bias=False)
+
+    def forward(self, h):
+        return self.feed_forward.w2(h)
+
+
+def test_row_energy_weighting_holds_the_gradient_span_where_delta_drifts_off_it():
+    # Half the tokens carry unit `delta` on A with a small `x`, half a 0.3
+    # `delta` on B with `x` ten times larger: `delta^T delta` leads with A,
+    # `G G^T` and its token diagonal with B. A 0.1 isotropic floor on `delta`
+    # keeps B from being an exact invariant subspace of `delta^T delta`.
+    torch.manual_seed(0)
+    basis, _ = torch.linalg.qr(torch.randn(IN, 2 * RANK))
+    loud, carried = basis[:, :RANK], basis[:, RANK:]
+    toy = _Toy()
+    toy.model.layers[0] = _Writer()
+    weight = toy.model.layers[0].feed_forward.w2.weight
+    optimizer = UsuiTrack([{"params": [weight], "side": "left"}], lr=1e-3, beta=0.9, rank_fraction=RANK / math.sqrt(IN * HIDDEN))
+    optimizer.diagnostics = LabDiagnostics()
+    frames = StreamFrames(toy, optimizer, lfm_sites(toy))
+    labels = torch.ones(BATCH, TOKENS, dtype=torch.long)
+    for step in range(150):
+        delta = torch.cat([torch.randn(BATCH, TOKENS // 2, RANK) @ loud.mT, 0.3 * torch.randn(BATCH, TOKENS // 2, RANK) @ carried.mT], dim=1)
+        delta = delta + 0.1 * torch.randn(BATCH, TOKENS, IN)
+        x = torch.randn(BATCH, TOKENS, HIDDEN) * torch.cat([torch.ones(TOKENS // 2), torch.full((TOKENS // 2,), 10.0)]).reshape(1, TOKENS, 1)
+        frames.set_batch(labels)
+        (toy.model(x.requires_grad_()) * delta).sum().backward()
+        optimizer.step()
+        if step == 139:
+            optimizer.pop_diagnostics()
+    drained = optimizer.pop_diagnostics()
+    assert drained["stream_delta_overlap"] < 0.1
+    assert drained["stream_delta_weighted_overlap"] > 0.7
+    assert drained["stream_row_energy_cv"] > 0.5
+    assert drained["stream_delta_weighted_live"] > 0.9
+    assert drained["tangent_live_output"] > 0.9

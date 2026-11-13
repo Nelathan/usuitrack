@@ -8,6 +8,8 @@ optimizer's frame after its fit, so a read says whether a stream holds the
 gradient's span, not how fast it finds it. Variants:
 
 - output side, `delta`: the action `delta^T delta Q`.
+- output side, `delta_weighted`: `delta^T diag(||x_t||^2) delta Q`, the token
+  diagonal of `X X^T` in `G G^T = delta^T X X^T delta` (PLAN S3).
 - input side, `x`: `X^T X Q`, S3's activation frame.
 - input side, `weighted`: `X` with each token's row scaled by `||delta_t||`,
   the diagonal of `delta delta^T` in `G^T G = X^T delta delta^T X`.
@@ -39,13 +41,17 @@ from usuitrack import frame
 from usuitrack import optimizer as usuitrack_optimizer
 
 INPUT_VARIANTS = ("x", "weighted", "agreement", "sum")
-OUTPUT_VARIANTS = ("delta",)
+OUTPUT_VARIANTS = ("delta", "delta_weighted")
 
 STREAM_READS = {
     "grad_capture_input": "||G Q|| / ||G|| over input-side matrices: the gradient frame's own capture there.",
     "grad_capture_output": "||Q^T G|| / ||G|| over output-side matrices.",
     **{f"stream_{v}_overlap": f"||Q^T Q_{v}||^2 / r: the `{v}` frame against the gradient's; 1 is the same span." for v in INPUT_VARIANTS + OUTPUT_VARIANTS},
     **{f"stream_{v}_grad_capture": f"||G Q_{v}|| / ||G|| (oriented): the gradient share the `{v}` frame holds." for v in INPUT_VARIANTS + OUTPUT_VARIANTS},
+    **{f"stream_{v}_live": f"the share of the `{v}` frame's planes that turned." for v in INPUT_VARIANTS + OUTPUT_VARIANTS if v != "sum"},
+    "tangent_live_input": "`tangent_live_fraction` over input-side matrices: the gradient frame's own.",
+    "tangent_live_output": "`tangent_live_fraction` over output-side matrices.",
+    "stream_row_energy_cv": "std / mean of `||x_t||^2` over an output-side matrix's supervised tokens: 0 makes `delta_weighted` the `delta` aim.",
 }
 
 
@@ -109,6 +115,8 @@ class StreamFrames:
         self._shadows: dict[tuple[Tensor, str], Tensor] = {}
         self._tangents: dict[Tensor, dict[str, Tensor]] = {}
         self._x: dict[Tensor, Tensor] = {}
+        self._row_energy: dict[Tensor, Tensor] = {}
+        self._delta: dict[Tensor, Tensor] = {}
         self._site_x: dict[str, Tensor] = {}
         self._site_params: dict[str, list[Tensor]] = {}
         modules = dict(model.named_modules())
@@ -124,6 +132,8 @@ class StreamFrames:
                     raise ValueError(f"{name}: an input-side matrix with no norm site")
                 self._site_params.setdefault(site, []).append(module.weight)
                 module.register_forward_pre_hook(lambda m, args, site=site: self._take_x(m.weight, site, args[0]))
+            else:
+                module.register_forward_pre_hook(lambda m, args: self._take_row_energy(m.weight, args[0]))
             module.register_forward_hook(lambda m, args, out: self._tap(out, lambda grad, w=m.weight: self._on_delta(w, grad)))
         for site in self._site_params:
             modules[site].register_forward_pre_hook(lambda m, args, site=site: (self._tap(args[0], lambda grad: self._on_residual(site, grad)), *args[1:]))
@@ -147,6 +157,8 @@ class StreamFrames:
 
         self._tangents.clear()
         self._x.clear()
+        self._row_energy.clear()
+        self._delta.clear()
         self._site_x.clear()
         positions = torch.arange(labels.shape[-1], device=labels.device)
         last = torch.where(labels != -100, positions, -1).amax(dim=-1, keepdim=True)
@@ -174,6 +186,33 @@ class StreamFrames:
             self._site_x[site] = x
         self._x[param] = x
 
+    @torch.compiler.disable
+    @torch.no_grad()
+    def _take_row_energy(self, param: Tensor, inputs: Tensor) -> None:
+        # `||x_t||^2` only, fp32 `[tokens, 1]`: the output side never needs `X` itself.
+        if _in_backward():
+            self._row_energy[param] = torch.linalg.vector_norm(inputs.detach().reshape(-1, inputs.shape[-1]), dim=-1, keepdim=True, dtype=torch.float32).square()
+            self._weigh(param)
+
+    def _weigh(self, param: Tensor) -> None:
+        """The `delta_weighted` tangent, once both streams are in. A block's
+        last Linear gets its `delta` before the recompute that yields `X`: its
+        tap's backward saves nothing, so it runs ahead of the checkpoint."""
+
+        if param not in self._delta or param not in self._row_energy:
+            return
+        delta, energy = self._delta.pop(param), self._row_energy.pop(param)
+        shadow = self._shadows[(param, "delta_weighted")]
+        self._tangents[param]["delta_weighted"] = frame.aim((delta.mT @ ((delta @ shadow.to(delta.dtype)) * energy).to(delta.dtype)).float(), shadow)
+        diagnostics = self.optimizer.diagnostics
+        if diagnostics is not None:
+            # `delta` is zero past the last supervised token; only its rows weigh anything.
+            seen = (torch.linalg.vector_norm(delta, dim=-1, keepdim=True, dtype=torch.float32) > 0).float()
+            count = seen.sum().clamp_min(1.0)
+            mean = (energy * seen).sum() / count
+            variance = ((energy - mean).square() * seen).sum() / count
+            diagnostics.add("stream_row_energy_cv", variance.sqrt() / mean.clamp_min(1e-12))
+
     def _start(self, param: Tensor) -> None:
         stored = self.optimizer.state.get(param, {}).get("frame")
         if stored is None:
@@ -191,6 +230,8 @@ class StreamFrames:
         if self._side[param] == "left":
             shadow = self._shadows[(param, "delta")]
             tangents["delta"] = frame.aim(_action(delta, shadow), shadow)
+            self._delta[param] = delta
+            self._weigh(param)
             return
         x = self._x.pop(param, None)
         if x is None:
@@ -247,8 +288,17 @@ class StreamFrames:
 
     @torch.no_grad()
     def _turn(self, param: Tensor, tangents: dict[str, Tensor]) -> None:
+        diagnostics = self.optimizer.diagnostics
         names = list(tangents)
         frames = [self._shadows[(param, name)] for name in names]
-        spectra = frame.tangent_spectra([tangents[name] for name in names])
-        for shadow, name, spectrum in zip(frames, names, spectra, strict=True):
-            shadow.copy_(frame.turn(shadow, tangents[name], spectrum, usuitrack_optimizer.GEODESIC_STEPSIZE).frame)
+        # The gradient's own tangent rides along for its liveness on this side; its frame is the optimizer's to turn.
+        own = self.optimizer._pending[param].tangent
+        spectra = frame.tangent_spectra([tangents[name] for name in names] + ([] if own is None else [own]))
+        for shadow, name, spectrum in zip(frames, names, spectra, strict=False):
+            turned = frame.turn(shadow, tangents[name], spectrum, usuitrack_optimizer.GEODESIC_STEPSIZE)
+            shadow.copy_(turned.frame)
+            if diagnostics is not None and name != "far":
+                diagnostics.add(f"stream_{name}_live", turned.live.float().mean())
+        if diagnostics is not None and own is not None:
+            live = frame.turn(self.optimizer.state[param]["frame"], own, spectra[-1], usuitrack_optimizer.GEODESIC_STEPSIZE).live
+            diagnostics.add("tangent_live_input" if self._side[param] == "right" else "tangent_live_output", live.float().mean())
