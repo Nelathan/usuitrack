@@ -1134,6 +1134,16 @@ prediction held on every count except the size of the source gap, ten times
 the 3e-3 it named. README's Result is this comparison; the prerelease LFM2.5
 one (LoRA rank 44 against rank 128) is withdrawn from it.
 
+## CLOSED -- Molegrad's left aim stays `delta` alone
+
+PLAN S3, 2026-11-13 (FACTS, "The left aim's row weighting changes nothing").
+The left aim `delta^T delta Q` is not the mirror of the right aim: the token
+diagonal of `G G^T` is `delta^T diag(||x_t||^2) delta Q`. Read as a shadow
+beside it on LFM3, the weighted form holds 0.5500 of `G` against 0.5485 and
+overlaps `G`'s frame 0.741 against 0.738, with every plane live under both.
+The user's choice: the current shape stays, and SPEC says what it is and that
+the weighting tracks the same frame.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

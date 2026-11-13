@@ -538,7 +538,9 @@ that diagonal, which is the selection the loss makes between tokens: rows past
 the last supervised token have `delta_t = 0`, so it is also the mask. On the
 left the aim is `delta^T delta Q`, which captures as much as `G`'s Gram; it is
 `delta` unweighted, not the token diagonal of `G G^T`, which would weight each
-row by `||x_t||^2` (`PLAN.md` on `lab`, S3). On
+row by `||x_t||^2`. That weighting tracks the same frame (`FACTS.md` on `lab`,
+"The left aim's row weighting changes nothing"), so the left side does without
+`X`'s row norms. On
 LFM3 the two aims tie on loss through 1k steps (`FACTS.md` on `lab`, "S2 ties
 `G` through 1k steps"); the `G` path keeps step 4's. The diagonal aim has
 energy in every frame direction, so more planes are live and more of the frame

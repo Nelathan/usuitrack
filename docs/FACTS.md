@@ -1370,6 +1370,33 @@ the compiled write (0.22 s/step, "The compiled weight write saves 0.22
 s/step") on torch 2.15, against eager on 2.14 here; the rest is not split.
 `G` reproduces its loss to 1.3e-4 target and 7.9e-4 source.
 
+### The left aim's row weighting changes nothing
+
+2026-11-13, PLAN S3, `s3r2-streams-s1-500`: the standard arm (constant `4e-5`,
+500 steps, seed 1) under `--stream-frames`, which now carries a second
+output-side shadow turned by the token diagonal of `G G^T`, `delta^T
+diag(||x_t||^2) delta Q`, beside the `delta^T delta Q` shadow Molegrad's left
+aim is. Both start as copies of the fitted frame and are read on the gradient
+they have not yet seen. Means over steps 275-500, the 48 output-side matrices:
+
+| frame tracked from | capture of `G` | overlap with G-frame | live fraction |
+|---|---|---|---|
+| `G` (the optimizer's) | 0.5444 | - | 0.567 |
+| `delta` | 0.5485 | 0.738 | 0.998 |
+| `delta` weighted by `\|\|x_t\|\|^2` | 0.5500 | 0.741 | 0.999 |
+
+The weighting has something to act on, `||x_t||^2` over supervised tokens has
+std/mean 0.89, and it moves capture by 0.0015 and overlap by 0.003, the same
+sign at every logged step from 100 on and under the 0.005 this read resolves on
+one seed. The mirror of the right aim is not a different frame here. On the
+right the weighting is the whole effect (overlap 0.81 -> 0.93, "Frames from
+both streams"): `||delta_t||^2` selects tokens, `||x_t||^2` does not.
+
+By side, `G`'s own aim turns 0.972 of its planes on the 105 input-side matrices
+and 0.567 on the 48 output-side ones; either `delta` shadow turns all of them
+and holds as much of `G`. Training untouched: 1.340802 / 2.685818 against the
+`G` arm's 1.340820 / 2.686102. The instrument costs 5.88 s/step.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
