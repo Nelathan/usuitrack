@@ -41,6 +41,9 @@ capability-sensitive. Bring full effort; do not hedge or hold back.
 - `docs/notes/` — one note per topic, `YYYY-MM-DD-topic.md`: prose that is
   neither a rule, a question, nor a number -- history behind a rule, what was
   tried, lab-only reads. Written once.
+- `docs/topics/` — one doc per long-running line of work: its question, framing
+  and candidate reads. PLAN keeps the group heading, a line of state and the
+  link. The layout of notes and topics follows `../tiny-dit`.
 - `docs/PROJECTED_ACTIVATION_2.md` — design notes for PLAN S2, weight gradients
   without `G`. Built as `Molegrad` (`usuitrack/molegrad.py`, SPEC
   "Molegrad"); the harness flag is `--molegrad`, `--projected-grads` in run

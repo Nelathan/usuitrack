@@ -144,6 +144,19 @@ then a standard arm if they differ.
 
 ---
 
+## Group X. Subspace evolution
+
+Can the frame's rank evolve faster, and is energy the right thing for it to
+follow? Question, gates, the paper behind it and the candidate reads:
+`docs/topics/subspace-evolution.md`. State: nothing measured.
+
+- X1. Archetype or detail: where does the gradient's energy lie?
+- X2. Settled or starved: is there persistent gradient outside a settled frame?
+- X3. Is energy the right admission rule?
+- X4. Does aggregate-then-polar reach the paper's wall?
+
+---
+
 ## Group T. Side
 
 ### T1. Anima under `auto`, with a few exceptions
