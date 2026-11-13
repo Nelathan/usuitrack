@@ -6,7 +6,7 @@ Written 2026-10-28, updated 2026-11-01, night. Orientation only; `PLAN.md` carri
 ## Where it stands
 
 The release cleanup is on `lab`: one optimizer with a minimal surface, its
-maths in `docs/SPEC.md`, history moved to `docs/NOTES.md` and `docs/ARCHIVE.md`.
+maths in `docs/SPEC.md`, history moved to `docs/notes/` and `docs/ARCHIVE.md`.
 PLAN holds N (norm), S (subspace gradients: S1 accumulation, S2 weight
 gradients from both streams), M1 (where magnitude is dropped), T (side), and a
 one-line index of the parked ones. Closed: L1, `lr` does not transfer across

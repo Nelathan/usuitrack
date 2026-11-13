@@ -38,6 +38,9 @@ capability-sensitive. Bring full effort; do not hedge or hold back.
 - `docs/ARCHIVE.md` — everything closed. Top half: distilled conclusions, newest
   at its end, which is where a new closure goes. Bottom half: the former PLAN
   frozen verbatim as the investigation log — read for evidence, never append.
+- `docs/notes/` — one note per topic, `YYYY-MM-DD-topic.md`: prose that is
+  neither a rule, a question, nor a number -- history behind a rule, what was
+  tried, lab-only reads. Written once.
 - `docs/PROJECTED_ACTIVATION_2.md` — design notes for PLAN S2, weight gradients
   without `G`. Built as `Molegrad` (`usuitrack/molegrad.py`, SPEC
   "Molegrad"); the harness flag is `--molegrad`, `--projected-grads` in run

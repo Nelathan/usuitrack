@@ -73,7 +73,8 @@ right case, and left is it on the transpose.
 `side="auto"` tracks the shorter side, `right` for `m >= n`: a shape guess, not
 an architectural one (see the trap above). A param group can fix `side` to
 `left` or `right`; tracking the residual stream on every weight is one such
-assignment, measured on LFM and Anima (`docs/NOTES.md` on `lab`).
+assignment, measured on LFM and Anima
+(`docs/notes/2026-10-28-side-residual-facing-against-auto.md` on `lab`).
 
 Every `eigh`, Gram, and tangent computation upcasts fp16/bf16 inputs to
 fp32 first. The basis is the one piece of state everything else is built
@@ -199,8 +200,8 @@ scales it. Bare polar has no fixed point -- it turns by `eta` forever, whether o
 not the frame has arrived -- and no measurement has ever supplied one. The
 spectrum cannot: under this transform it is a smooth power law, `sigma^2 ~
 k^{-1.5}` across four decades, with no edge separating signal from noise. It is
-not scaled by time either; `docs/NOTES.md` on `lab` records the sensors that
-were tried and why none is in.
+not scaled by time either; `docs/notes/2026-10-28-constant-turn-what-was-tried.md`
+on `lab` records the sensors that were tried and why none is in.
 
 $$\eta=0.02,$$
 
