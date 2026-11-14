@@ -1,7 +1,49 @@
 # Handover
 
-Written 2026-10-28, updated 2026-11-01, night. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-11-14, night. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
+
+## Group X, night of 2026-11-14 (read this first)
+
+State: `docs/topics/subspace-evolution.md` (Status, X5, Candidates) and FACTS,
+"A warm frame matches an exact Gram EMA's". Decided by the user: the frame
+belongs on the stable side, which is the input side, for writers too, if the
+step can be matched; the twin is a written-down candidate, not adopted;
+Molegrad's left aim (S3) is moot if writers move.
+
+Running, chained, seed 1, 500 steps, logs in `outputs/runs/`: `xside-w1-s1`,
+`xside-w0.6-s1`, `xside-w0.35-s1` (all matrices on the input side, the 48
+writers at `lr` x 1, 0.6, 0.35; `outputs/tools/xside_lr.py`), then
+`std-lr2.8e5-s1` (the standard side at 2.8e-5). Done near 00:35.
+
+How to read them. The question is a trade, target gained per source forgotten,
+not a point. Reference: the standard arm, 1.340820 / 2.686102 at 500, and
+`std-lr2.8e5-s1` for the standard side's own slope. Input-side writers win if
+an arm is under that line by more than the floor (6e-4 target, 1e-3 source),
+compared at steps 200-500. Prior from fixed-weights reads, first-order gain
+squared over the curvature proxy, output against input side: `o_proj` 6.3 /
+19.1, conv 7.6 / 10.2, `w2` 15.7 / 10.9. So one writer scale may wash out; the
+next cut is then per role (`w2` on its own scale or back on the output side),
+not dropping the idea. The curvature proxy and the 0.6 are unmeasured
+heuristics; say so wherever they are quoted.
+
+Then, in order:
+1. Write the result to FACTS (with the fixed-weights side table: gain, source
+   held, `bite`, from `outputs/runs/replay-right.log` and `replay-shift.log`),
+   update X5, one commit. A subagent reviews before a push (user, 2026-11-14).
+2. If an input-side shape wins: it is a design change to the side rule, so it
+   goes to the user with the measurement before any release code moves. An
+   option he named: ask the nanodit session (tiny-dit) to run the promising
+   shape from a pushed commit for one epoch, 8M images. That needs the shape in
+   the package first, so it follows his decision.
+3. If nothing wins: X5 closes to ARCHIVE with the frontier, writers stay.
+4. Not started: reading the bubbleforce note in the nanodit repo (negative
+   cosine, `lr` and `beta` under moment plus polar), which bears on the maximum
+   step, not on tracking.
+5. `outputs/stream/` (48 GB) stays until the user agrees no more replays are
+   needed. Unexplained: `record_stream.py`'s hooks do not fire under compiled
+   decoder layers though `stream_frames` hooks do; it records with
+   `--no-torch-compile`.
 
 ## Where it stands
 
