@@ -22,7 +22,7 @@ not a point. Reference: the standard arm, 1.340820 / 2.686102 at 500, and
 an arm is under that line by more than the floor (6e-4 target, 1e-3 source),
 compared at steps 200-500. Prior from fixed-weights reads, first-order gain
 squared over the curvature proxy, output against input side: `o_proj` 6.3 /
-19.1, conv 7.6 / 10.2, `w2` 15.7 / 10.9. So one writer scale may wash out; the
+19.2, conv 7.6 / 10.2, `w2` 15.8 / 11.0. So one writer scale may wash out; the
 next cut is then per role (`w2` on its own scale or back on the output side),
 not dropping the idea. The curvature proxy and the 0.6 are unmeasured
 heuristics; say so wherever they are quoted.
