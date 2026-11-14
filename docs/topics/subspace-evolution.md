@@ -105,12 +105,12 @@ under `G`'s own aim the 48 residual writers turn 0.567 of their planes a step
 against 0.972 on the input side, and a frame aimed by `delta^T delta Q` turns
 all of them and holds as much of `G`.
 
-A second (FACTS, "Output-side capture is low because the span does not
-persist"): a rank-`r` frame could hold 0.87-0.94 of one step's gradient on
-either side, but one batch's best frame holds only 0.42-0.46 of the next
-batch's on the output side, 0.69-0.81 on the input side. Unmeasured: the best
-frame of many batches at fixed weights, which is the ceiling a tracker can
-reach and the number that separates settled from starved.
+A second (FACTS, "Output-side capture is low for rank"): a rank-`r` frame
+could hold 0.87-0.94 of one step's gradient on either side, but one batch's best
+frame holds only 0.42-0.46 of the next batch's on the output side, 0.69-0.81 on
+the input side. Averaged over 50 batches the output-side Gram has effective rank
+95-293 against 5-15 on the input side: the persistent gradient there is wider
+than the frame.
 
 How to settle: undecided. One candidate, unendorsed: at fixed weights, the
 agreement of two half-batches on the leading directions of `G (I - Q Q^T)`,

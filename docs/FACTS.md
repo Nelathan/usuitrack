@@ -1397,7 +1397,7 @@ and 0.567 on the 48 output-side ones; either `delta` shadow turns all of them
 and holds as much of `G`. Training untouched: 1.340802 / 2.685818 against the
 `G` arm's 1.340820 / 2.686102. The instrument costs 5.88 s/step.
 
-### Output-side capture is low because the span does not persist, not for rank
+### Output-side capture is low for rank: what persists is wider than the frame
 
 2026-11-13, `oracle-capture-s1-125` (standard arm, seed 1, a runner,
 `outputs/tools/oracle_capture.py`). Per matrix, on one step's own `G`: the
@@ -1415,12 +1415,19 @@ best frame on this step's `G`. Means of steps 101 and 121:
 | right, `w1` 7680x2048 (48) | 198 | 0.74 | 0.89 | 0.69 | 0.31 |
 
 One step's gradient is low-rank on either side (effective rank 8-30), and the
-frame's rank would hold 0.87-0.94 of it: rank is not what the output side
-lacks. What it lacks is persistence. The best frame of one batch holds 0.42-0.46
-of the next batch's gradient on the output side and 0.69-0.81 on the input
-side, and the tracked frame beats that by 0.04-0.07 everywhere. Not measured:
-the best frame of many batches at fixed weights, the ceiling for any frame
-built from the past. One seed, two steps.
+frame's rank would hold 0.87-0.94 of it. The best frame of one batch holds
+0.42-0.46 of the next batch's gradient on the output side and 0.69-0.81 on the
+input side, and the tracked frame beats that by 0.04-0.07 everywhere. One seed,
+two steps.
+
+Corrected 2026-11-14 (was titled "... because the span does not persist, not
+for rank", and concluded rank is not what the output side lacks). That read one
+batch. The Gram averaged over the 50 neighbouring batches (`outputs/tools/ceiling.py`
+on the recorded stream `record-stream-s1-300`, at five steps) has effective rank 95-293 on the output
+side of the five writers read and 5-15 on the input side of three readers. Each
+batch is low-rank in a different place, so what persists on the output side is
+wider than a frame of 102-198: for a frame built from the past the limit is
+rank. Withdrawn: "rank is not what the output side lacks".
 
 ### The turn's `eigh` is 20 ms; a polar map of the tangent is another tracker
 
