@@ -1397,7 +1397,7 @@ and 0.567 on the 48 output-side ones; either `delta` shadow turns all of them
 and holds as much of `G`. Training untouched: 1.340802 / 2.685818 against the
 `G` arm's 1.340820 / 2.686102. The instrument costs 5.88 s/step.
 
-### Output-side capture is low for rank: what persists is wider than the frame
+### Output-side capture is low for rank on most writers: what persists is as wide as the frame or wider
 
 2026-11-13, `oracle-capture-s1-125` (standard arm, seed 1, a runner,
 `outputs/tools/oracle_capture.py`). Per matrix, on one step's own `G`: the
@@ -1422,12 +1422,23 @@ two steps.
 
 Corrected 2026-11-14 (was titled "... because the span does not persist, not
 for rank", and concluded rank is not what the output side lacks). That read one
-batch. The Gram averaged over the 50 neighbouring batches (`outputs/tools/ceiling.py`
-on the recorded stream `record-stream-s1-300`, at five steps) has effective rank 95-293 on the output
-side of the five writers read and 5-15 on the input side of three readers. Each
-batch is low-rank in a different place, so what persists on the output side is
-wider than a frame of 102-198: for a frame built from the past the limit is
-rank. Withdrawn: "rank is not what the output side lacks".
+batch. The Gram summed over the batches within 25 steps
+(`outputs/tools/ceiling.py` on the recorded stream `record-stream-s1-300`,
+means of steps 50, 100, 150, 200, 250), on the writers' output side:
+
+| writer | effective rank | frame rank | energy in its top `r` |
+|---|---|---|---|
+| `o12` | 269 | 102 | 0.48 |
+| `c11` | 91 | 102 | 0.72 |
+| `w2` | 263 | 198 | 0.58 |
+| `o2` | 106 | 102 | 0.65 |
+| `o20` | 180 | 102 | 0.54 |
+
+The three input-side matrices read 5-15. Each batch is low-rank in a different
+place, so the best frame for many batches holds only 0.48-0.72 of their summed
+energy on the output side. On `o12`, `w2` and `o20` what persists is wider than
+the frame; on `c11` and `o2` it is about the frame's width. Withdrawn: "rank is
+not what the output side lacks".
 
 ### The turn's `eigh` is 20 ms; a polar map of the tangent is another tracker
 
@@ -1454,6 +1465,56 @@ travels 1.13 as far, and its moved span ends 0.33 of a step's travel from the
 `eigh` has a hard floor at `sqrt(r eps) sigma_max`, and 0.57 of the planes sit
 within ten floors of the floor, so the knee decides which planes turn. This
 measures difference from the `eigh` turn, not which frame tracks better.
+
+### A warm frame matches an exact Gram EMA's; a faster tracker buys the first 100 steps only
+
+2026-11-14. One real gradient stream recorded from the standard arm
+(`record-stream-s1-300`, seed 1, 300 steps, eight matrices of layers 2, 11, 12
+and 20, uncompiled; `outputs/tools/record_stream.py`), then any tracker replayed
+against it offline (`outputs/tools/replay.py`), scored on gradients it has not
+seen. Off-policy: the stream comes from training under today's turn. Two reads,
+both on the next batch: `cap`, `||G Q|| / ||G||`, and `sig`, the share of the
+energy two consecutive batches agree on that the frame holds,
+`<G_t Q, G_t+1 Q> / <G_t, G_t+1>`. The replay of today's turn reproduces the
+optimizer's recorded frames to three digits.
+
+Steps 201-300, today's turn against the top-`r` eigenspace of an exact EMA of
+the Gram (`gram/0.98`), the causal reference: the three input-side matrices
+equal it (`cap` 0.83-0.89, `sig` 0.96-0.98); the five writers hold as much or
+more `cap` (0.45-0.60) and trail by 0.005-0.05 on `sig`. A frame fitted to the
+surrounding 50 steps, later batches included, holds more `sig` on `o12` and
+`w2` (0.68-0.69 against the recorded frame's 0.58-0.59, steps 100 and 200), so
+the reference is what a causal tracker reaches, not the most a frame could
+hold. In steps 31-100 the writers lag: on `o12`, `sig` 0.44 against the
+reference's 0.70.
+
+The twin (`docs/topics/subspace-evolution.md`, "Candidates") against the turn,
+writers `o12`, `c11`, `w2`, `sig` in steps 31-100 and 201-300:
+
+| start, aim | `eta` 0.02 | `eta` 0.05 | twin 0.95 |
+|---|---|---|---|
+| fitted, `G` | 0.452, 0.568 | 0.560, 0.609 | 0.703, 0.613 |
+| random, `G` | 0.208, 0.512 | 0.402, 0.580 | 0.695, 0.608 |
+| fitted, `delta^T delta` | 0.472, 0.543 | 0.501, 0.542 | 0.489, 0.543 |
+
+Readers tie in every row but one: from a random start `eta` 0.02 lags in steps
+31-100 (`sig` 0.733 against 0.938 and 0.943). The twin is flat over `beta_f` 0.9-0.98 and `rho`
+0.3-3. Under the diagonal aim every tracker ties, at less `sig` than `G`'s own
+aim allows.
+
+In loss, 500 steps, seed 1, target at 100 / 300 / 500 and source at 500:
+
+| arm | 100 | 300 | 500 | source |
+|---|---|---|---|---|
+| standard (`lfm3-const4e5-s1`) | 1.433109 | 1.358706 | 1.340820 | 2.686102 |
+| twin 0.95, `rho` 1 (`twin-b95-r1-s1`) | 1.429744 | 1.358707 | 1.341237 | 2.687229 |
+| `eta` 0.05 (`eta05-s1`) | 1.430372 | 1.358027 | 1.340464 | 2.686215 |
+
+A faster tracker leads by ~3e-3 at step 100 and by nothing from step 300;
+`eta` 0.05 buys what the twin buys. At 500 the twin is 4e-4 behind on target
+and 1.1e-3 behind on source, both at the noise floor. The replay's ranking of
+the twin over `eta` 0.05 did not show in loss. One seed; the stream was
+recorded uncompiled, the loss runs are compiled.
 
 ## Run ledger (Anima)
 

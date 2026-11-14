@@ -3,10 +3,14 @@
 Topic doc for PLAN group X, opened 2026-11-13. It holds this line's questions,
 framing and candidate reads; measured numbers go to FACTS, closures to ARCHIVE.
 
-## Status (2026-11-13)
+## Status (2026-11-14)
 
-Nothing measured, no instrument built, no arm agreed. Every "how to settle"
-below is a candidate, not a choice.
+Measured on LFM3 (FACTS, "A warm frame matches an exact Gram EMA's" and
+"Output-side capture is low for rank on most writers"): from step ~200 today's
+turn holds what an exact Gram EMA's frame holds, so a causal tracker has little
+left to gain on a warm frame; on the output side what persists is as wide as
+the frame or wider.
+One candidate tracker is written down below, not adopted. Open: X5.
 
 ## The goal
 
@@ -105,12 +109,11 @@ under `G`'s own aim the 48 residual writers turn 0.567 of their planes a step
 against 0.972 on the input side, and a frame aimed by `delta^T delta Q` turns
 all of them and holds as much of `G`.
 
-A second (FACTS, "Output-side capture is low for rank"): a rank-`r` frame
+A second (FACTS, "Output-side capture is low for rank on most writers"): a rank-`r` frame
 could hold 0.87-0.94 of one step's gradient on either side, but one batch's best
 frame holds only 0.42-0.46 of the next batch's on the output side, 0.69-0.81 on
-the input side. Averaged over 50 batches the output-side Gram has effective rank
-95-293 against 5-15 on the input side: the persistent gradient there is wider
-than the frame.
+the input side. Over 50 steps the output-side Gram has effective rank 91-269
+against 5-15 on the input side, and its top `r` holds 0.48-0.72 of the energy.
 
 How to settle: undecided. One candidate, unendorsed: at fixed weights, the
 agreement of two half-batches on the leading directions of `G (I - Q Q^T)`,
@@ -131,6 +134,41 @@ UsuiTrack already takes it. *Hypothesis:* a buried key's pull, consistent over
 tokens, forms a direction of the aggregate and gets a full-length step, if it
 clears the noise and the frame admits it. Whether attention then spreads, or
 locks in later, is unmeasured. It needs pretraining, so the lane is tiny-dit.
+
+### X5. Do the residual writers belong on the input side?
+
+Raised 2026-11-14. The input side is where a frame cuts 90% of the dimension
+consistently (FACTS, "A warm frame matches an exact Gram EMA's"), for writers
+too. At equal `lr` it tied target and forgot more source; the open read is the
+same arm with the writers' step matched for curvature. Four arms are running
+(`xside-w1-s1`, `xside-w0.6-s1`, `xside-w0.35-s1`, `std-lr2.8e5-s1`); runner
+`outputs/tools/xside_lr.py`. The 0.6 is `1/sqrt` of a curvature-proxy ratio, a
+heuristic, unmeasured.
+
+## Candidates
+
+### The twin: the frame as the moment's construction
+
+Not adopted (2026-11-14). The moment aggregates `G Q` over steps and takes one
+polar factor; today's frame instead orthonormalizes each batch's pull and
+averages through small turns. The twin gives the frame the moment's order:
+
+    a = G^T G Q / mean(diag(Q^T G^T G Q))
+    Y = beta_f Y + (1 - beta_f) a
+    Q = polar(rho Q + Y)
+
+The polar factor comes from the padded `[r, r]` Gram `eigh` the turn already
+runs, with one retraction after; Newton-Schulz leaves weak planes up to 0.26
+off orthonormal. It has no horizontal projection, no liveness floor, no
+geodesic and no `eta`, and it takes the same action today's turn takes, so it
+runs under Molegrad's Gram. It costs one fp32 frame-sized state per matrix.
+
+What it buys (FACTS, "A warm frame matches an exact Gram EMA's"): arrival. On
+the writers under `G`'s own aim it is at its plateau within 100 steps from a
+fitted or a random frame. Readers tie except from a random start at `eta` 0.02,
+and the diagonal aim ties. In loss it matches `eta` 0.05, ahead at step 100 and level from 300. Its
+case is the deleted machinery and a first frame that stops mattering; over a
+long run arrival matters little (user). Runner: `outputs/tools/twin_frame.py`.
 
 ## Dropped or elsewhere
 

@@ -119,12 +119,14 @@ against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
 
 Can the frame's rank evolve faster, and is energy the right thing for it to
 follow? Question, gates, the paper behind it and the candidate reads:
-`docs/topics/subspace-evolution.md`. State: nothing measured.
+`docs/topics/subspace-evolution.md`. State (2026-11-14): a warm frame matches
+an exact Gram EMA's; open is X5, with four arms running.
 
 - X1. Archetype or detail: where does the gradient's energy lie?
 - X2. Settled or starved: is there persistent gradient outside a settled frame?
 - X3. Is energy the right admission rule?
 - X4. Does aggregate-then-polar reach the paper's wall?
+- X5. Do the residual writers belong on the input side?
 
 ---
 
