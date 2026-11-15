@@ -54,6 +54,9 @@ Each chapter is one or more reviewed commits, then a compaction.
    - Molegrad's `prepare` runs serially inside `step()`. It goes into backward in chapter 4. `prepare` dates from
      `release_matrix_grads`, gradient early release before Molegrad worked.
    - Every matrix's fp32 moment is held across the write, turn and rotation loops.
+   *Done 2026-11-16* for the first and third: `Prepared` carries `||Z||` once, and phase two runs per matrix. The
+   second is chapter 4's. nanodit, paired against chapter 1: 396 against 398 ms/step, a tie (spread ~10 ms); the
+   gain is no fp32 moment held past its matrix, not time.
 3. **Blockwise state.** Frames, moments and `Y` live in one `[b, n, r]` buffer per (block, shape), and each matrix's
    state is a view into it. Batched ops then need no `torch.stack` copy and no transient, and memory is bounded by
    the block. The earlier OOM came from stacking the whole model's same-shape matrices (FACTS, "bs16 fits once the

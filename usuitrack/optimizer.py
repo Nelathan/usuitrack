@@ -38,6 +38,8 @@ class Prepared:
 
     projected: Tensor
     """`Z = G Q`, oriented `[other, r]`, in the gradient's dtype."""
+    projected_norm: Tensor
+    """`||Z||_F`, fp32, of the sanitized `Z`: taken once, for the blend and the reads."""
     aim: Tensor | None
     """The normalized action `[d, r]`, fp32; `None` on the step that fits the frame."""
     raw_norm: Tensor
@@ -206,10 +208,10 @@ class UsuiTrack(Optimizer):
         state = self.state[param]
         if "frame" not in state:
             state["frame"] = frame.fit(grad, frame.rank(param.shape, group["rank_fraction"]))
-            self._pending[param] = Prepared(grad @ state["frame"], None, raw_norm)
+            projected, aim = grad @ state["frame"], None
         else:
             projected, aim = frame.project_and_aim(grad, state["frame"])
-            self._pending[param] = Prepared(projected, aim, raw_norm)
+        self._pending[param] = Prepared(projected, torch.linalg.vector_norm(projected, dtype=torch.float32), aim, raw_norm)
         param.grad = None
 
     @torch.no_grad()
@@ -230,26 +232,23 @@ class UsuiTrack(Optimizer):
         return loss
 
     def _step_group(self, group: dict, entries: list[tuple[Tensor, Prepared]]) -> None:
-        """Phase two: SPEC steps 5-8, then the frame moves and the moment is committed."""
+        """Phase two, one matrix at a time, so no fp32 moment outlives its matrix:
+        SPEC steps 5-8, then the frame moves and the moment is committed."""
 
-        moments = [self._blend_moment(param, prepared, group["beta"]) for param, prepared in entries]
-        for (param, _prepared), moment in zip(entries, moments, strict=True):
-            self._write_weight(param, unit_polar(moment), group)
-
-        # The weights were lifted through the held frame; only now does it move.
-        # A matrix whose frame was fitted this step has no aim and holds still.
-        moved = {param: self._follow(param, prepared.aim) for param, prepared in entries if prepared.aim is not None}
-        if moved and self.diagnostics is not None:
-            self.diagnostics.frame_move(list(moved), [self.state[param]["frame"] for param in moved], list(moved.values()))
-
-        # SPEC step 6: the frame is stored, the moment follows its in-span
-        # rotation, then is rounded once.
-        for (param, _prepared), moment in zip(entries, moments, strict=True):
+        for param, prepared in entries:
             state = self.state[param]
-            item = moved.get(param)
-            if item is not None:
-                state["frame"].copy_(item.frame)
-                moment = moment @ item.rotation
+            moment = self._blend_moment(param, prepared, group["beta"])
+            self._write_weight(param, unit_polar(moment), group)
+            # The weight was lifted through the held frame; only now does it move.
+            # A matrix whose frame was fitted this step has no aim and holds still.
+            if prepared.aim is not None:
+                moved = self._follow(param, prepared.aim)
+                if self.diagnostics is not None:
+                    self.diagnostics.frame_move(param, state["frame"], moved)
+                # SPEC step 6: the frame is stored, the moment follows its in-span
+                # rotation, then is rounded once.
+                state["frame"].copy_(moved.frame)
+                moment = moment @ moved.rotation
             round_into(state["moment"], moment)
 
     def _follow(self, param: Tensor, aim: Tensor) -> frame.Moved:
@@ -277,13 +276,11 @@ class UsuiTrack(Optimizer):
         state = self.state[param]
         if "moment" not in state:
             state["moment"] = torch.zeros_like(prepared.projected, dtype=param.dtype)
-        projected = prepared.projected.float()
-        projected_norm = projected.norm()
-        unit = projected / projected_norm.clamp_min(1e-12)
+        unit = prepared.projected.float() / prepared.projected_norm.clamp_min(1e-12)
         before = state["moment"].float()
         moment = beta * before + (1.0 - beta) * unit
         if self.diagnostics is not None:
-            self.diagnostics.gradient(param, projected_norm, prepared.raw_norm, prepared.probed)
+            self.diagnostics.gradient(param, prepared.projected_norm, prepared.raw_norm, prepared.probed)
             self.diagnostics.moment(param, unit, before, moment, beta)
         return moment
 

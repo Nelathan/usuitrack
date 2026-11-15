@@ -17,6 +17,8 @@ from typing import Iterable
 import torch
 from torch import Tensor
 
+from .frame import Moved
+
 READS = {
     "relative_step": (
         "||dW|| / ||W|| over all matrices, before rounding. Equals lr when every matrix "
@@ -86,11 +88,12 @@ class Diagnostics:
         """`before` is the moment as it stood ahead of this step's blend, so the
         cosine does not measure the gradient against itself."""
 
-        cosine = (unit_grad * before).sum() / (unit_grad.norm() * before.norm()).clamp_min(1e-12)
+        # `unit_grad` has norm one up to the clamp, or is zero for a zero gradient.
+        cosine = (unit_grad * before).sum() / before.norm().clamp_min(1e-12)
         self.add("grad_moment_cosine", cosine)
 
-    def frame_move(self, params: list[Tensor], before: list[Tensor], moved: list) -> None:
-        """Per frame update: the stored frames before, and `frame.Moved` after; a hook the release reads nothing from."""
+    def frame_move(self, param: Tensor, before: Tensor, moved: Moved) -> None:
+        """Per frame update: the stored frame before, and `Moved` after; a hook the release reads nothing from."""
 
     def update(self, param: Tensor, update_norm: Tensor) -> None:
         square = update_norm.square()

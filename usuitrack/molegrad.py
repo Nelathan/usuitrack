@@ -158,13 +158,14 @@ class Molegrad:
                 raise RuntimeError("Molegrad: a matrix was prepared twice before step()")
             z, action, probed = module.z.grad, module.action.grad, module.probed.grad
             module.z.grad = module.action.grad = module.probed.grad = None
-            z_norm = torch.linalg.vector_norm(z, dtype=torch.float32)
+            # `z` and the probes come from the same `X` and `delta`, so a non-finite
+            # stream reaches the estimate too, and the estimate is the test.
             estimate = probed.square().sum(dim=0).mean().sqrt()
-            raw_norm = torch.where(torch.isfinite(z_norm) & torch.isfinite(estimate), estimate, torch.nan)
+            raw_norm = torch.where(torch.isfinite(estimate), estimate, torch.nan)
             z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
             action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
             aim = None if param in self._fitted else frame.aim(action, module.basis)
-            self.optimizer._pending[param] = Prepared(z, aim, raw_norm, probed=True)
+            self.optimizer._pending[param] = Prepared(z, torch.linalg.vector_norm(z, dtype=torch.float32), aim, raw_norm, probed=True)
             prepared = True
         if prepared:
             self._fitted.clear()

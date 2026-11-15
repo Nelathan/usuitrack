@@ -135,7 +135,7 @@ side"). The twin, Newton-Schulz every step, is the release's tracker (SPEC step 
 
 The step is launch-bound on small, deep models. Decisions, chapters, baselines and open nuance:
 `docs/topics/fast-step.md`. State (2026-11-16): chapter 1 is in (the twin, the input side, Molegrad on in
-the harness; FACTS, "The new defaults on LFM3"), and chapter 2 is next.
+the harness; FACTS, "The new defaults on LFM3"), and chapter 2 (`||Z||` once, phase two per matrix) is in; chapter 3 is next.
 
 - V1. Clip instead of normalize `Z`, and clip to what? (topic, "Open nuance")
 

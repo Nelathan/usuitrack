@@ -15,6 +15,7 @@ import torch
 from torch import Tensor
 
 from usuitrack.diagnostics import READS, Diagnostics
+from usuitrack.frame import Moved
 
 LAB_READS = {
     "moment_persistence": (
@@ -81,37 +82,33 @@ class LabDiagnostics(Diagnostics):
             self.add("moment_persistence", (after.norm().square() - floor) / (1.0 - floor))
         self._param = None
 
-    def frame_move(self, params: list[Tensor], before: list[Tensor], moved: list) -> None:
-        super().frame_move(params, before, moved)
-        for item in moved:
-            rotation = item.rotation
-            root = math.sqrt(rotation.shape[-1])
-            self.add("transport_correction", (rotation - rotation.mT).norm() / (2.0 * root))
+    def frame_move(self, param: Tensor, before: Tensor, moved: Moved) -> None:
+        super().frame_move(param, before, moved)
+        rotation = moved.rotation
+        self.add("transport_correction", (rotation - rotation.mT).norm() / (2.0 * math.sqrt(rotation.shape[-1])))
 
         # The first `sample` matrices to move, across every group.
-        for param in params:
-            if len(self._sampled) < self.sample_size:
-                self._sampled.add(param)
-        for param, old, item in zip(params, before, moved, strict=True):
-            if param not in self._sampled:
-                continue
-            start, end = old.float(), item.frame.float()
-            root = math.sqrt(end.shape[-1])
-            speed = (end - start @ (start.mT @ end)).norm() / root
-            self.add("transport_speed", speed)
-            if self.snapshot_interval <= 0:
-                continue
-            path = self._paths.get(param)
-            self._paths[param] = speed if path is None else path + speed
-            self._updates[param] = self._updates.get(param, 0) + 1
-            if self._updates[param] % self.snapshot_interval:
-                continue
-            previous = self._snapshots.get(param)
-            self._snapshots[param] = end.clone()
-            path = self._paths.pop(param)
-            if previous is None:
-                continue
-            overlap = previous.mT @ end
-            lag = (end - previous @ overlap).norm() / root
-            self.add("transport_lag", lag)
-            self.add("transport_curve", 1.0 - lag / path.clamp_min(1e-12))
+        if len(self._sampled) < self.sample_size:
+            self._sampled.add(param)
+        if param not in self._sampled:
+            return
+        start, end = before.float(), moved.frame.float()
+        root = math.sqrt(end.shape[-1])
+        speed = (end - start @ (start.mT @ end)).norm() / root
+        self.add("transport_speed", speed)
+        if self.snapshot_interval <= 0:
+            return
+        path = self._paths.get(param)
+        self._paths[param] = speed if path is None else path + speed
+        self._updates[param] = self._updates.get(param, 0) + 1
+        if self._updates[param] % self.snapshot_interval:
+            return
+        previous = self._snapshots.get(param)
+        self._snapshots[param] = end.clone()
+        path = self._paths.pop(param)
+        if previous is None:
+            return
+        overlap = previous.mT @ end
+        lag = (end - previous @ overlap).norm() / root
+        self.add("transport_lag", lag)
+        self.add("transport_curve", 1.0 - lag / path.clamp_min(1e-12))

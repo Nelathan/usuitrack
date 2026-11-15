@@ -457,15 +457,15 @@ ulp. `docs/FACTS.md` on `lab` carries the measurement.
 For each matrix, phase one runs exactly once after its full gradient is complete:
 
 1. sanitize `G`;
-2. read `Z_t` and, after initialization, form the aim `a_t` in the held frame `Q_t`;
-3. retain `Z_t` and the optional `a_t`, then release `G`.
+2. read `Z_t` and its norm and, after initialization, form the aim `a_t` in the held frame `Q_t`;
+3. retain `Z_t`, its norm and the optional `a_t`, then release `G`.
 
 Phase one does not move the basis, update the moment, or update the parameter:
 the moment is rotated and committed after the frame moves (step 6), so it is
-written only in `step()`. Phase two runs in `step()`: it blends each unit `Z_t`
-into `M_t`, applies the balanced polar map to each `M_t`, lifts each `O_t`
-through `Q_t`, updates `W`, then blends each aim into `Y`, moves each frame to
-`Q_{t+}` and commits each moment.
+written only in `step()`. Phase two runs in `step()`, one matrix at a time, so
+no fp32 moment outlives its matrix: it blends the unit `Z_t` into `M_t`,
+applies the balanced polar map, lifts `O_t` through `Q_t`, updates `W`, then
+blends the aim into `Y`, moves the frame to `Q_{t+}` and commits the moment.
 
 Without `release_matrix_grads`, both phases run in `step()`, on whatever
 gradient has accumulated, so gradient accumulation works. With it, the
@@ -522,7 +522,9 @@ matrices it reads `||G||` to within 1%, but 4-11% apart per matrix and step
 (`FACTS.md` on `lab`, "Training without `dW`"). Capture over it is published
 as `grad_capture_probe`, never as `grad_capture`: it can read above 1.
 Like step 1's norm it is telemetry and the non-finite flag, and applied to
-nothing. All three leaves are token sums, so micro-batches accumulate exactly.
+nothing. `Z` and the probes are read from the same `X` and `delta`, so a
+non-finite stream reaches the estimate too, and the estimate alone is the flag.
+All three leaves are token sums, so micro-batches accumulate exactly.
 
 A matrix with no frame fits it in its first backward, formed and freed inside
 the backward; under accumulation that is the first micro-batch's gradient, not
