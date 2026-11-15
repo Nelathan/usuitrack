@@ -1666,6 +1666,13 @@ for that difference is measured. Frames' worst `|QᵀQ - I|` 8.0e-4 against the
 release's 8.4e-4. The step's peak allocation above its start: 15 MiB per
 matrix, 119-121 MiB stacked; with an 8 MiB cap, every stack chunked, 33 MiB and
 bit-identical results. Learning under the stacked step is not measured.
+The optimizer's diagnostics accumulation, which nanodit runs on, costs 20-22
+ms of the step either way (`outputs/nanodit_step_bench_diag.log`, one process,
+`diagnostics` set to `None` on the live optimizer: 357.6-358.0 per matrix with
+it, 335.8 without; 308.5 stacked with it, 288.2 without), so stacked and with
+it off `step()` costs 68 ms. A lower bound on diagnostics' cost: Molegrad's
+probe and the `raw_norm` pass in `_prepare` stay in, and the bench never drains
+the reads (`pop_diagnostics`).
 
 ## Run ledger (Anima)
 
