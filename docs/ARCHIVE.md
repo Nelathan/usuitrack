@@ -1154,6 +1154,24 @@ of the planes against 0.845 and ends a third of a step from the `eigh` turn:
 a different liveness rule for at most 0.5% of the step. Accepted by the user:
 `eigh` stays, padded.
 
+## CLOSED -- the input side's writer step costs source by its direction
+
+PLAN X5, 2026-11-15 (FACTS, "Residual writers on the input side"). A second
+read of "the residual writers keep their output side, under either aim"
+(2026-10-30), now at a matched step. The input side holds more of a writer's
+gradient (capture 0.770 against 0.704) and cuts the dimension consistently, but
+its step is the archetype that source and target share: at fixed weights (two
+steps, three writers) it works against source on every writer read, where the
+output side's step is near orthogonal to it. Scaling the writers' `lr` by 0.6
+and 0.35 for the input side's larger curvature never brings an arm under the
+standard side's own `lr` line (2.9-8.7e-3 more source at matched target; at
+0.35 behind on both losses), and `o_proj` alone at full `lr` forgets 2.2e-3
+more for target within the floor. One seed, a two-point line, source at 500
+only. The cost is the step's direction, as far as an `lr` scalar can match its
+size. The user's lean of 2026-11-14, that the frame belongs on the input side
+for writers too if the step can be matched, does not survive `lr` matching.
+More capture is not better for the model here.
+
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
 Open, not closed: these were the live questions when the release was cut, moved

@@ -1516,6 +1516,62 @@ and 1.1e-3 behind on source, both at the noise floor. The replay's ranking of
 the twin over `eta` 0.05 did not show in loss. One seed; the stream was
 recorded uncompiled, the loss runs are compiled.
 
+### Residual writers on the input side: the step's direction costs source, at every writer `lr` tried
+
+2026-11-15, PLAN X5. The input side's frame cuts the dimension consistently
+for writers too ("A warm frame matches an exact Gram EMA's"), and at equal `lr`
+it tied target and forgot 9e-3 more source ("Training without `dW`"). The
+question: is that forgetting the step's size or its direction?
+
+At fixed weights (the replay's 8-batch target and source gradients, steps 200
+and 250, today's turn), output side against input side: `gain`, the step's
+cosine with each loss's mean gradient (x1e3; negative on source means the step
+raises source loss), and `bite`, the unit step's K-FAC curvature,
+`tr(D dW C dW^T)` over its isotropic value (`outputs/runs/replay-shift.log`,
+`replay-right.log`):
+
+| writer | target `gain` | source `gain` | target `bite` | source `bite` |
+|---|---|---|---|---|
+| `o12` | 14.9 / 22.0 | +0.9 / -2.8 | 35.0 / 25.3 | 15.3 / 15.2 |
+| `c11` | 8.2 / 15.4 | -1.5 / -5.0 | 8.9 / 23.3 | 3.9 / 15.2 |
+| `w2` | 13.8 / 19.4 | -0.9 / -4.3 | 12.1 / 34.4 | 3.7 / 23.7 |
+
+The input-side step is the archetype that source and target share, so it aligns
+with target more and works against source, where the output side's step is
+close to orthogonal to source. On `c11` and `w2` it also bites ~2.7x harder, so
+equal `lr` is a larger functional step there. Matching that step (the writers'
+`lr` scaled by 0.6, `1/sqrt(2.7)`, an unmeasured heuristic, and by 0.35) tests
+whether the size alone was the cost.
+
+In loss, 500 steps, seed 1, target at 100 / 200 / 300 / 500, source at 500, and
+the source excess at 500 over the standard side's own `lr` line (through the
+two standard arms, at the arm's target):
+
+| arm | 100 | 200 | 300 | 500 | source | over the line |
+|---|---|---|---|---|---|---|
+| standard, `4e-5` | 1.433109 | 1.377298 | 1.358706 | 1.340820 | 2.686102 | -- |
+| standard, `2.8e-5` (`std-lr2.8e5-s1`) | 1.451076 | 1.390573 | 1.368870 | 1.348318 | 2.682384 | -- |
+| all input side, writers x1 (`xside-w1-s1`) | 1.424580 | 1.372684 | 1.355639 | 1.339912 | 2.695234 | +8.7e-3 |
+| writers x0.6 (`xside-w0.6-s1`) | 1.434084 | 1.377949 | 1.359030 | 1.341939 | 2.690363 | +4.8e-3 |
+| writers x0.35 (`xside-w0.35-s1`) | 1.441191 | 1.382690 | 1.362381 | 1.344173 | 2.687367 | +2.9e-3 |
+| only `o_proj` on the input side (`xside-oproj-s1`) | 1.431844 | 1.376551 | 1.358254 | 1.340516 | 2.688302 | +2.1e-3 |
+
+Scaling the writers' `lr` down walks the input-side arms toward the standard
+point, never under the standard side's line: at x0.35 the arm is behind the
+standard arm on both losses (+3.4e-3 target, +1.3e-3 source), which needs no
+interpolation. One scale for all writers is coarse: `o_proj` bites less on the
+input side (25.3 against 35.0), so the scaled arms shrank its step where nothing
+called for it. `o_proj` alone at full `lr`, the writer the fixed-weights ratio of
+`gain^2` to `bite` favoured most on the input side (19.2 against 6.3; conv 10.2
+against 7.6 also, `w2` 11.0 against 15.8 not), ties target within the floor from
+step 200 and forgets 2.2e-3 more source, about twice the floor. So the cost is
+the direction, not the size, as far as an `lr` scalar can match a step; the
+writers keep their output side. Capture reads
+0.770-0.772 on the all-input arms and 0.725 on `o_proj` alone against 0.704: more
+of `G` held, worse for the model. The line is linear through two points, one
+seed; sources at 500 only. Runners `outputs/tools/xside_lr.py`
+(`WRITER_LR_SCALE`), `outputs/tools/xside_role.py` (`ROLE`).
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

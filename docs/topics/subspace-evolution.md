@@ -3,14 +3,17 @@
 Topic doc for PLAN group X, opened 2026-11-13. It holds this line's questions,
 framing and candidate reads; measured numbers go to FACTS, closures to ARCHIVE.
 
-## Status (2026-11-14)
+## Status (2026-11-15)
 
 Measured on LFM3 (FACTS, "A warm frame matches an exact Gram EMA's" and
 "Output-side capture is low for rank on most writers"): from step ~200 today's
 turn holds what an exact Gram EMA's frame holds, so a causal tracker has little
 left to gain on a warm frame; on the output side what persists is as wide as
 the frame or wider.
-One candidate tracker is written down below, not adopted. Open: X5.
+One candidate tracker is written down below, not adopted. X5 closed: the
+residual writers keep their output side; the input side's step costs source by
+its direction, at every writer `lr` tried (ARCHIVE, "the input side's writer
+step costs source by its direction").
 
 ## The goal
 
@@ -134,16 +137,6 @@ UsuiTrack already takes it. *Hypothesis:* a buried key's pull, consistent over
 tokens, forms a direction of the aggregate and gets a full-length step, if it
 clears the noise and the frame admits it. Whether attention then spreads, or
 locks in later, is unmeasured. It needs pretraining, so the lane is tiny-dit.
-
-### X5. Do the residual writers belong on the input side?
-
-Raised 2026-11-14. The input side is where a frame cuts 90% of the dimension
-consistently (FACTS, "A warm frame matches an exact Gram EMA's"), for writers
-too. At equal `lr` it tied target and forgot more source; the open read is the
-same arm with the writers' step matched for curvature. Four arms are running
-(`xside-w1-s1`, `xside-w0.6-s1`, `xside-w0.35-s1`, `std-lr2.8e5-s1`); runner
-`outputs/tools/xside_lr.py`. The 0.6 is `1/sqrt` of a curvature-proxy ratio, a
-heuristic, unmeasured.
 
 ## Candidates
 
