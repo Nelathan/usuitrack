@@ -1487,7 +1487,11 @@ surrounding 50 steps, later batches included, holds more `sig` on `o12` and
 `w2` (0.68-0.69 against the recorded frame's 0.58-0.59, steps 100 and 200), so
 the reference is what a causal tracker reaches, not the most a frame could
 hold. In steps 31-100 the writers lag: on `o12`, `sig` 0.44 against the
-reference's 0.70.
+reference's 0.70. On the input side there is no such headroom: the same
+non-causal frame (steps 100 and 200) holds `cap` 0.861 / 0.887 / 0.761 on `o12`,
+`c11`, `w2` against today's turn's 0.853 / 0.883 / 0.746 over steps 101-200,
+with the window Gram's effective rank 16.5 / 2.6 / 10.5 against a frame of 102 /
+102 / 198 (`outputs/runs/ceiling-right.log`, `replay-right.log`).
 
 The twin (`docs/topics/subspace-evolution.md`, "Candidates") against the turn,
 writers `o12`, `c11`, `w2`, `sig` in steps 31-100 and 201-300:

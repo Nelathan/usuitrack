@@ -150,6 +150,15 @@ not predict a small model's 6k pretrain. How to settle: nanodit's 6k run with
 `side="right"` on every group against its baseline, `lr` 2e-3 (the user's
 baseline, 2026-11-15; the tiny-dit session measured it 0.011 ahead of 4e-3 at
 6k), with a 4e-3 pair beside it (tiny-dit, branch `arm/xside`).
+
+First read (tiny-dit session, 2026-11-15; d768x12, 6k steps, seed 41, caption
+eval loss, resolves ~3e-3; runs `/mnt/mars/ai/tiny-dit/runs/128_d768x12_6k*`):
+at 2e-3 xside starts slower (+0.011 at 1k, +0.008 at 2k, +0.004 at 3k), is
+level at 4k and 1.1e-3 ahead at 6k, within noise; at 4e-3 it is 8.9e-3 ahead
+at 6k, behind at 1k, which reads as tolerating a too-hot `lr`. The opposite of
+LFM's fast start. Its slope from 3k to 6k is steeper in both pairs (0.0252
+against 0.0205 at 2e-3, 0.0188 against 0.0151 at 4e-3), so it is still gaining
+when the run ends; one seed each.
 Not run: an `lr` scaled by measured `bite` per module, which needs `bite` on
 every matrix, not the three recorded writers.
 
