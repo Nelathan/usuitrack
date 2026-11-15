@@ -366,7 +366,8 @@ def test_every_read_is_published_sane_and_describes_itself():
     _run(params, optimizer, 3)
 
     diagnostics = optimizer.pop_diagnostics()
-    assert set(diagnostics) == set(READS)
+    # The `G` path holds the exact norm; only Molegrad publishes the probe ratio.
+    assert set(diagnostics) == set(READS) - {"grad_capture_probe"}
     assert all(isinstance(value, float) and value == value for value in diagnostics.values()), diagnostics
     assert -1.0 <= diagnostics["grad_moment_cosine"] <= 1.0
     # Capture is the share of the gradient the frame holds, so it cannot exceed one.

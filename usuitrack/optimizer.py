@@ -43,6 +43,8 @@ class Prepared:
     """The Oja tangent `[d, r]`, fp32; `None` on the step that fits the frame."""
     raw_norm: Tensor
     """`||G||_F` before sanitizing, fp32: non-finite iff the gradient was."""
+    probed: bool = False
+    """`raw_norm` is Molegrad's probe estimate, not the exact norm."""
 
 
 class UsuiTrack(Optimizer):
@@ -259,7 +261,7 @@ class UsuiTrack(Optimizer):
         before = state["moment"].float()
         moment = beta * before + (1.0 - beta) * unit
         if self.diagnostics is not None:
-            self.diagnostics.gradient(param, projected_norm, prepared.raw_norm)
+            self.diagnostics.gradient(param, projected_norm, prepared.raw_norm, prepared.probed)
             self.diagnostics.moment(param, unit, before, moment, beta)
         return moment
 

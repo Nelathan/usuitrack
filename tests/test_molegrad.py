@@ -283,6 +283,20 @@ def test_training_runs_with_molegrad():
     assert all(torch.isfinite(p).all() for p in block.parameters())
 
 
+def test_capture_over_the_probe_estimate_is_published_as_a_probe_read():
+    torch.manual_seed(0)
+    block = _Block()
+    groups = [{"params": [block.w1.weight], "side": "right"}, {"params": [block.w2.weight], "side": "left"}]
+    optimizer = UsuiTrack(groups, lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN), diagnostics=True)
+    Molegrad(block, optimizer)
+    for step in range(3):
+        _loss(block, _batch(step)).backward()
+        optimizer.step()
+    drained = optimizer.pop_diagnostics()
+    assert "grad_capture" not in drained
+    assert 0.0 < drained["grad_capture_probe"] < 2.0
+
+
 def _zero_target_batch(seed):
     """A batch whose loss gradient is zero: every weight gradient is exactly zero."""
 

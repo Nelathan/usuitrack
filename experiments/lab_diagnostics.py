@@ -30,7 +30,7 @@ LAB_READS = {
 }
 
 # Reads sampled once per matrix, which is what a role can split.
-ROLE_READS = ("grad_capture", "grad_moment_cosine", "moment_persistence", "projected_grad_norm", "nonfinite_grads")
+ROLE_READS = ("grad_capture", "grad_capture_probe", "grad_moment_cosine", "moment_persistence", "projected_grad_norm", "nonfinite_grads")
 
 ALL_READS = {**READS, **LAB_READS}
 
@@ -69,9 +69,9 @@ class LabDiagnostics(Diagnostics):
         self._totals.add(name)
         self.add(name, value)
 
-    def gradient(self, param: Tensor, projected_norm: Tensor, raw_norm: Tensor) -> None:
+    def gradient(self, param: Tensor, projected_norm: Tensor, raw_norm: Tensor, probed: bool) -> None:
         self._param = param
-        super().gradient(param, projected_norm, raw_norm)
+        super().gradient(param, projected_norm, raw_norm, probed)
         self._param = None
 
     def moment(self, param: Tensor, unit_grad: Tensor, before: Tensor, after: Tensor, beta: float) -> None:

@@ -29,6 +29,11 @@ READS = {
         "the rank is too small or the frame lags a moving gradient. Compare runs at equal rank_fraction. "
         "A non-finite gradient counts as zero."
     ),
+    "grad_capture_probe": (
+        "grad_capture under Molegrad, over the probe sketch's estimate of ||G||: a ratio of an exact "
+        "||G Q|| to a noisy norm, so it can read above 1 (4-11% spread per matrix and step). A guide "
+        "for sizing rank_fraction, not a measurement of the frame."
+    ),
     "grad_moment_cosine": (
         "Cosine of this step's projected gradient against the moment before it. Positive: "
         "steps under-travel and the gradient keeps its direction. Near zero: critically damped. "
@@ -73,12 +78,13 @@ class Diagnostics:
         self.add(name, value)
         self._totals.add(name)
 
-    def gradient(self, param: Tensor, projected_norm: Tensor, raw_norm: Tensor) -> None:
+    def gradient(self, param: Tensor, projected_norm: Tensor, raw_norm: Tensor, probed: bool) -> None:
         self.add("projected_grad_norm", projected_norm)
         # A non-finite gradient reads as zero capture rather than taking the
         # whole window's mean to NaN; `nonfinite_grads` flags that window.
         capture = projected_norm / raw_norm.clamp_min(1e-12)
-        self.add("grad_capture", torch.where(torch.isfinite(raw_norm), capture, 0.0))
+        name = "grad_capture_probe" if probed else "grad_capture"
+        self.add(name, torch.where(torch.isfinite(raw_norm), capture, 0.0))
         self.add_total("nonfinite_grads", (~torch.isfinite(raw_norm)).float())
 
     def moment(self, param: Tensor, unit_grad: Tensor, before: Tensor, after: Tensor, beta: float) -> None:

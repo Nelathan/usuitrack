@@ -81,7 +81,7 @@ The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
 release files onto it, prepared locally after your review; you push.
 
 Decided 2026-10-31 (you): the write is eager, `rank_fraction` 0.05,
-`grad_capture` under molegrad is the read, `lab` on torch 2.14 with
+`grad_capture` under molegrad is the read (`grad_capture_probe` since 2026-11-15), `lab` on torch 2.14 with
 `causal-conv1d` optional. Done since: R2 measured and README's Result
 rewritten on it (logs in `outputs/headline/`), the suite on the GPU, the Unsloth
 example in both modes. The squash is `a166a19` on local `main`: `lab`'s

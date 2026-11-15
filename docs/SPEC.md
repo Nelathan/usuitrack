@@ -547,8 +547,9 @@ energy in every frame direction, so more planes are live and more of the frame
 turns: 0.996 against 0.845 on LFM3.
 
 `||G||_F^2` is estimated as `||G P||_F^2 / 16`, unbiased; across a model's
-matrices it reads `||G||` to within 1% (`FACTS.md` on `lab`, "Training without
-`dW`"), so `grad_capture` reads the same under molegrad as on the `G` path.
+matrices it reads `||G||` to within 1%, but 4-11% apart per matrix and step
+(`FACTS.md` on `lab`, "Training without `dW`"). Capture over it is published
+as `grad_capture_probe`, never as `grad_capture`: it can read above 1.
 Like step 1's norm it is telemetry and the non-finite flag, and applied to
 nothing. All three leaves are token sums, so micro-batches accumulate exactly.
 
@@ -648,6 +649,7 @@ non-finite gradients are counted from the raw norm.
 |---|---|
 | `relative_step` | `sqrt(sum ||alpha U||^2) / sqrt(sum ||W||^2)` over every matrix of the step, against the weights after it, before rounding. `lr` whenever every matrix stepped under the trust rule and every moment fills its rank (step 8); below it by the rank the moments leave empty. A `fixed` group contributes its shape-sized step over its own `||W||`, so the read is `lr` only by coincidence there. The update is read before a norm bound's clamp (step 8) |
 | `grad_capture` | `||G_o Q|| / ||G||`: the share of the gradient's magnitude the frame catches. Reads the basis rather than the model |
+| `grad_capture_probe` | under molegrad, `||G_o Q||` over the probe estimate of `||G||` in place of `grad_capture`: a guide for sizing `rank_fraction`, noisy per matrix and able to exceed 1 |
 | `grad_moment_cosine` | this step's unit projected gradient against the moment *before* the blend, so the reading is not self-referential. Positive: the step under-travels and the gradient keeps its direction; negative: it overshoots |
 | `tangent_live_fraction` | the share of planes with `sigma_i > sqrt(r eps) sigma_max` (step 4). Below `1` the aim is rank-collapsed against the rank it was given: the rank is too large for what this batch size resolves |
 | `projected_grad_norm` | `||G_o Q||`. The step is blind to it; bursts mark outlier batches the fallback optimizer is not blind to |

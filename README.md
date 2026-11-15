@@ -147,7 +147,8 @@ Each value is the mean since the last call (`nonfinite_grads` is a count), so ca
 it is the one device-to-host transfer. `usuitrack.diagnostics.READS` says how to
 read each key. The two that tell you the most about a new setup are
 `tangent_live_fraction` (does the rank fit what the gradient carries at this batch
-size?) and `grad_capture` (how much of the gradient does the frame hold?).
+size?) and `grad_capture` (how much of the gradient does the frame hold?). Under
+Molegrad it is `grad_capture_probe`, over an estimated `||G||`.
 
 UsuiTrack is built for full-parameter training; LoRA is the comparison point
 above, not a mode of operation.

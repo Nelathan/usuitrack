@@ -31,7 +31,7 @@ def test_every_lab_read_is_published_and_describes_itself():
     params, optimizer = _optimizer(LabDiagnostics(snapshot_interval=2))
     _run(params, optimizer, 8)
     drained = optimizer.pop_diagnostics()
-    assert set(drained) == set(ALL_READS)
+    assert set(drained) == set(ALL_READS) - {"grad_capture_probe"}
     assert 0.0 < drained["transport_lag"] <= 1.0
     assert 0.0 <= drained["transport_curve"] < 1.0
     assert 1.0 / RANK <= drained["tangent_concentration"] <= 1.0

@@ -1154,7 +1154,8 @@ raises capture 0.703 -> 0.770 (250-500) and `projected_grad_norm` 11%.
 Under the stream aim `tangent_live_fraction` reads 0.996 against 0.845: the
 stream action has energy in every frame direction where `G`'s leaves 15%
 dead, so the read means something else there. Its `grad_capture` divides by
-the 16-probe estimate of `||G||`. On the true bs16 gradients of an ordinary
+the 16-probe estimate of `||G||` (published as `grad_capture_probe` since
+2026-11-15). On the true bs16 gradients of an ordinary
 run (`outputs/tools/probe_bias.py`, 20 draws per matrix at steps 1, 25, 100,
 200), the estimate's ratio to `||G||` averages 0.990-1.004 on every weight
 shape, spread 4-11% per matrix and step (3.7% on the FFN inputs at 200, 8% on
