@@ -1688,10 +1688,15 @@ The split arm, stopped at step 250, reads target 1.429670 / 1.376295 at evals
 100 / 200, against fp32 `Y`'s 1.429619 / 1.376283
 (`outputs/runs/twin-split-s1-stopped250.log`).
 
-Its run read 4.13 s/step, fp32 `Y` 4.10, against 3.87 for the runner, which
-did the old turn and the twin both, and 3.91 for the standard arm
-(`std-lr4e5-rerun-s1.log`). That disagrees in sign with the bench below. The
-runs are not paired in time, and the cause is not measured.
+Timing in the harness, paired: the tree before the twin (`1f2931d`) then the
+twin (`063dc18`), 50 steps each back to back, standard arm with lab
+diagnostics, one pass. Mean over steps 1-50: 4.040 against 4.094 s/step, +1.3%;
+over 26-50, 4.06 against 4.15 (`outputs/runs/paired-old-1.log`,
+`paired-new-1.log`). Unpaired runs had read 3.87-3.91 for the turn and 4.10-4.13
+for the twin. The day-to-day drift is larger than the gap. The bench below has
+the twin's `step()` 19 ms faster, without the lab diagnostics, so their
+per-matrix `transport_correction` may carry the difference. That is not
+measured.
 
 Cost on LFM3's 153 matrices, bs16 gradients, `step()` alone
 (`outputs/tools/lfm3_step_bench.py`, `outputs/lfm3_step_bench.log`): today's
