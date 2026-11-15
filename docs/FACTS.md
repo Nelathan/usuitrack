@@ -1649,6 +1649,24 @@ of these shapes (min dim >= 64, all on the input side) the moment polar stacked
 by shape (five stacks, the largest 33 x `[3072, 154]`, a 179 MiB transient)
 takes 8.8 ms against 29.6 per matrix (`outputs/tools/polar_stack_bench.py`).
 
+Stacked inside the model (runner patch `outputs/tools/stacked_step.py`, a
+timing prototype: same shape in one batched call, chunks capped at 256 MiB of
+fp32 work, which no stack here reaches), the training step reads 332 ms with
+the moment polar stacked and 308 with the turn stacked too, against 355 per
+matrix in the same process (`outputs/nanodit_step_bench_turn.log`; the
+per-matrix arm 355.0-355.8 over three passes, 358.7-359.2 in another process):
+`step()` falls from 135 to 88 ms. Wiring check, synthetic gradients, 3 steps
+from one state on the 77 matrices (`outputs/tools/stacked_step_check.py`,
+`outputs/stacked_step_check.log`), max-abs difference from the per-matrix step
+over the tensor's max-abs, median / worst over matrices: polar stacked, weights
+5.7e-4 / 4.5e-3 and moments and frames bit-identical; polar and turn stacked,
+weights 2.4e-3 / 5.0e-3, moments 3.9e-3 / 6.7e-3, frames 3.1e-3 / 6.5e-3,
+within one bf16 ulp of the tensor's largest element. No run-to-run baseline
+for that difference is measured. Frames' worst `|QᵀQ - I|` 8.0e-4 against the
+release's 8.4e-4. The step's peak allocation above its start: 15 MiB per
+matrix, 119-121 MiB stacked; with an 8 MiB cap, every stack chunked, 33 MiB and
+bit-identical results. Learning under the stacked step is not measured.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
