@@ -1626,6 +1626,29 @@ are the same and the margins 1-3e-3 smaller: raw at 0.03 `cap` -4 and -9,
 the untruncated twin (`shift/0.95/1`, "A warm frame matches") holds `cap` +2 to
 +9 over today's turn on `o12`, `w2`, `o2` and `o20` in 201-300, at `sig` -1 to -5.
 
+### On a small deep model the step costs 38% of training; alone, the GPU idles 60% of it
+
+2026-11-15, not an LFM lane: tiny-dit's nanodit d768x12 conv4 (77 tracked
+matrices), 128 px, 4 x 64 micro-batches, compiled blocks, Molegrad and
+UsuiTrack as `build_optimizers` wires them (trust step, left/auto sides, beta
+0.99, rank 0.1, diagnostics on), bf16, synthetic tensors: timing only
+(`outputs/tools/nanodit_step_bench.py`, `outputs/nanodit_step_bench.log`). A
+training step takes 357 ms (358 on a repeat, 15 steps each), and 220 ms with
+`UsuiTrack.step()` stubbed out, so the step costs 137 ms. The stub leaves
+Molegrad's backward work in place and its projected gradients to be dropped at
+`zero_grad`. The same 77 matrices and groups stepped alone on synthetic `.grad`
+(`outputs/tools/nanodit_step_profile.py`, `outputs/nanodit_step_profile.log`)
+take 127 ms unsynced, grad copy included, against 51 ms of summed self-CUDA
+time over ~14.3k CUDA events per step (~186 per matrix, mean 3.6 µs): the GPU
+idles 60% of the step, waiting on the host. That share is measured alone, not
+inside the model. Phases timed between syncs (inflated by the syncs, not
+additive; `round_into` runs both after the moment's rotation and inside the
+weight write): polar of the moment 42 ms, turn 36, moment blend and diagnostics
+29, weight write 26, prepare 19, `tangent_spectra` 12, `round_into` 10. On 72
+of these shapes (min dim >= 64, all on the input side) the moment polar stacked
+by shape (five stacks, the largest 33 x `[3072, 154]`, a 179 MiB transient)
+takes 8.8 ms against 29.6 per matrix (`outputs/tools/polar_stack_bench.py`).
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
