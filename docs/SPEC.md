@@ -15,8 +15,10 @@ basis-tracking path; see the [README](../README.md) for results and usage.
   its moving frame, so its stored coordinates do not change at refresh.
 - **A healthy polar output can hide a sick input.** Newton--Schulz restores
   semi-orthogonal scale after weak directions have already become noise-dominated.
-- **`side="auto"` knows shape, not architecture.** It cannot infer a transformer's
-  residual-facing axis; a param group's `side` says it where it matters.
+- **A tracked side is a rule, not architecture.** `right` puts every frame on
+  its matrix's input and `auto` on its shorter side; neither knows a
+  transformer's residual-facing axis, and a param group's `side` says it where
+  it matters.
 - **`ndim == 2` is a shape gate, not the precondition.** Lookup tables pass it
   and break the method, for reasons no numerical guard can see. See "Parameter
   eligibility".
@@ -67,10 +69,13 @@ $$\Pi_Q(G)=G_oQ:[p,r],\qquad \Lambda_Q(Z)=\text{orient}^{-1}(ZQ^\top):[m,n].$$
 The moment lives in `[p,r]`, the frame in `[d,r]`; every formula below is the
 right case, and left is it on the transpose.
 
-`side="auto"` tracks the shorter side, `right` for `m >= n`: a shape guess, not
-an architectural one (see the trap above). A param group can fix `side` to
-`left` or `right`; tracking the residual stream on every weight is one such
-assignment, measured on LFM and Anima
+`side="right"`, the default, tracks every matrix's input side, where Molegrad's
+aim is the diagonal aim from `X` and `delta` ("Molegrad"). On a residual
+writer it gives up source in a finetune, 3-9e-3 on LFM3 (`FACTS.md` on `lab`,
+"Residual writers on the input side"). `side="auto"` tracks the shorter side, `right`
+for `m >= n`: a shape guess, not an architectural one (see the trap above). A
+param group can set any of the three; tracking the residual stream on every
+weight is one such assignment, measured on LFM and Anima
 (`docs/notes/2026-10-28-side-residual-facing-against-auto.md` on `lab`).
 
 Every Gram, aim and frame computation upcasts fp16/bf16 inputs to
@@ -634,8 +639,9 @@ These choices define the current design; they are redesignable.
 
 1. **One-sided projection:** retains a rank-limited update without a square core
    or second basis.
-2. **Side by shape, overridable:** `auto` tracks the shorter side; a param
-   group fixes `side` where the architecture knows better.
+2. **The input side by default, overridable:** one rule for every matrix, the
+   side Molegrad's diagonal aim lives on; a param group sets `side` where the
+   architecture knows better.
 3. **Side-Gram range-finder initialization:** fits the one-sided target's
    leading eigenspace in fp32 from the sanitized gradient, with no
    eigendecomposition to fail on a nearly rank-one Gram.

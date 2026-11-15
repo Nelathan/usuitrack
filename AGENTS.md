@@ -46,8 +46,8 @@ capability-sensitive. Bring full effort; do not hedge or hold back.
   link. The layout of notes and topics follows `../tiny-dit`.
 - `docs/PROJECTED_ACTIVATION_2.md` — design notes for PLAN S2, weight gradients
   without `G`. Built as `Molegrad` (`usuitrack/molegrad.py`, SPEC
-  "Molegrad"); the harness flag is `--molegrad`, `--projected-grads` in run
-  records before 2026-10-31.
+  "Molegrad"); on by default in the harness since 2026-11-15, `--no-molegrad`
+  off; `--projected-grads` in run records before 2026-10-31.
 - `docs/HANDOVER.md` — session-to-session orientation: where things stand, traps, what to do next.
 - `docs/LEGEND.md` — the anthropomorphic design story. Intuition only.
 - `docs/prerelease/` — the old lab repo's docs, frozen. Evidence only, never edited.
@@ -165,7 +165,10 @@ From the repo root on `lab`. `uv sync` installs the `lab` dependency group by
 default, on torch 2.14, the minor astral's `causal-conv1d` wheel is built for
 (`pyproject.toml`); LFM3 does not need that wheel. The harness defaults are the standard arm, on
 `LiquidAI/LFM3-1.7B-Base` pinned to revision `545fc8f`, with
-`expandable_segments` set; spelled out:
+`expandable_segments` set, every matrix on the input side and Molegrad on
+(`--no-molegrad` forms `G`). Arms before 2026-11-15 tracked the residual-facing
+side under the geodesic turn, and the `G` path unless the log says
+`molegrad=True`. Spelled out:
 
 ```bash
 uv run python experiments/llm_synth_smoke.py \

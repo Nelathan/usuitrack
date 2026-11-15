@@ -10,10 +10,11 @@ Measured on LFM3 (FACTS, "A warm frame matches an exact Gram EMA's" and
 turn holds what an exact Gram EMA's frame holds, so a causal tracker has little
 left to gain on a warm frame; on the output side what persists is as wide as
 the frame or wider.
-One candidate tracker is written down below, not adopted. For finetuning the
-residual writers keep their output side: the input side's step costs source by
-its direction, at every writer `lr` tried (ARCHIVE, "the input side's writer
-step costs source by its direction"). Open: X5 for pretraining.
+The twin, written down below, is the release's tracker since 2026-11-15
+(SPEC step 4). On the input side the residual writers' step costs source in
+finetuning (ARCHIVE, "the input side's writer step costs source by its
+direction"); every matrix takes it by default anyway (ARCHIVE, "every matrix
+on the input side"), which closes X5.
 
 ## The goal
 
@@ -139,6 +140,8 @@ clears the noise and the frame admits it. Whether attention then spreads, or
 locks in later, is unmeasured. It needs pretraining, so the lane is tiny-dit.
 
 ### X5. Does pretraining want every matrix on the input side?
+
+Closed 2026-11-15 by the user's choice (ARCHIVE, "every matrix on the input side").
 
 Raised 2026-11-15 (user). On LFM3's finetune the input side everywhere at full
 `lr` leads target at every eval, 8.5e-3 at step 100 shrinking to 0.9e-3 at 500,

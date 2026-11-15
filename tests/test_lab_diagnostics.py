@@ -69,7 +69,7 @@ def test_role_reads_partition_the_fleet_only_when_asked_for():
 
 
 def test_frame_motion_is_sampled_across_param_groups():
-    """The harness splits matrices into a group per side; the sample must not
+    """A model may put its matrices in several groups; the sample must not
     stop at the first group the step happens to turn."""
 
     torch.manual_seed(0)

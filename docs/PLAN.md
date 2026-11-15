@@ -78,8 +78,8 @@ this one's prior.
 ### S2. Weight gradients without `G` (molegrad)
 
 The goal (user, 2026-10-30): a FLOP win under checkpointing, not a VRAM win.
-Built as `Molegrad` in the package (SPEC, "Molegrad"), opt-in beside the `G`
-path (user, 2026-10-31): `Z` exact and the diagonal aim from `X` and `delta`,
+Built as `Molegrad` in the package (SPEC, "Molegrad"), beside the `G` path,
+and the harness default since 2026-11-15: `Z` exact and the diagonal aim from `X` and `delta`,
 ~0.1 of `dW`'s FLOPs at rank 0.05; design notes in
 `docs/PROJECTED_ACTIVATION_2.md`. On LFM3 it ties `G` through 1k steps at 3.66
 against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
@@ -120,23 +120,22 @@ against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
 Can the frame's rank evolve faster, and is energy the right thing for it to
 follow? Question, gates, the paper behind it and the candidate reads:
 `docs/topics/subspace-evolution.md`. State (2026-11-15): a warm frame matches
-an exact Gram EMA's; for finetuning the residual writers keep their output side
-(ARCHIVE); X5 is open for pretraining. The twin, Newton-Schulz every step,
-is the candidate tracker for a sync-free step on xside under `K` (FACTS, 2026-11-15).
+an exact Gram EMA's; every matrix takes the input side by default, a choice
+over a measured source cost in finetuning (ARCHIVE, "every matrix on the input
+side"). The twin, Newton-Schulz every step, is the release's tracker (SPEC step 4).
 
 - X1. Archetype or detail: where does the gradient's energy lie?
 - X2. Settled or starved: is there persistent gradient outside a settled frame?
 - X3. Is energy the right admission rule?
 - X4. Does aggregate-then-polar reach the paper's wall?
-- X5. Does pretraining want every matrix on the input side?
 
 ---
 
 ## Group V. A fast step for small, deep models
 
 The step is launch-bound on small, deep models. Decisions, chapters, baselines and open nuance:
-`docs/topics/fast-step.md`. State (2026-11-15): decided, chapter 1 next (twin, xside, Molegrad and the diagonal aim as
-defaults).
+`docs/topics/fast-step.md`. State (2026-11-16): chapter 1 is in (the twin, the input side, Molegrad on in
+the harness; FACTS, "The new defaults on LFM3"), and chapter 2 is next.
 
 - V1. Clip instead of normalize `Z`, and clip to what? (topic, "Open nuance")
 
@@ -144,10 +143,10 @@ defaults).
 
 ## Group T. Side
 
-### T1. Anima under `auto`, with a few exceptions
+### T1. Anima: its side table against the input side everywhere
 
 ai-toolkit carries a hardcoded side table (residual-facing, plus cross-attention
-K/V). `auto` may do as well with one or two exceptions.
+K/V). The release's `right` everywhere may do as well, with one or two exceptions.
 Settling it needs the per-role reads the release no longer has: open is how the
 ai-toolkit lane gets `LabDiagnostics`, which lives in this repo's `experiments/`.
 

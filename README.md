@@ -61,8 +61,8 @@ maps, and belong in the fallback. `docs/SPEC.md` has the reasoning.
 Rank is not configured per matrix: `rank_fraction` (default `0.05`) sizes each
 matrix at `rank_fraction * sqrt(m * n)`, capped at half its smaller side, so a
 1024x1024 projection runs at 51 and a 4608x1024 MLP matrix at 109. The tracked
-side defaults to `side="auto"`, the shorter one; a param group can fix it with
-`side="left"` or `"right"` where you know better.
+side defaults to `side="right"`, the input side of every matrix; a param group
+can set `side="left"`, or `"auto"` for the shorter side.
 
 `lr` is the relative step, `||dW|| / ||W||` per matrix, so the default `4e-5`
 means the same in every module. Schedule it like any optimizer's: a trainer's or
@@ -108,6 +108,7 @@ backward returns the rank-`r` projection the optimizer consumes, straight from
 the layer's input and output gradient, and the full gradient is never formed.
 On LFM3-1.7B it ties the ordinary path's loss through 1k steps at 11% less
 time per step, and gradient accumulation works without holding any gradient.
+It is the recommended path; the ordinary one is for models it cannot wrap.
 
 ```python
 from usuitrack import Molegrad, UsuiTrack

@@ -502,75 +502,17 @@ def validate_lora_optimizer_state_dtype(optimizer: torch.optim.Optimizer, dtype:
                 raise RuntimeError(f"LoRA AdamW {key} must use {dtype}, got {value.dtype}")
 
 
-def infer_d_model(named_params: list[tuple[str, torch.nn.Parameter]]) -> int:
-    """The residual width: the dimension the most 2D weights share a side with."""
-
-    counts: dict[int, int] = {}
-    for _name, param in named_params:
-        if param.ndim == 2:
-            for dim in param.shape:
-                counts[int(dim)] = counts.get(int(dim), 0) + 1
-    return max(counts, key=counts.__getitem__)
-
-
-def resolve_tracked_side(
-    name: str,
-    shape: tuple[int, int],
-    d_model: int,
-    side_overrides: dict[str, str] | None = None,
-) -> str:
-    """`left` (rows / output) or `right` (columns / input): the storage side that
-    tracks the residual stream for this weight. Always resolves.
-
-    1. an override entry (`{name_substring: "in" | "out"}`) whose key is in the
-       name -- for weights whose residual side the rules below get wrong, e.g. a
-       cross-attention K/V that reads a context stream, not the backbone
-    2. the side whose dimension equals `d_model`
-    3. square, or neither side `d_model`: `out` in the name, or an `o_proj`
-       module (the attention output in most HF models), means the output
-       (left) side, otherwise the input (right) side
-    """
-
-    if side_overrides:
-        for substring, side in side_overrides.items():
-            if substring in name:
-                return "right" if side == "in" else "left"
-    rows, cols = int(shape[0]), int(shape[1])
-    if (rows == d_model) != (cols == d_model):
-        return "left" if rows == d_model else "right"
-    lowered = name.lower()
-    writes_stream = "out" in lowered or re.search(r"(^|\.)o_proj(\.|$)", lowered) is not None
-    return "left" if writes_stream else "right"
-
-
 def build_usuitrack_param_groups(
     named_params: list[tuple[str, torch.nn.Parameter]],
     rank_fraction: float,
-    *,
-    side_overrides: dict[str, str] | None = None,
-    d_model: int | None = None,
 ) -> tuple[list[dict], dict[str, int]]:
+    """One group on the release's side, the input side of every matrix."""
+
     if rank_fraction <= 0:
         raise ValueError(f"rank_fraction must be positive, got {rank_fraction}")
-    if d_model is None:
-        d_model = infer_d_model(named_params)
-    stats = {"effective_rank_min": 0, "effective_rank_max": 0, "side_policy_left_tensors": 0, "side_policy_right_tensors": 0}
-
-    grouped: dict[str, list[torch.nn.Parameter]] = {}
-    for name, param in named_params:
-        side = resolve_tracked_side(name, tuple(param.shape), d_model, side_overrides)
-        grouped.setdefault(side, []).append(param)
-        if param.ndim == 2:
-            effective_rank = usuitrack_frame.rank(param.shape, rank_fraction)
-            stats["effective_rank_min"] = effective_rank if not stats["effective_rank_min"] else min(stats["effective_rank_min"], effective_rank)
-            stats["effective_rank_max"] = max(stats["effective_rank_max"], effective_rank)
-            stats[f"side_policy_{side}_tensors"] += 1
-
-    groups = [
-        {"params": params, "rank_fraction": rank_fraction, "side": side}
-        for side, params in grouped.items()
-    ]
-    return groups, stats
+    ranks = [usuitrack_frame.rank(param.shape, rank_fraction) for _name, param in named_params if param.ndim == 2]
+    stats = {"effective_rank_min": min(ranks, default=0), "effective_rank_max": max(ranks, default=0)}
+    return [{"params": [param for _name, param in named_params], "rank_fraction": rank_fraction}], stats
 
 
 def make_packed_batches(tokenizer, texts: list[str], device: torch.device, batch_size: int, seq_len: int, min_batches: int):
@@ -911,7 +853,7 @@ def apply_lr_schedule(
 
 
 def validate_gradient_release_contract(args) -> None:
-    # Under --molegrad no tracked matrix forms G, so release has nothing to free.
+    # Unless --no-molegrad, no tracked matrix forms G, so release has nothing to free.
     if not args.release_matrix_grads or args.molegrad:
         return
     if args.grad_accum_steps != 1:
@@ -979,7 +921,7 @@ def run_optimizer(
         )
     else:
         usuitrack_param_groups = []
-        policy_stats = {"effective_rank_min": 0, "effective_rank_max": 0, "side_policy_left_tensors": 0, "side_policy_right_tensors": 0}
+        policy_stats = {"effective_rank_min": 0, "effective_rank_max": 0}
     train_batch_count = args.warmup_steps + args.max_steps
     train_batches = make_batches(tokenizer, train_texts, device, args.batch_size, args.seq_len, train_batch_count, args.batching, "synth")
     val_batches = make_batches(tokenizer, val_texts, device, args.batch_size, args.seq_len, args.val_blocks, args.batching, "synth")
@@ -1223,8 +1165,6 @@ def run_optimizer(
         "lora_grad_clip_norm": args.lora_grad_clip_norm if optimizer_name == "lora" else 0.0,
         "effective_rank_min": policy_stats["effective_rank_min"] if optimizer_name == "usuitrack" else 0,
         "effective_rank_max": policy_stats["effective_rank_max"] if optimizer_name == "usuitrack" else 0,
-        "side_policy_left_tensors": policy_stats["side_policy_left_tensors"] if optimizer_name == "usuitrack" else 0,
-        "side_policy_right_tensors": policy_stats["side_policy_right_tensors"] if optimizer_name == "usuitrack" else 0,
         "lr_warmup_steps": args.lr_warmup_steps,
         "lr_final_ratio": args.lr_final_ratio,
         "lr_decay": args.lr_decay,
@@ -1343,8 +1283,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--molegrad",
-        action="store_true",
-        help="tracked matrices never form G; each backward returns Z and the diagonal aim from X and delta instead. See usuitrack/molegrad.py",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="tracked matrices never form G; each backward returns Z and the diagonal aim from X and delta instead (default on; --no-molegrad forms G). See usuitrack/molegrad.py",
     )
     parser.add_argument(
         "--trace-backward-memory",

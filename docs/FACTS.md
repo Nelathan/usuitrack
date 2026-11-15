@@ -1705,6 +1705,31 @@ and 431 MiB (+29%). The Gram-side polar (Newton-Schulz on `[r,r]`, fewer FLOPs,
 more launches) took 597 ms: on a launch-bound host the `[d,r]` iteration is
 faster. Whole-`Y` fp32 would hold 501 MiB.
 
+### The new defaults on LFM3: the twin trails the turn by 8e-4 target at 500, at the floor
+
+2026-11-15, the standard arm on the defaults of fast-step chapter 1 (input side
+everywhere, Molegrad on, the twin): target / source 1.340346 / 2.696886 at 500,
+3.56 s/step, 482.5 MiB of matrix state
+(`outputs/runs/defaults-xside-mole-s1.log`). The same setup under today's turn
+(`s2-xside-s1-500.log`, not paired in time) read 1.339551 / 2.695242 at 3.49
+s/step and 334 MiB. Target eval differences, twin minus turn, at 100-500:
+-3.5e-4, +1.9e-4, +4.3e-4, +5.7e-4, +8.0e-4. That is a slow drift, up to just
+over the LFM3 noise floor (6e-4 / 1e-3), and source +1.6e-3. The twin under `G`
+on the input side (`xside-twin-b95-s1.log`) ends at 1.340393 / 2.696862, the
+same, and the turn under `G` at 1.339945. So the gap is the tracker's on this
+side, not Molegrad's. The matrix state is +44% on the input side, against +29%
+on the native sides ("The frame moment's in-span part needs fp32"). Against the
+native-side standard arm (1.340764 / 2.686162), the input side costs 1.1e-2 of
+source, the ARCHIVE cost the user took.
+
+On nanodit (d768x12, 77 matrices, tiny-dit's wiring with every group on the
+input side, `outputs/tools/nanodit_xside_bench.py`, `outputs/nanodit_xside_bench.log`;
+two passes, old tree then new, in one sitting) the training step reads 367-370 ms
+under the turn (one 402 outlier) and 376-381 under the twin, with `step()`
+stubbed 230-236 in both (one 259). The twin's `step()` costs about 9 ms more, about 7%. It
+removes the host sync, which is what the CUDA graph needs, but not launches.
+Per matrix it runs about as many small ops as the turn did.
+
 ### On a small deep model the step costs 38% of training; alone, the GPU idles 60% of it
 
 2026-11-15, not an LFM lane: tiny-dit's nanodit d768x12 conv4 (77 tracked

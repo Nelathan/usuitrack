@@ -180,7 +180,8 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.retention_val_blocks, 8)
         self.assertEqual(args.wandb_log_every, 25)
         self.assertEqual(args.eval_every, 100)
-        self.assertFalse(args.molegrad)
+        self.assertTrue(args.molegrad)
+        self.assertFalse(build_parser().parse_args(["--no-molegrad"]).molegrad)
         self.assertEqual(args.attn_implementation, "sdpa")
         self.assertTrue(args.activation_checkpointing)
         self.assertTrue(args.torch_compile)
@@ -212,9 +213,9 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
     def test_gradient_release_rejects_incompatible_harness_contracts(self):
         validate_gradient_release_contract(build_parser().parse_args([]))
         validate_gradient_release_contract(build_parser().parse_args(["--no-release-matrix-grads", "--grad-accum-steps", "2"]))
-        validate_gradient_release_contract(build_parser().parse_args(["--molegrad", "--grad-accum-steps", "2"]))
+        validate_gradient_release_contract(build_parser().parse_args(["--grad-accum-steps", "2"]))
         with self.assertRaises(ValueError):
-            validate_gradient_release_contract(build_parser().parse_args(["--grad-accum-steps", "2"]))
+            validate_gradient_release_contract(build_parser().parse_args(["--no-molegrad", "--grad-accum-steps", "2"]))
 
     def test_gradient_statistics_include_released_matrix_norms(self):
         live = torch.nn.Parameter(torch.zeros(3))
@@ -270,54 +271,18 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(stats["selected_fallback_params"], 0)
         self.assertGreater(stats["excluded_3d_params"], 0)
 
-    def test_side_heuristic_tracks_the_d_model_axis(self):
-        # d_model = 4 here (the axis every weight shares). up reads it on its
-        # input (right) side, down writes it on its output (left) side, and the
-        # square q_proj has no `out` in its name so it falls to the input side.
+    def test_every_matrix_goes_to_one_group_on_the_release_side(self):
         up = torch.nn.Parameter(torch.randn(16, 4))
         down = torch.nn.Parameter(torch.randn(4, 16))
-        q = torch.nn.Parameter(torch.randn(4, 4))
-        named = [
-            ("model.layers.0.mlp.up_proj.weight", up),
-            ("model.layers.0.mlp.down_proj.weight", down),
-            ("model.layers.0.self_attn.q_proj.weight", q),
-        ]
+        named = [("model.layers.0.mlp.up_proj.weight", up), ("model.layers.0.mlp.down_proj.weight", down)]
 
         groups, stats = build_usuitrack_param_groups(named, rank_fraction=0.5)
-        group_by_param = {id(param): group for group in groups for param in group["params"]}
 
-        self.assertEqual(group_by_param[id(up)]["side"], "right")
-        self.assertEqual(group_by_param[id(down)]["side"], "left")
-        self.assertEqual(group_by_param[id(q)]["side"], "right")
-        self.assertEqual(stats["side_policy_right_tensors"], 2)
-        self.assertEqual(stats["side_policy_left_tensors"], 1)
-
-    def test_side_override_and_out_name_force_the_output_side(self):
-        # `out` in the name -> output side for a square weight; an override
-        # entry sends a weight the d_model rule would place elsewhere.
-        o = torch.nn.Parameter(torch.randn(4, 4))
-        o_proj = torch.nn.Parameter(torch.randn(4, 4))
-        q = torch.nn.Parameter(torch.randn(4, 4))
-        to_proj = torch.nn.Parameter(torch.randn(4, 4))
-        xk = torch.nn.Parameter(torch.randn(4, 8))
-        named = [
-            ("model.layers.0.self_attn.out_proj.weight", o),
-            ("model.layers.1.self_attn.o_proj.weight", o_proj),
-            ("model.layers.1.self_attn.q_proj.weight", q),
-            ("model.layers.1.mixer.to_proj.weight", to_proj),
-            ("model.layers.0.cross_attn.to_k.weight", xk),
-        ]
-
-        groups, _ = build_usuitrack_param_groups(
-            named, rank_fraction=0.5, side_overrides={"cross_attn.to_k": "in"}, d_model=4
-        )
-        group_by_param = {id(param): group for group in groups for param in group["params"]}
-
-        self.assertEqual(group_by_param[id(o)]["side"], "left")
-        self.assertEqual(group_by_param[id(o_proj)]["side"], "left")
-        self.assertEqual(group_by_param[id(q)]["side"], "right")
-        self.assertEqual(group_by_param[id(to_proj)]["side"], "right")
-        self.assertEqual(group_by_param[id(xk)]["side"], "right")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual([id(param) for param in groups[0]["params"]], [id(up), id(down)])
+        self.assertNotIn("side", groups[0])
+        self.assertEqual(UsuiTrack(groups).param_groups[0]["side"], "right")
+        self.assertEqual(stats, {"effective_rank_min": 2, "effective_rank_max": 2})
 
     def test_training_model_checkpoints_its_decoder_layers(self):
         from transformers import Lfm2Config, Lfm2ForCausalLM

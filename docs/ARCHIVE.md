@@ -1173,7 +1173,23 @@ more for target within the floor. One seed, a two-point line, source at 500
 only. The cost is the step's direction, as far as an `lr` scalar can match its
 size. The user's lean of 2026-11-14, that the frame belongs on the input side
 for writers too if the step can be matched, does not survive `lr` matching.
-More capture is not better for the model here.
+More capture is not better for the model here. **Reversed as a default,
+2026-11-15** (below): the measurement stands, and the release takes the input
+side anyway.
+
+## DECIDED -- every matrix on the input side, by default
+
+PLAN X5 and Group V, 2026-11-15 (user). The release's `side` defaults to
+`right`, and the harness drops its residual-facing side table. On nanodit's 6k
+pretrain the input side is level with the native sides at `lr` 2e-3 (1.1e-3
+ahead at 6k, within noise; behind until 3k) and 8.9e-3 ahead at 4e-3, which
+reads as tolerating a too-hot `lr` (tiny-dit, `docs/topics/subspace-evolution.md`,
+X5). The user reads that as a wash. The finetune cost above stands: on LFM3 the
+input side pays 3-9e-3 of source. The user takes that cost for one rule on every
+matrix, the side where Molegrad's diagonal aim lives, which the fast step
+builds on (`docs/topics/fast-step.md`). Withdraws: "for finetuning the residual
+writers keep their output side" as guidance (PLAN X state, the
+subspace-evolution topic's status); the measurement it rests on stands.
 
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 

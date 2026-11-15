@@ -535,7 +535,7 @@ def test_random_frames_are_drawn_at_build_orthonormal_and_reproducible():
     assert torch.equal(torch.rand(4), untouched)
     frames = [optimizer.state[weight]["frame"] for weight in weights]
     for weight, basis in zip(weights, frames, strict=True):
-        side = frame.resolve_side(weight.shape, "auto")
+        side = optimizer.param_groups[0]["side"]
         assert tuple(basis.shape) == (frame.orient(weight, side).shape[1], frame.rank(weight.shape, RANK_FRACTION))
         torch.testing.assert_close(basis.mT @ basis, torch.eye(basis.shape[-1]), atol=1e-5, rtol=0)
     again_weights, again = build()

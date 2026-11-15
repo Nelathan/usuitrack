@@ -22,10 +22,11 @@ diagnostics accumulation costs at least another 20-22 ms. Bench: `outputs/tools/
     the twin's polar from Newton-Schulz reads as `eigh`'s").
   - xside: every matrix on the input side. It was not worse on nanodit and won at 2e-3 over 6k steps, but the user
     calls that a wash. This reverses the finetuning closure in ARCHIVE (writers keep their output side) by the
-    user's choice. Write the reversal where that closure lives.
+    user's choice (ARCHIVE, "every matrix on the input side").
   - Molegrad on: "it really works great". The cost is that some `G` statistics are missing and the probe is wonky.
-  - The diagonal aim "would work for both `G` and Mole" (user). What it means on the plain-`G` path is still to be worked out
-    from the code before building.
+  - The diagonal aim "would work for both `G` and Mole" (user). Worked out: it is built from `X` and `delta`, which only
+    Molegrad's backward holds; the plain-`G` path has `G` alone, and its aim is `G`'s covariance action. The twin
+    takes either, so the diagonal aim is the default wherever Molegrad is.
 - **Does the twin need `G`?** No. It takes the same action today's turn takes, `frame.aim(action, basis)` from
   Molegrad's leaves. The diagonal-aim replays were exactly that.
 - **Rules relaxed.** Triton is allowed. The rule against parallel compiled and eager implementations was KISS
@@ -42,7 +43,10 @@ Each chapter is one or more reviewed commits, then a compaction.
 1. **Defaults.** Twin as the tracker, with Newton-Schulz and retraction; the geodesic turn, `tangent_spectra` and
    the liveness mask leave. xside, Molegrad on, the diagonal aim. SPEC, README, tests, the harness defaults and the standard arm
    follow. Then verify: an LFM3 500-step arm against the standard arm (loss veto), and the nanodit bench for speed.
-   The release's first-frame `frame.fit` still uses `eigh` once; a random `frame_init` avoids it.
+   The release's first-frame `frame.fit` is a range finder of two QRs, with no `eigh`.
+   *Done 2026-11-16.* LFM3: target +8e-4 and source +1.6e-3 against the turn on the same side at 500, at the
+   floor. nanodit: `step()` about 9 ms slower. The twin removes the sync, not launches (FACTS, "The new defaults
+   on LFM3").
 2. **The three issues the timing showed.**
    - `||Z||` is computed three times. Molegrad's `prepare` computes it only for a finiteness test, `_blend_moment`
      computes it again, and `diagnostics.moment` takes `unit_grad.norm()`, which is 1 by construction. Carry it once

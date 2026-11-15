@@ -6,21 +6,21 @@ Written 2026-10-28, updated 2026-11-15. Orientation only; `PLAN.md` carries the 
 ## Group V, 2026-11-15 (read this first)
 
 A new arc: `docs/topics/fast-step.md` carries the decisions, the six chapters in order, the nanodit baselines and
-the open nuance. Chapter 1, the defaults (twin with Newton-Schulz every step, xside, Molegrad on, aim `K`), is next.
-Compact after each chapter is committed.
+the open nuance. Chapter 1, the defaults, is in: the twin with Newton-Schulz every step is the release's
+tracker (`063dc18`), its frame moment stored split with the in-span part in fp32 (FACTS, "The frame moment's
+in-span part needs fp32"); `side` defaults to `right`, and the harness runs Molegrad, so the diagonal aim, by default.
+Chapter 2 is next. Compact after each chapter is committed.
 
 ## Group X, 2026-11-15
 
 State: `docs/topics/subspace-evolution.md` (Status, Candidates) and FACTS, "A
 warm frame matches an exact Gram EMA's" and "Residual writers on the input
-side". The twin is a written-down candidate, not adopted. For finetuning the
-writers keep their output side: the input side's writer step costs source by
-its direction, at writer `lr` x1, 0.6 and 0.35 and for `o_proj` alone. X5 stays
-open for pretraining, where only target counts: the tiny-dit session runs its
-6k model with `side="right"` on every group at `lr` 2e-3 (its baseline) and
-4e-3, branch `arm/xside` there; the result is pending.
+side". The twin is the release's tracker. The input side's writer step costs
+source in finetuning, at writer `lr` x1, 0.6 and 0.35 and for `o_proj` alone;
+every matrix takes it by default anyway (user; ARCHIVE, "every matrix on the
+input side"), which closes X5.
 
-Open in X: X1-X5 as in the topic doc. Parked:
+Open in X: X1-X4 as in the topic doc. Parked:
 1. The bubbleforce note in the nanodit repo (negative cosine, `lr` and `beta`
    under moment plus polar), unread; it bears on the maximum step, not on
    tracking.
@@ -37,32 +37,32 @@ PLAN holds N (norm), S (subspace gradients: S1 accumulation, S2 weight
 gradients from both streams), M1 (where magnitude is dropped), T (side), and a
 one-line index of the parked ones. Closed: L1, `lr` does not transfer across
 sizes, the release defaults to `4e-5`, LFM3's; S3 and S4, frames track from
-the streams, the input side from `X` weighted by `delta`'s token norms; the
-residual writers keep their output side for finetuning (X5 is open for
-pretraining); a live aim does not make rank 0.1 pay.
+the streams, the input side from `X` weighted by `delta`'s token norms; every
+matrix on the input side by default, over a measured source cost in finetuning
+(ARCHIVE, "every matrix on the input side"); a live aim does not make rank 0.1 pay.
 
 **Molegrad is in the package and on `lab`** (fast-forwarded from
-`projected-grads` 2026-10-31; old `lab` was `068d85c`): `Molegrad(model, optimizer)`, opt-in beside the `G` path
-(user's choice A, 2026-10-31), SPEC "Molegrad", README. No `dW`, the diagonal
+`projected-grads` 2026-10-31; old `lab` was `068d85c`): `Molegrad(model, optimizer)` beside the `G` path, the
+harness default and README's recommended path since 2026-11-15, SPEC "Molegrad". No `dW`, the diagonal
 aim, no step ever holds `G`, accumulation works; ties `G` through 1k steps on
 LFM3 at 3.66 against 4.09 s/step, and both beat a memory-matched LoRA (R2
 closed, README's Result). Resume is tested; a review subagent's five
 silent bugs are fixed, each with a test. M1 closed: the magnitude goes at `Z`.
 The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
 
-- **Package:** `frame.py` (fit, Oja aim, constant-angle turn, retraction),
+- **Package:** `frame.py` (fit, aim, the twin's `follow`, retraction),
   `polar.py` (balanced Newton-Schulz), `optimizer.py`, `molegrad.py`,
-  `diagnostics.py`, `stochastic.py`. Left is right on the transpose; state per matrix is `frame`
-  and `moment`. **Old checkpoints do not load** (a `left` moment is now
-  `[n,r]`). Polar and turn run per matrix; only the `[r,r]` tangent-Gram `eigh`
-  is stacked, by rank (FACTS: 0.887 s/step at 350M; LFM3's peak is backward).
+  `diagnostics.py`, `stochastic.py`. Left is right on the transpose; state per matrix is `frame`,
+  `moment`, `frame_moment` and `frame_moment_span` (fp32). **Old checkpoints do not load** (a `left` moment is now
+  `[n,r]`); one without the frame moment starts it at zero. Polar and `follow` run per matrix, with no `eigh`
+  and no host read after the first frame's fit.
 - **Surface:** `lr`, `beta`, `weight_decay`, `rank_fraction`, `side`,
   `release_matrix_grads`, `diagnostics`; per group also `step_rule`,
   `frame_init` and `norm_bounds`; `Molegrad` wraps a model and the
   optimizer. Accumulation works without release, raises with it, works under
   molegrad. The lr schedule is the trainer's.
-- **Telemetry:** on/off, six self-describing reads (`READS`). Transport,
-  concentration, persistence and role breakouts are `LabDiagnostics`, installed
+- **Telemetry:** on/off, self-describing reads (`READS`). Transport,
+  persistence and role breakouts are `LabDiagnostics`, installed
   by the harness; `transport_spin` is gone.
 - **Harness:** LFM3-1.7B pinned at `545fc8f` is the default model, at the
   standard arm (constant `4e-5` after a 50-step warmup, rank 0.05, 500
