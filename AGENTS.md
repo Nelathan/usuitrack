@@ -27,7 +27,7 @@ capability-sensitive. Bring full effort; do not hedge or hold back.
   Authoritative for algorithm semantics. **Carries no history**: when a rule
   changes, SPEC states the new rule and its guarantee, nothing about what it
   replaced.
-- `docs/PLAN.md` — the open-questions ledger, grouped: what we are unsure about,
+- @docs/PLAN.md — the open-questions ledger, grouped: what we are unsure about,
   how each would be settled, and what evidence has moved each answer. Questions
   only; numbers live in FACTS. Read before proposing or running an experiment or
   changing a default. **Keep it under ~300 lines**: a question that closes leaves
