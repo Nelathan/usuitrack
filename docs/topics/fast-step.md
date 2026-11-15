@@ -17,17 +17,17 @@ diagnostics accumulation costs at least another 20-22 ms. Bench: `outputs/tools/
 
 ## Decisions (user, 2026-11-15)
 
-- **Defaults.** The twin tracker, xside, Molegrad on, and the diagonal aim `K`.
-  - Twin: Newton-Schulz with one retraction, every step, `beta_f` 0.95, `rho` 1 (FACTS, "In replay under aim `K`,
+- **Defaults.** The twin tracker, xside, Molegrad on, and the diagonal aim.
+  - Twin: Newton-Schulz with one retraction, every step, `beta_f` 0.95, `rho` 1 (FACTS, "In replay under the diagonal aim,
     the twin's polar from Newton-Schulz reads as `eigh`'s").
   - xside: every matrix on the input side. It was not worse on nanodit and won at 2e-3 over 6k steps, but the user
     calls that a wash. This reverses the finetuning closure in ARCHIVE (writers keep their output side) by the
     user's choice. Write the reversal where that closure lives.
   - Molegrad on: "it really works great". The cost is that some `G` statistics are missing and the probe is wonky.
-  - `K` "would work for both `G` and Mole" (user). What `K` means on the plain-`G` path is still to be worked out
+  - The diagonal aim "would work for both `G` and Mole" (user). What it means on the plain-`G` path is still to be worked out
     from the code before building.
 - **Does the twin need `G`?** No. It takes the same action today's turn takes, `frame.aim(action, basis)` from
-  Molegrad's leaves. The `K` replays were exactly that.
+  Molegrad's leaves. The diagonal-aim replays were exactly that.
 - **Rules relaxed.** Triton is allowed. The rule against parallel compiled and eager implementations was KISS
   scaffolding from months of the design changing; a piece that is fixed may become a kernel. A CUDA graph is
   preferred over torch.compile: no long compiles, and it must ship.
@@ -40,7 +40,7 @@ diagnostics accumulation costs at least another 20-22 ms. Bench: `outputs/tools/
 Each chapter is one or more reviewed commits, then a compaction.
 
 1. **Defaults.** Twin as the tracker, with Newton-Schulz and retraction; the geodesic turn, `tangent_spectra` and
-   the liveness mask leave. xside, Molegrad on, `K`. SPEC, README, tests, the harness defaults and the standard arm
+   the liveness mask leave. xside, Molegrad on, the diagonal aim. SPEC, README, tests, the harness defaults and the standard arm
    follow. Then verify: an LFM3 500-step arm against the standard arm (loss veto), and the nanodit bench for speed.
    The release's first-frame `frame.fit` still uses `eigh` once; a random `frame_init` avoids it.
 2. **The three issues the timing showed.**

@@ -176,11 +176,11 @@ averages through small turns. The twin gives the frame the moment's order:
 
 The polar factor comes from Newton-Schulz with one retraction after, which
 reads as the Gram `eigh` does and leaves the frame within 1.5e-4 of
-orthonormal (FACTS, "Under the diagonal aim the twin needs no `eigh`"; measured
-under aim `K` on the input side). Newton-Schulz alone leaves it up to 0.06 off
+orthonormal (FACTS, "In replay under the diagonal aim, the twin's polar from
+Newton-Schulz reads as `eigh`'s"; input side). Newton-Schulz alone leaves it up to 0.06 off
 there (worst over the run, `k` 1). The earlier "Newton-Schulz leaves weak planes
 up to 0.26 off orthonormal" (`f230e85`, setup not recorded) does not reproduce
-for this shifted twin under `K` on the input side. `rho Q + Y` has its singular
+for this shifted twin under the diagonal aim on the input side. `rho Q + Y` has its singular
 values at or above `rho`, so it has no weak planes; the 0.26 may have come from
 the unshifted `polar(Y)` or from aim `G` (unmeasured). It has no horizontal projection, no liveness floor, no
 geodesic and no `eta`, and it takes the same action today's turn takes, so it

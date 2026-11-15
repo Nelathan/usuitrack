@@ -1619,17 +1619,17 @@ makes it worse while it helps `low` (`low/32` on `o12`: `cap` -10 at 0.02, -5
 at 0.0357). At equal travel the sketch loses `sig` ~1.7x faster than `cap`. One
 step's tangent cut to 32 planes is within 7e-3 at equal travel, and loses more
 at each halving. The raw tangent's `sig` is best at 0.01 on `w1` (-24). Under
-Molegrad's diagonal aim (`K`, `o12` and `q12`, `replay-diagK.log`) the signs
+Molegrad's diagonal aim (`o12` and `q12`, `replay-diagK.log`) the signs
 are the same and the margins 1-3e-3 smaller: raw at 0.03 `cap` -4 and -9,
 `low/32` at 0.02 `cap` -7 and -11. The replay's SVD of `old^T new` failed on
-`w1` under `K` and on `o20` under the raised-angle sketches. Not beaten here:
+`w1` under the diagonal aim and on `o20` under the raised-angle sketches. Not beaten here:
 the untruncated twin (`shift/0.95/1`, "A warm frame matches") holds `cap` +2 to
 +9 over today's turn on `o12`, `w2`, `o2` and `o20` in 201-300, at `sig` -1 to -5.
 
-### In replay under aim `K`, the twin's polar from Newton-Schulz reads as `eigh`'s; retracting every step is closest to today's turn
+### In replay under the diagonal aim, the twin's polar from Newton-Schulz reads as `eigh`'s; retracting every step is closest to today's turn
 
-2026-11-15, three matrices, one stream, off-policy, no loss run: the replay of "A warm frame matches an exact Gram EMA's", aim `K`,
-input side, fitted start, on the three matrices whose input-side `K` the stream
+2026-11-15, three matrices, one stream, off-policy, no loss run: the replay of "A warm frame matches an exact Gram EMA's", the diagonal aim,
+input side, fitted start, on the three matrices whose input-side diagonal aim the stream
 records (`o12`, `q12`, `w1`; `outputs/runs/replay-shiftK.log`,
 `replay-shiftK-readers.log`, `replay-shiftKns.log`). The twin (`beta_f` 0.95,
 `rho` 1) with `Y` taking every batch and the frame retracted every `k` steps,
@@ -1648,7 +1648,7 @@ against 0.884 / 0.807 / 0.724) and ties on the target's (-4e-3 to +4e-3); every
 10 loses 25e-3 of the target's on `q12`. The twin every step ties today's turn
 late and is the nearest to it in 31-100; spacing its retraction out costs
 arrival. Summing the tangent for a turn every 10 arrives better than the twin
-every 10 and holds less `sig` from step 201. `w1` runs under `K` here, unlike
+every 10 and holds less `sig` from step 201. `w1` runs under the diagonal aim here, unlike
 the sketch replays above.
 
 The twin's polar factor from the release's Newton-Schulz, then one

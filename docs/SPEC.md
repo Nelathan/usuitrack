@@ -175,7 +175,8 @@ Q_+=\operatorname{polar}(Q+Y_t).$$
 
 **The held frame is the anchor.** For an aim taken at the held frame,
 `Q^T a = Q^T A / mu` is symmetric positive semidefinite (`Z^T Z` on the `G`
-path, `Q^T K Q` for Molegrad's diagonal aim `K`). `Y` averages aims taken at
+path, `(XQ)^T D (XQ)` for Molegrad's diagonal aim, `D` the diagonal of
+`||delta_t||^2`). `Y` averages aims taken at
 the frames of the last `~1/(1 - beta_f)` updates and is not transported, so its
 in-span part is that only approximately, as close as the frame stayed over the
 window. Where it holds, `T = Q + Y` has its singular values at or above one, and
@@ -190,10 +191,10 @@ that holds much of the gradient moves little.
 
 **`beta_f` sets the trade between lag and noise.** The frame is in effect the
 polar factor of the aims of the last `~1/(1 - beta_f)` updates. In replay on
-LFM3's recorded gradients, input side under `K`, it captures as much of the
+LFM3's recorded gradients, input side under the diagonal aim, it captures as much of the
 next batch as a constant 0.02 rad geodesic turn does, within `6e-3`, while
 moving `0.007-0.010` per step against that turn's `0.020` (`FACTS.md` on `lab`,
-"In replay under aim `K`, the twin's polar from Newton-Schulz reads as
+"In replay under the diagonal aim, the twin's polar from Newton-Schulz reads as
 `eigh`'s").
 
 **The polar factor is Newton-Schulz, then one retraction.** Step 7's
