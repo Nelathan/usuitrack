@@ -28,8 +28,6 @@ import usuitrack.optimizer as usuitrack_optimizer
 if not __package__:
     # Run by path, which puts experiments/ on sys.path rather than the repo root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from experiments.activation_frames import MODES as ACTIVATION_FRAME_MODES, ActivationFrames
-from experiments.stream_frames import StreamFrames, lfm_sites
 from experiments.lab_diagnostics import LabDiagnostics
 
 
@@ -814,7 +812,6 @@ def train_step(
     backward_memory_trace: BackwardMemoryTrace | None = None,
     global_clip_params: Sequence[torch.nn.Parameter] = (),
     global_clip_norm: float | None = None,
-    activation_frames: ActivationFrames | StreamFrames | None = None,
     molegrad: Molegrad | None = None,
 ) -> dict[str, float | torch.Tensor | None]:
     optimizer.zero_grad(set_to_none=True)
@@ -829,8 +826,6 @@ def train_step(
     supervised = (batch["labels"][:, 1:] != -100).sum()
     micro_batches = [dict(zip(batch, rows)) for rows in zip(*(value.chunk(grad_accum_steps) for value in batch.values()))]
     for offset, micro_batch in enumerate(micro_batches):
-        if activation_frames is not None:
-            activation_frames.set_batch(micro_batch["labels"])
         loss = cce_causal_lm_loss(model, micro_batch, reduction="sum") / supervised
         if sensors is not None and offset == grad_accum_steps - 1:
             sensors.mark("forward")
@@ -992,7 +987,6 @@ def run_optimizer(
     retention_batches = make_batches(tokenizer, retention_texts, device, args.batch_size, args.seq_len, args.retention_val_blocks, args.batching, "source") if retention_texts else None
 
     fallback_optimizer = None
-    activation_frames = None
     molegrad = None
     if optimizer_name == "usuitrack":
         optimizer = UsuiTrack(
@@ -1008,10 +1002,6 @@ def run_optimizer(
             role_reads=tuple(args.role_reads),
             snapshot_interval=args.basis_lag_interval if args.basis_lag_diagnostic else 0,
         )
-        if args.activation_frames != "off":
-            activation_frames = ActivationFrames(model, optimizer, args.activation_frames)
-        if args.stream_frames:
-            activation_frames = StreamFrames(model, optimizer, lfm_sites(model))
         if args.molegrad:
             molegrad = Molegrad(model, optimizer)
             # Fit, tracked and eval variants per compiled layer type exceed dynamo's default 8.
@@ -1090,7 +1080,6 @@ def run_optimizer(
             fallback_params,
             global_clip_params=[param for _name, param in adapter_named],
             global_clip_norm=args.lora_grad_clip_norm if optimizer_name == "lora" else None,
-            activation_frames=activation_frames,
             molegrad=molegrad,
         )
     if optimizer_name == "lora":
@@ -1124,7 +1113,6 @@ def run_optimizer(
             backward_memory_trace if global_step == args.max_steps else None,
             [param for _name, param in adapter_named],
             args.lora_grad_clip_norm if optimizer_name == "lora" else None,
-            activation_frames,
             molegrad,
         )
         measured_steps.append(step_result)
@@ -1336,8 +1324,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-decay", choices=("linear", "cosine"), default="cosine", help="shape of the decay from the peak to --lr-final-ratio")
     parser.add_argument("--beta", type=float, default=0.95)
     parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from lab_diagnostics.ROLE_READS")
-    parser.add_argument("--activation-frames", choices=ACTIVATION_FRAME_MODES, default="off", help="PLAN S3, input-side matrices only: 'shadow' tracks a second frame from the layer inputs X and reads both frames against G and X without touching training; 'aim' turns the optimizer's frame by the tangent from X instead of G. See experiments/activation_frames.py")
-    parser.add_argument("--stream-frames", action="store_true", help="PLAN S4: shadow frames tracked from X, delta, and both, read against G without touching training. See experiments/stream_frames.py")
     parser.add_argument("--geodesic-stepsize", type=float, default=0.0, help="override eta, the angle one geodesic turns each live plane by; 0 keeps the released constant. Set on the module rather than as an optimizer argument deliberately -- this is a harness knob for experiments, not a product surface")
     parser.add_argument("--seed", type=int, default=0, help="seed torch's RNG. Stochastic rounding draws from it on every bf16 parameter write, so without this a run is not reproducible; measured run-to-run spread without a seed was 3e-4 on target loss and 2e-3 on source")
     parser.add_argument("--basis-lag-diagnostic", action="store_true", help="add the lab snapshot reads: transport_lag and transport_curve, the reads that need a frame snapshot. The only reads that can show the frame has converged rather than orbiting; costs one [d,r] snapshot per sampled matrix")
@@ -1393,17 +1379,6 @@ def main() -> None:
     torch.cuda.manual_seed_all(args.seed)
     validate_gradient_release_contract(args)
 
-    if args.activation_frames != "off" and args.grad_accum_steps != 1:
-        raise ValueError("--activation-frames pairs one batch's X with its G and requires --grad-accum-steps 1")
-    if args.stream_frames:
-        if args.activation_frames != "off":
-            raise ValueError("--stream-frames and --activation-frames both wrap the optimizer's _prepare; pick one")
-        if args.grad_accum_steps != 1:
-            raise ValueError("--stream-frames pairs one batch's streams with its G and requires --grad-accum-steps 1")
-        if not args.activation_checkpointing:
-            raise ValueError("--stream-frames takes X on the checkpoint recompute and requires --activation-checkpointing")
-    if args.molegrad and (args.activation_frames != "off" or args.stream_frames):
-        raise ValueError("--molegrad leaves no G for the S3/S4 instruments to read")
     if args.warmup_steps < 0:
         raise ValueError("warmup_steps must be non-negative")
     if args.max_steps <= 0:
@@ -1508,7 +1483,7 @@ def main() -> None:
     print(
         f"seq_len={args.seq_len} batch_size={args.batch_size} grad_accum_steps={args.grad_accum_steps} "
         f"warmup_steps={args.warmup_steps} max_steps={args.max_steps} param_scope={args.param_scope} "
-        f"rank_fraction={args.rank_fraction} activation_frames={args.activation_frames} stream_frames={args.stream_frames} molegrad={args.molegrad} "
+        f"rank_fraction={args.rank_fraction} molegrad={args.molegrad} "
         f"lora_rank={args.lora_rank} lora_alpha={args.lora_alpha} lora_lr={args.lora_lr} lora_grad_clip_norm={args.lora_grad_clip_norm} "
         f"lr_warmup_steps={args.lr_warmup_steps} lr_final_ratio={args.lr_final_ratio} lr_decay={args.lr_decay} "
         f"orthogonalization=aurora "

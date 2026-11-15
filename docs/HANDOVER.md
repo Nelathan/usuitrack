@@ -26,7 +26,7 @@ Open in X: X1-X5 as in the topic doc. Parked:
    tracking.
 2. `outputs/stream/` (48 GB) stays until the user agrees no more replays are
    needed. Unexplained: `record_stream.py`'s hooks do not fire under compiled
-   decoder layers though `stream_frames` hooks do; it records with
+   decoder layers though the retired S4 instrument's hooks did; it records with
    `--no-torch-compile`.
 
 ## Where it stands
@@ -68,9 +68,8 @@ The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
   standard arm (constant `4e-5` after a 50-step warmup, rank 0.05, 500
   steps, eval every 100); a shorter run is a prefix of a longer one, 1k only
   for the late plateau. The LFM2.5 lane's
-  arm is in AGENTS. Lag reads only for tracker diagnostics.
-  `--activation-frames {off,shadow,aim}` is the S3 instrument,
-  `--stream-frames` the S4 one.
+  arm is in AGENTS. Lag reads only for tracker diagnostics. The S3 and S4
+  shadow-frame instruments are retired (ARCHIVE has their closure).
 - **Fixed:** fp16 targets were stochastically rounded on bf16's grid; a stale
   group index after `load_state_dict`; hooks missing on later param groups;
   `pop()` making two transfers; a NaN gradient turning `grad_capture` NaN; lab

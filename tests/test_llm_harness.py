@@ -180,8 +180,6 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual(args.retention_val_blocks, 8)
         self.assertEqual(args.wandb_log_every, 25)
         self.assertEqual(args.eval_every, 100)
-        self.assertEqual(args.activation_frames, "off")
-        self.assertFalse(args.stream_frames)
         self.assertFalse(args.molegrad)
         self.assertEqual(args.attn_implementation, "sdpa")
         self.assertTrue(args.activation_checkpointing)
