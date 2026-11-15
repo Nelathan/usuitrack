@@ -1565,11 +1565,17 @@ called for it. `o_proj` alone at full `lr`, the writer the fixed-weights ratio o
 `gain^2` to `bite` favoured most on the input side (19.2 against 6.3; conv 10.2
 against 7.6 also, `w2` 11.0 against 15.8 not), ties target within the floor from
 step 200 and forgets 2.2e-3 more source, about twice the floor. So the cost is
-the direction, not the size, as far as an `lr` scalar can match a step; the
-writers keep their output side. Capture reads
+the direction, not the size, as far as an `lr` scalar can match a step; for
+finetuning the writers keep their output side. On target alone, the measure
+for pretraining, the input side everywhere at full `lr` is ahead at every eval,
+by 8.5e-3 at step 100 closing to 0.9e-3 at 500, one seed: faster arrival, not
+yet a standing lead.
+Capture reads
 0.770-0.772 on the all-input arms and 0.725 on `o_proj` alone against 0.704: more
 of `G` held, worse for the model. The line is linear through two points, one
-seed; sources at 500 only. Runners `outputs/tools/xside_lr.py`
+seed; sources at 500 only. The standard row is from 2026-10-30's tree; a
+same-tree rerun (`std-lr4e5-rerun-s1`) lands within 2.1e-4 at every eval and
+6e-5 on source. Runners `outputs/tools/xside_lr.py`
 (`WRITER_LR_SCALE`), `outputs/tools/xside_role.py` (`ROLE`).
 
 ## Run ledger (Anima)

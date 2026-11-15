@@ -7,12 +7,14 @@ Written 2026-10-28, updated 2026-11-15. Orientation only; `PLAN.md` carries the 
 
 State: `docs/topics/subspace-evolution.md` (Status, Candidates) and FACTS, "A
 warm frame matches an exact Gram EMA's" and "Residual writers on the input
-side". The twin is a written-down candidate, not adopted. X5 closed overnight
-against the user's conditional lean: the input side's writer step costs source
-by its direction, at writer `lr` x1, 0.6 and 0.35 and for `o_proj` alone, so the
-writers keep their output side and nothing went to the nanodit session.
+side". The twin is a written-down candidate, not adopted. For finetuning the
+writers keep their output side: the input side's writer step costs source by
+its direction, at writer `lr` x1, 0.6 and 0.35 and for `o_proj` alone. X5 stays
+open for pretraining, where only target counts: the tiny-dit session runs its
+6k model with `side="right"` on every group at `lr` 2e-3 (its baseline) and
+4e-3, branch `arm/xside` there; the result is pending.
 
-Open in X: X1-X4 as in the topic doc; no arm is planned. Parked:
+Open in X: X1-X5 as in the topic doc. Parked:
 1. The bubbleforce note in the nanodit repo (negative cosine, `lr` and `beta`
    under moment plus polar), unread; it bears on the maximum step, not on
    tracking.
@@ -30,7 +32,8 @@ gradients from both streams), M1 (where magnitude is dropped), T (side), and a
 one-line index of the parked ones. Closed: L1, `lr` does not transfer across
 sizes, the release defaults to `4e-5`, LFM3's; S3 and S4, frames track from
 the streams, the input side from `X` weighted by `delta`'s token norms; the
-residual writers keep their output side; a live aim does not make rank 0.1 pay.
+residual writers keep their output side for finetuning (X5 is open for
+pretraining); a live aim does not make rank 0.1 pay.
 
 **Molegrad is in the package and on `lab`** (fast-forwarded from
 `projected-grads` 2026-10-31; old `lab` was `068d85c`): `Molegrad(model, optimizer)`, opt-in beside the `G` path

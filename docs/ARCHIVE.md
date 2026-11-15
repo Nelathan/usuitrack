@@ -1154,9 +1154,12 @@ of the planes against 0.845 and ends a third of a step from the `eigh` turn:
 a different liveness rule for at most 0.5% of the step. Accepted by the user:
 `eigh` stays, padded.
 
-## CLOSED -- the input side's writer step costs source by its direction
+## CLOSED for finetuning -- the input side's writer step costs source by its direction
 
-PLAN X5, 2026-11-15 (FACTS, "Residual writers on the input side"). A second
+PLAN X5, 2026-11-15 (FACTS, "Residual writers on the input side"). Closed on
+the finetune trade only: in pretraining there is no source to forget, and on
+target alone the input side everywhere at full `lr` is ahead at every eval; X5
+stays open there (PLAN). A second
 read of "the residual writers keep their output side, under either aim"
 (2026-10-30), now at a matched step. The input side holds more of a writer's
 gradient (capture 0.770 against 0.704) and cuts the dimension consistently, but

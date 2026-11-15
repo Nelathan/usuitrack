@@ -10,10 +10,10 @@ Measured on LFM3 (FACTS, "A warm frame matches an exact Gram EMA's" and
 turn holds what an exact Gram EMA's frame holds, so a causal tracker has little
 left to gain on a warm frame; on the output side what persists is as wide as
 the frame or wider.
-One candidate tracker is written down below, not adopted. X5 closed: the
-residual writers keep their output side; the input side's step costs source by
+One candidate tracker is written down below, not adopted. For finetuning the
+residual writers keep their output side: the input side's step costs source by
 its direction, at every writer `lr` tried (ARCHIVE, "the input side's writer
-step costs source by its direction").
+step costs source by its direction"). Open: X5 for pretraining.
 
 ## The goal
 
@@ -137,6 +137,21 @@ UsuiTrack already takes it. *Hypothesis:* a buried key's pull, consistent over
 tokens, forms a direction of the aggregate and gets a full-length step, if it
 clears the noise and the frame admits it. Whether attention then spreads, or
 locks in later, is unmeasured. It needs pretraining, so the lane is tiny-dit.
+
+### X5. Does pretraining want every matrix on the input side?
+
+Raised 2026-11-15 (user). On LFM3's finetune the input side everywhere at full
+`lr` leads target at every eval, 8.5e-3 at step 100 shrinking to 0.9e-3 at 500,
+and pays 9e-3 of source (FACTS, "Residual writers on the input side"). The
+finetune closure rests on that source cost; pretraining has none, and arrival
+speed is what nanodit needs (user). The lead closes over the run, so it reads
+as faster arrival; a 1.7B finetune at 500 steps motivates the question and does
+not predict a small model's 6k pretrain. How to settle: nanodit's 6k run with
+`side="right"` on every group against its baseline, `lr` 2e-3 (the user's
+baseline, 2026-11-15; the tiny-dit session measured it 0.011 ahead of 4e-3 at
+6k), with a 4e-3 pair beside it (tiny-dit, branch `arm/xside`).
+Not run: an `lr` scaled by measured `bite` per module, which needs `bite` on
+every matrix, not the three recorded writers.
 
 ## Candidates
 
