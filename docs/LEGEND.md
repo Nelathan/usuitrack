@@ -166,11 +166,12 @@ turns by its own angle. The cutoff planes dance; the stable planes pull. The lin
 emerges from their argument.
 
 That controller remains historical evidence, not a current test car. The road car
-conditions every full contact patch, forms an Oja covariance tangent in the held
-frame, and moves the same live frame by harmonic basis-update steps `1, 1/2,
-1/3, ...` through every tracked plane before a Polar Express correction. No second
-frame rides along. The quarter-turn boundary controls belong to the old test car,
-not this one.
+reads every contact patch as an aim, the covariance action at the held frame over
+the energy the frame already holds, and keeps a moment of those aims. The frame
+sits at the polar factor of itself plus that moment. Inside the span the moment
+only says hold; its horizontal part is the road bending, and the frame follows as
+far as the bend persists. No eigensolver, no second frame. The quarter-turn
+boundary controls belong to the old test car, not this one.
 
 ---
 
@@ -271,8 +272,8 @@ No component is heroic alone. The build works because the parts agree:
 raw clip              protects every later memory
 factored variance     reads traction cheaply
 random range finder   finds the first line
-one-state Oja         reads and turns on every contact patch
-identity transport    keeps speed through the slide
+moment of aims        reads every contact patch, follows the bend
+rotation transport    keeps speed through the slide
 projected EMA         holds the line
 Aurora + NS           distributes force across it
 Muon scale            matches force to the full chassis

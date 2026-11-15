@@ -1659,6 +1659,47 @@ retraction brings it to 1.5e-4 (`o12`, `q12`, `w1` at `k` 1:
 `outputs/tools/replay_ortho.py`, `outputs/runs/replay-ortho-ns.log`). No timing
 was measured.
 
+### The frame moment's in-span part needs fp32
+
+2026-11-15, LFM3, native sides, aim `G`, the twin in the release (Newton-Schulz,
+one retraction, `beta_f` 0.95). With the whole frame moment `Y` stored in bf16
+by stochastic rounding, the standard arm's train loss read 1.8351 / 1.6832 at
+steps 25 / 50, against 1.8016 / 1.6209 for the runner's twin with fp32 `Y`
+(`outputs/runs/twin-ns-bf16y-s1-killed.log`, killed at 50). The rounding is
+unbiased (mean error -9e-6 ulp), but a bf16 EMA built with it sits about 0.7%
+rms off its fp32 value, and nearly all of `Y` lies in the frame's span: the
+noise on the large in-span part swamps the small horizontal part that moves the
+frame. On recorded gradients (`outputs/tools/twin_release_vs_runner.py`), the
+bf16 release's frame drifts 4.6e-2 per plane from the runner's by step 40 and
+keeps growing; with fp32 `Y` it holds at the bf16 floor. The replay, which
+keeps everything fp32, did not see it: `Y` rounded to bf16 there reads the same
+`cap`, `sig` and travel as fp32 on `o12`, `w2`, `q12`
+(`outputs/runs/replay-storage-G.log`). Storage matters only under stochastic
+rounding in the loop.
+
+Stored split, `Y = Q S + H` against the new frame, with `S = QᵀY` `[r,r]` in
+fp32 and `H` `[d,r]` in the param dtype, the release tracks the runner at the
+floor: frame span difference 2.4-3.8e-3, frame 1-2e-3 and moment 1-5e-4 max-abs,
+`|QᵀQ - I|` 5e-4 to 1.2e-3 through step 60 on all three matrices
+(`outputs/runs/twin-split-vs-runner.log`). With fp32 `Y` the 500-step arm ends
+at 1.341354 / 2.687026, against the runner's 1.341237 / 2.687229
+(`outputs/runs/twin-ns-s1.log`, `twin-b95-r1-s1.log`), within the noise floor.
+The split arm, stopped at step 250, reads target 1.429670 / 1.376295 at evals
+100 / 200, against fp32 `Y`'s 1.429619 / 1.376283
+(`outputs/runs/twin-split-s1-stopped250.log`).
+
+Its run read 4.13 s/step, fp32 `Y` 4.10, against 3.87 for the runner, which
+did the old turn and the twin both, and 3.91 for the standard arm
+(`std-lr4e5-rerun-s1.log`). That disagrees in sign with the bench below. The
+runs are not paired in time, and the cause is not measured.
+
+Cost on LFM3's 153 matrices, bs16 gradients, `step()` alone
+(`outputs/tools/lfm3_step_bench.py`, `outputs/lfm3_step_bench.log`): today's
+turn 570 ms median with 334 MiB of matrix state; the twin with the split 551 ms
+and 431 MiB (+29%). The Gram-side polar (Newton-Schulz on `[r,r]`, fewer FLOPs,
+more launches) took 597 ms: on a launch-bound host the `[d,r]` iteration is
+faster. Whole-`Y` fp32 would hold 501 MiB.
+
 ### On a small deep model the step costs 38% of training; alone, the GPU idles 60% of it
 
 2026-11-15, not an LFM lane: tiny-dit's nanodit d768x12 conv4 (77 tracked

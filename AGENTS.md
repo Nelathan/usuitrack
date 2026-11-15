@@ -74,8 +74,8 @@ contradicts a rule, the rule moves. A doc this project wrote is not authoritativ
 because it wrote it — reality wins, and the doc is the bug.
 
 **Synthetic gradients are inadmissible for design decisions.** They have a clean
-spectral cliff and no step-to-step correlation (`tangent_concentration` ~0.03
-against 0.68–0.82 on real gradients). Use them only to check that an
+spectral cliff and no step-to-step correlation (the leading eigenvalue's share
+of the Oja tangent's Gram ~0.03 against 0.68–0.82 on real gradients). Use them only to check that an
 implementation is wired correctly.
 
 **Loss is a veto, not the instrument.** For tracker work it is blunt — a 100×
@@ -199,7 +199,7 @@ arms before 2026-10-30 afternoon decayed by cosine to 0.2.
 peak) and 0.14 s/step at bs1. Its tables before the 2026-10-05 moment-first
 change ran at a constant lr (`--lr-final-ratio 1`).
 
-**Experiment knobs the release does not expose** — `GEODESIC_STEPSIZE` and the
+**Experiment knobs the release does not expose** — `TRACKER_BETA` and the
 other module constants — are patched by a runner, never by adding an optimizer
 argument. Import the harness module, then set the attribute before the
 optimizer is built:
@@ -207,7 +207,8 @@ optimizer is built:
 ```python
 import sys; sys.path.insert(0, "/home/djg/Projects/usuitrack")
 import experiments.llm_synth_smoke as smoke
-smoke.usuitrack_optimizer.GEODESIC_STEPSIZE = 0.05
+import usuitrack.optimizer
+usuitrack.optimizer.TRACKER_BETA = 0.9
 sys.argv = ["llm_synth_smoke.py", *sys.argv[1:]]
 smoke.main()
 ```

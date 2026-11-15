@@ -23,7 +23,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from usuitrack import Molegrad, StochasticAdamW, UsuiTrack
 from usuitrack import frame as usuitrack_frame
-import usuitrack.optimizer as usuitrack_optimizer
 
 if not __package__:
     # Run by path, which puts experiments/ on sys.path rather than the repo root.
@@ -1324,7 +1323,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-decay", choices=("linear", "cosine"), default="cosine", help="shape of the decay from the peak to --lr-final-ratio")
     parser.add_argument("--beta", type=float, default=0.95)
     parser.add_argument("--role-reads", nargs="*", default=[], help="UsuiTrack reads to also log per role class, from lab_diagnostics.ROLE_READS")
-    parser.add_argument("--geodesic-stepsize", type=float, default=0.0, help="override eta, the angle one geodesic turns each live plane by; 0 keeps the released constant. Set on the module rather than as an optimizer argument deliberately -- this is a harness knob for experiments, not a product surface")
     parser.add_argument("--seed", type=int, default=0, help="seed torch's RNG. Stochastic rounding draws from it on every bf16 parameter write, so without this a run is not reproducible; measured run-to-run spread without a seed was 3e-4 on target loss and 2e-3 on source")
     parser.add_argument("--basis-lag-diagnostic", action="store_true", help="add the lab snapshot reads: transport_lag and transport_curve, the reads that need a frame snapshot. The only reads that can show the frame has converged rather than orbiting; costs one [d,r] snapshot per sampled matrix")
     parser.add_argument("--basis-lag-interval", type=int, default=5, help="how many basis updates back the lag snapshot sits")
@@ -1341,7 +1339,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--release-matrix-grads",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="prepare each full matrix gradient in a post-accumulate backward hook and release it immediately while retaining batched Oja/Aurora application in optimizer.step() (default on; requires no accumulation)",
+        help="prepare each full matrix gradient in a post-accumulate backward hook and release it immediately while retaining the step's application in optimizer.step() (default on; requires no accumulation)",
     )
     parser.add_argument(
         "--molegrad",
@@ -1373,8 +1371,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if args.geodesic_stepsize > 0:
-        usuitrack_optimizer.GEODESIC_STEPSIZE = args.geodesic_stepsize
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     validate_gradient_release_contract(args)

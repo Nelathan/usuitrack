@@ -8,7 +8,6 @@ from torch import Tensor
 from usuitrack import UsuiTrack
 from usuitrack import frame
 from usuitrack.diagnostics import READS
-from usuitrack.optimizer import GEODESIC_STEPSIZE
 from usuitrack.polar import unit_polar
 
 
@@ -61,16 +60,17 @@ def test_frame_moves_every_step_after_the_one_that_fits_it():
     assert float(residual.norm() / math.sqrt(RANK)) > 1e-3
 
 
-def test_only_a_frame_and_a_moment_are_kept():
-    """UsuiTrack keeps a frame and a projected first moment. Nothing else."""
+def test_only_the_frame_its_moment_and_the_moment_are_kept():
+    """UsuiTrack keeps a frame, the frame's moment and a projected first moment. Nothing else."""
     torch.manual_seed(0)
     params, optimizer = _two_matrix_optimizer()
     _run(params, optimizer, 4)
 
     for param in params:
         state = optimizer.state[param]
-        assert set(state) == {"frame", "moment"}
-        assert tuple(state["frame"].shape) == (COLS, RANK)
+        assert set(state) == {"frame", "frame_moment", "frame_moment_span", "moment"}
+        assert tuple(state["frame"].shape) == tuple(state["frame_moment"].shape) == (COLS, RANK)
+        assert tuple(state["frame_moment_span"].shape) == (RANK, RANK)
         assert tuple(state["moment"].shape) == (ROWS, RANK)
 
 
@@ -151,12 +151,71 @@ def test_state_dict_resume_matches_uninterrupted_run():
     second_optimizer = UsuiTrack([second], lr=0.01, rank_fraction=RANK_FRACTION)
     second_optimizer.load_state_dict(copy.deepcopy(first_optimizer.state_dict()))
 
-    gradient = torch.randn_like(first)
-    first.grad = gradient.clone()
-    second.grad = gradient.clone()
-    first_optimizer.step()
-    second_optimizer.step()
+    # Two steps: the first's write reads only the held frame, so only the second sees the frame's moment.
+    for _ in range(2):
+        gradient = torch.randn_like(first)
+        first.grad = gradient.clone()
+        second.grad = gradient.clone()
+        first_optimizer.step()
+        second_optimizer.step()
     torch.testing.assert_close(first, second, rtol=0, atol=0)
+
+
+def _frame_moment(state: dict) -> Tensor:
+    """`Y`, as the optimizer holds it against its stored frame: `Q S + H`."""
+    return state["frame"].float() @ state["frame_moment_span"] + state["frame_moment"].float()
+
+
+def test_a_checkpoint_without_the_frame_moment_resumes_it_from_zero():
+    """README and SPEC promise it: the frame's moment starts at zero, as on the step after a fit."""
+    torch.manual_seed(1)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
+    _run([weight], optimizer, 3)
+    saved = copy.deepcopy(optimizer.state_dict())
+    for state in saved["state"].values():
+        del state["frame_moment"], state["frame_moment_span"]
+    resumed = torch.nn.Parameter(weight.detach().clone())
+    fresh = UsuiTrack([resumed], lr=0.01, rank_fraction=RANK_FRACTION)
+    fresh.load_state_dict(saved)
+    held = fresh.state[resumed]["frame"].clone()
+    resumed.grad = torch.randn_like(resumed)
+    _projected, aim = frame.project_and_aim(resumed.grad.clone(), held)
+    fresh.step()
+    torch.testing.assert_close(_frame_moment(fresh.state[resumed]), 0.05 * aim)
+
+
+def test_a_bf16_matrix_holds_its_frame_moments_span_in_fp32_through_a_load():
+    """Rounding `Y`'s large in-span part walks the frame (SPEC step 4), so it stays fp32,
+    also after a load, where torch casts state to the param's dtype."""
+    torch.manual_seed(1)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS, dtype=torch.bfloat16))
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
+    _run([weight], optimizer, 2)
+    assert optimizer.state[weight]["frame_moment_span"].dtype == torch.float32
+    resumed = torch.nn.Parameter(weight.detach().clone())
+    loaded = UsuiTrack([resumed], lr=0.01, rank_fraction=RANK_FRACTION)
+    loaded.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+    assert torch.equal(loaded.state[resumed]["frame_moment_span"], optimizer.state[weight]["frame_moment_span"])
+    assert loaded.state[resumed]["frame_moment"].dtype == loaded.state[resumed]["frame"].dtype == torch.bfloat16
+
+
+def test_the_frame_moment_averages_aims_at_the_held_frame():
+    """`Y = 0.95 Y + 0.05 a`, `a` aimed at the frame held when the gradient arrived,
+    and the frame moves to `polar(Q + Y)`."""
+    torch.manual_seed(1)
+    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
+    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
+    _run([weight], optimizer, 1)
+    expected = None
+    for _ in range(3):
+        held = optimizer.state[weight]["frame"].clone()
+        weight.grad = torch.randn_like(weight)
+        _projected, aim = frame.project_and_aim(weight.grad.clone(), held)
+        expected = 0.05 * aim if expected is None else 0.95 * expected + 0.05 * aim
+        optimizer.step()
+        torch.testing.assert_close(_frame_moment(optimizer.state[weight]), expected)
+        torch.testing.assert_close(optimizer.state[weight]["frame"], frame.follow(held, expected).frame)
 
 
 def test_a_loaded_group_is_the_one_the_step_reads():
@@ -228,7 +287,7 @@ def test_a_contested_direction_steps_as_far_as_an_agreed_one():
 def test_the_update_is_invariant_to_gradient_scale():
     """Why there is no gradient clip: nothing downstream sees the magnitude.
 
-    Each projected gradient enters the moment at unit norm, and the Oja tangent
+    Each projected gradient enters the moment at unit norm, and the frame's aim
     divides two quadratics in `G`. A 180x blip is included.
     """
 
@@ -292,9 +351,8 @@ def test_a_forced_side_is_the_transposed_problem(side):
 
 
 def test_matrices_stepped_together_match_each_stepped_alone():
-    """Same-rank tangent Grams share one `eigh` across shapes; a third rank does
-    not. Grouping is bookkeeping, not maths. Not bitwise: batched and solo
-    calls round differently at the ulp level."""
+    """One optimizer over several shapes and ranks steps each matrix as its own
+    optimizer would: nothing in a step couples matrices."""
 
     torch.manual_seed(5)
     shapes = [(64, 512), (64, 520), (96, 96)]
@@ -321,7 +379,7 @@ def test_matrices_stepped_together_match_each_stepped_alone():
         torch.testing.assert_close(together[shape], separate[shape], rtol=1e-5, atol=1e-6)
 
 
-def test_the_frame_turns_from_the_very_first_basis_update():
+def test_the_frame_moves_from_the_very_first_update_after_its_fit():
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
     optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
@@ -330,25 +388,6 @@ def test_the_frame_turns_from_the_very_first_basis_update():
     _run([weight], optimizer, 1)
     after = optimizer.state[weight]["frame"]
     assert float((after - first @ (first.mT @ after)).norm() / math.sqrt(RANK)) > 1e-3
-
-
-def test_every_live_plane_turns_by_exactly_eta():
-    """The turn is `eta`, not `eta` times a meter: each live plane of the polar
-    tangent has singular value one, so the chordal residual per plane is `sin(eta)`."""
-
-    torch.manual_seed(0)
-    weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
-    optimizer = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, diagnostics=True)
-    _run([weight], optimizer, 12)
-
-    before = optimizer.state[weight]["frame"].clone()
-    _run([weight], optimizer, 1)
-    after = optimizer.state[weight]["frame"]
-
-    # The equality only means "every plane turned by eta" if every plane was live.
-    assert optimizer.pop_diagnostics()["tangent_live_fraction"] == 1.0
-    moved = float((after - before @ (before.mT @ after)).norm() / math.sqrt(RANK))
-    assert moved == pytest.approx(math.sin(GEODESIC_STEPSIZE), rel=2e-3), moved
 
 
 def test_diagnostics_are_inert_until_enabled():
@@ -372,7 +411,6 @@ def test_every_read_is_published_sane_and_describes_itself():
     assert -1.0 <= diagnostics["grad_moment_cosine"] <= 1.0
     # Capture is the share of the gradient the frame holds, so it cannot exceed one.
     assert 0.0 < diagnostics["grad_capture"] <= 1.0 + 1e-6
-    assert diagnostics["tangent_live_fraction"] == 1.0
     assert diagnostics["nonfinite_grads"] == 0.0
 
 

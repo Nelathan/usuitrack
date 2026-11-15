@@ -99,7 +99,7 @@ def test_under_accumulation_the_first_micro_batch_fits_the_frame():
         torch.testing.assert_close(_span(basis), _span(frame.fit(grad_first, basis.shape[-1])))
         prepared = optimizer._pending[module.weight]
         torch.testing.assert_close(prepared.projected, (grad_first + grad_second) @ basis)
-        assert prepared.tangent is None
+        assert prepared.aim is None
 
 
 def test_projection_is_exact_and_the_action_comes_from_the_streams():
@@ -123,12 +123,12 @@ def test_projection_is_exact_and_the_action_comes_from_the_streams():
     delta = (hidden.grad * (1 - hidden.detach().square())).reshape(-1, HIDDEN)
     basis = optimizer.state[block.w1.weight]["frame"]
     expected = frame.aim(x.mT @ (delta.norm(dim=1, keepdim=True).square() * (x @ basis)), basis)
-    torch.testing.assert_close(optimizer._pending[block.w1.weight].tangent, expected)
+    torch.testing.assert_close(optimizer._pending[block.w1.weight].aim, expected)
     # Output side: delta^T delta Q, with delta the gradient at w2's output.
     delta = target.reshape(-1, IN)
     basis = optimizer.state[block.w2.weight]["frame"]
     expected = frame.aim(delta.mT @ (delta @ basis), basis)
-    torch.testing.assert_close(optimizer._pending[block.w2.weight].tangent, expected)
+    torch.testing.assert_close(optimizer._pending[block.w2.weight].aim, expected)
 
 
 def test_micro_batches_accumulate_to_the_whole_batch():
@@ -139,7 +139,7 @@ def test_micro_batches_accumulate_to_the_whole_batch():
     for param, prepared in split._pending.items():
         other = joined._pending[next(p for p in joined._pending if p.shape == param.shape)]
         torch.testing.assert_close(prepared.projected, other.projected)
-        torch.testing.assert_close(prepared.tangent, other.tangent)
+        torch.testing.assert_close(prepared.aim, other.aim)
         torch.testing.assert_close(prepared.raw_norm, other.raw_norm)
 
 
@@ -333,7 +333,7 @@ def test_under_accumulation_a_zero_micro_batch_after_the_fit_adds_nothing():
         torch.testing.assert_close(_span(basis), _span(frame.fit(grad, basis.shape[-1])))
         prepared = optimizer._pending[module.weight]
         torch.testing.assert_close(prepared.projected, grad @ basis)
-        assert prepared.tangent is None
+        assert prepared.aim is None
 
 
 def test_a_zero_initialized_output_trains_from_random_frames():
@@ -356,8 +356,8 @@ def test_a_zero_initialized_output_trains_from_random_frames():
     backward(model, 0)
     optimizer.step()
     assert torch.equal(first, first_before)
-    # A zero tangent turns no plane; only the retraction touches the frame.
-    torch.testing.assert_close(optimizer.state[first]["frame"], frame_before, atol=1e-6, rtol=0)
+    # A zero aim leaves the frame's moment at zero; only Newton-Schulz and the retraction touch the frame.
+    torch.testing.assert_close(optimizer.state[first]["frame"], frame_before, atol=1e-5, rtol=0)
     assert last.abs().max() > 0
 
     backward(model, 1)

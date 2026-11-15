@@ -1,4 +1,4 @@
-"""Lab reads on top of the release's: frame motion, spectrum shape, persistence,
+"""Lab reads on top of the release's: frame motion, persistence,
 and per-role breakouts. For debugging the tracker, not for reading a run cold.
 
 Install with `optimizer.diagnostics = LabDiagnostics(...)`. Frame-motion reads
@@ -22,9 +22,8 @@ LAB_READS = {
         "stream, w^2 = (1-beta)/(1+beta), is removed: 0 white, 1 a held direction. Lags, and a "
         "large lr drains it."
     ),
-    "tangent_concentration": "Leading eigenvalue's share of the tangent Gram, in [1/r, 1]: a confident aim against a noise tail.",
-    "transport_speed": "Chordal distance per plane a sampled frame moved in one update; fixed by eta under the constant turn.",
-    "transport_correction": "||skew(R_s)|| / sqrt(r): the in-span rotation the moment is turned by this step; zero for exact storage.",
+    "transport_speed": "Chordal distance per plane a sampled frame moved in one update.",
+    "transport_correction": "||skew(R_s)|| / sqrt(r): the in-span rotation the moment is turned by this step.",
     "transport_lag": "Net distance per plane a sampled frame covered over the snapshot window.",
     "transport_curve": "1 - lag / path over the window: 0 straight drift, toward 1 churn in place.",
 }
@@ -82,20 +81,18 @@ class LabDiagnostics(Diagnostics):
             self.add("moment_persistence", (after.norm().square() - floor) / (1.0 - floor))
         self._param = None
 
-    def frame_turn(self, params: list[Tensor], before: list[Tensor], turned: list) -> None:
-        super().frame_turn(params, before, turned)
-        for item in turned:
-            spectrum = item.eigenvalues.clamp_min(0.0)
-            self.add("tangent_concentration", spectrum.max() / spectrum.sum().clamp_min(1e-12))
+    def frame_move(self, params: list[Tensor], before: list[Tensor], moved: list) -> None:
+        super().frame_move(params, before, moved)
+        for item in moved:
             rotation = item.rotation
             root = math.sqrt(rotation.shape[-1])
             self.add("transport_correction", (rotation - rotation.mT).norm() / (2.0 * root))
 
-        # The first `sample` matrices to turn, across every group.
+        # The first `sample` matrices to move, across every group.
         for param in params:
             if len(self._sampled) < self.sample_size:
                 self._sampled.add(param)
-        for param, old, item in zip(params, before, turned, strict=True):
+        for param, old, item in zip(params, before, moved, strict=True):
             if param not in self._sampled:
                 continue
             start, end = old.float(), item.frame.float()

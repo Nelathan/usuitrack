@@ -163,8 +163,8 @@ class Molegrad:
             raw_norm = torch.where(torch.isfinite(z_norm) & torch.isfinite(estimate), estimate, torch.nan)
             z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
             action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
-            tangent = None if param in self._fitted else frame.aim(action, module.basis)
-            self.optimizer._pending[param] = Prepared(z, tangent, raw_norm, probed=True)
+            aim = None if param in self._fitted else frame.aim(action, module.basis)
+            self.optimizer._pending[param] = Prepared(z, aim, raw_norm, probed=True)
             prepared = True
         if prepared:
             self._fitted.clear()

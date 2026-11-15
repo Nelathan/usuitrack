@@ -23,21 +23,6 @@ def test_fit_is_orthonormal_and_deterministic_on_zero():
     torch.testing.assert_close(frame.fit(zero, RANK), frame.fit(zero, RANK), rtol=0, atol=0)
 
 
-def test_one_stacked_eigh_gives_each_grams_own_spectrum():
-    """Grams of different ranks share one padded `eigh`; each comes back as its
-    own decomposition, including one from a tangent of tiny entries."""
-
-    torch.manual_seed(0)
-    tangents = [torch.randn(COLS, 16), torch.randn(ROWS, 5), 1e-11 * torch.randn(COLS, 9), torch.randn(COLS, 16)]
-    for tangent, (values, vectors) in zip(tangents, frame.tangent_spectra(tangents), strict=True):
-        gram = tangent.mT @ tangent
-        rank = gram.shape[-1]
-        assert tuple(values.shape) == (rank,) and tuple(vectors.shape) == (rank, rank)
-        torch.testing.assert_close(vectors.mT @ vectors, torch.eye(rank), atol=1e-5, rtol=0)
-        torch.testing.assert_close(vectors @ torch.diag(values) @ vectors.mT, gram, atol=1e-4 * gram.abs().max().item(), rtol=1e-4)
-        torch.testing.assert_close(values, torch.linalg.eigvalsh(gram), atol=1e-4 * gram.abs().max().item(), rtol=1e-4)
-
-
 def test_fitting_leaves_the_training_random_stream_alone():
     """The fit draws from its own generator, so a run's batches and dropout do
     not depend on when its matrices fit (SPEC step 2)."""
@@ -49,24 +34,30 @@ def test_fitting_leaves_the_training_random_stream_alone():
     assert torch.equal(torch.rand(4), untouched)
 
 
-def test_tangent_is_horizontal():
-    """Oja's tangent has no component along the frame, so the geodesic turns
-    strictly into the complement. Taken on a gradient the frame was not fitted
-    on: a fitted frame is a fixed point, which would make this vacuous."""
+def test_the_aim_is_blind_to_the_gradients_scale():
+    """The action is quadratic in `G` and so is its Rayleigh quotient; the aim
+    divides one by the other, so a gradient of tiny entries (a matrix behind a
+    gate still near zero) aims like any other."""
     torch.manual_seed(0)
     q = frame.fit(torch.randn(ROWS, COLS), RANK)
-    _projected, tangent = frame.project_and_aim(torch.randn(ROWS, COLS), q)
-    assert float((q.mT @ tangent).abs().max()) < 1e-3 * float(tangent.abs().max())
+    gradient = torch.randn(ROWS, COLS)
+    _projected, aim = frame.project_and_aim(gradient, q)
+    _projected, tiny = frame.project_and_aim(1e-8 * gradient, q)
+    torch.testing.assert_close(tiny, aim, rtol=1e-4, atol=1e-5)
+    assert float((q * aim).sum()) / RANK == pytest.approx(1.0, rel=1e-5)
 
 
 def test_a_fitted_frame_is_a_fixed_point_of_its_own_gradient():
     """A frame fitted on `G` is the leading eigenspace of `G^T G` where the
-    gradient determines one, so the Oja action lands inside it: the tracker
-    stops when the gradient's principal subspace stops moving."""
+    gradient determines one, so the aim lands inside it and the frame holds:
+    the tracker stops when the gradient's principal subspace stops moving."""
     torch.manual_seed(0)
     gradient = torch.randn(ROWS, RANK) @ torch.randn(RANK, COLS)
-    _projected, tangent = frame.project_and_aim(gradient, frame.fit(gradient, RANK))
-    assert float(tangent.abs().max()) < 1e-5
+    q = frame.fit(gradient, RANK)
+    _projected, aim = frame.project_and_aim(gradient, q)
+    moved = frame.follow(q, 0.05 * aim)
+    assert float((moved.frame - q @ (q.mT @ moved.frame)).norm()) < 1e-4
+    torch.testing.assert_close(moved.frame, q, atol=1e-3, rtol=0)
 
 
 def test_a_gradient_of_lower_rank_than_the_frame_lies_wholly_inside_it():
@@ -80,70 +71,56 @@ def test_a_gradient_of_lower_rank_than_the_frame_lies_wholly_inside_it():
     assert float((gradient - gradient @ q @ q.mT).norm() / gradient.norm()) < 1e-4  # the fp32 Gram squares the tail's 1e-3
 
 
-def _turn(q, tangent, eta):
-    (spectrum,) = frame.tangent_spectra([tangent])
-    return frame.turn(q, tangent, spectrum, eta)
-
-
-def test_tangent_spectra_match_each_gram_alone_across_ranks():
-    """Same-rank Grams share one `eigh`; grouping is bookkeeping, not maths.
-    Not bitwise: batched and solo calls round differently at the ulp level."""
-    torch.manual_seed(0)
-    tangents = [torch.randn(COLS, rank) for rank in (RANK, RANK + 2, RANK, RANK + 2)]
-    for tangent, (eigenvalues, vectors) in zip(tangents, frame.tangent_spectra(tangents), strict=True):
-        gram = tangent.mT @ tangent
-        torch.testing.assert_close(eigenvalues, torch.linalg.eigvalsh(gram), rtol=1e-5, atol=1e-4)
-        torch.testing.assert_close(vectors @ torch.diag(eigenvalues) @ vectors.mT, gram, rtol=1e-5, atol=1e-3)
-
-
-def test_turn_stays_on_the_stiefel_manifold_and_turns_each_plane_by_eta():
+def test_the_followed_frame_is_orthonormal_however_far_the_moment_has_grown():
+    """Newton-Schulz alone lands a few percent off orthonormal; the retraction finishes it."""
     torch.manual_seed(0)
     q = torch.linalg.qr(torch.randn(COLS, RANK))[0]
-    tangent = _horizontal_tangent(q)
-    for eta in (0.01, 0.2):
-        turned = _turn(q, tangent, eta)
-        torch.testing.assert_close(turned.frame.mT @ turned.frame, torch.eye(RANK), atol=1e-4, rtol=0)
-        moved = (turned.frame - q @ (q.mT @ turned.frame)).norm() / math.sqrt(RANK)
-        assert float(moved) == math.sin(eta) or abs(float(moved) / math.sin(eta) - 1) < 2e-3
+    for scale in (0.05, 1.0, 3.0):
+        moved = frame.follow(q, scale * torch.randn(COLS, RANK))
+        torch.testing.assert_close(moved.frame.mT @ moved.frame, torch.eye(RANK), atol=1e-3, rtol=0)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="cuSOLVER's fp32 eigh is the one that fails")
-def test_a_tiny_tangent_turns_the_frame_and_keeps_it_orthonormal():
-    """A matrix behind a gate still near zero hands the frame a tangent of
-    ~1e-11 entries; its Gram's spectrum must stay orthonormal, and so must the turn."""
-    torch.manual_seed(0)
-    q = torch.linalg.qr(torch.randn(512, 72, device="cuda"))[0]
-    tangent = 1e-11 * _horizontal_tangent(q) @ torch.diag(torch.logspace(0, -3, 72, device="cuda"))
-    (spectrum,) = frame.tangent_spectra([tangent])
-    torch.testing.assert_close(spectrum[1].mT @ spectrum[1], torch.eye(72, device="cuda"), atol=1e-5, rtol=0)
-    turned = frame.turn(q, tangent, spectrum, 0.05)
-    torch.testing.assert_close(turned.frame.mT @ turned.frame, torch.eye(72, device="cuda"), atol=1e-4, rtol=0)
-    assert bool(turned.live.any()) and float((turned.frame - q).abs().max()) > 1e-3
-
-
-def test_dead_planes_hold_still():
-    """A tangent of rank 2 turns two planes; the rest of the frame stays put."""
+def test_planes_the_aim_does_not_leave_hold_still():
+    """A moment with two directions outside the span moves two planes; the rest of the frame stays put."""
     torch.manual_seed(0)
     q = torch.linalg.qr(torch.randn(COLS, RANK))[0]
-    low_rank = _horizontal_tangent(q)[:, :2] @ torch.randn(2, RANK)
-    turned = _turn(q, low_rank, 0.05)
-    assert int(turned.live.sum()) == 2
-    moved = turned.frame - q @ (q.mT @ turned.frame)
-    assert torch.linalg.matrix_rank(moved, atol=1e-4) == 2
+    low_rank = 0.1 * _horizontal_tangent(q)[:, :2] @ torch.randn(2, RANK)
+    moved = frame.follow(q, low_rank).frame
+    away = moved - q @ (q.mT @ moved)
+    assert float(away.norm()) > 1e-2
+    assert torch.linalg.matrix_rank(away, atol=1e-4) == 2
 
 
-def test_stored_rotation_is_identity_in_fp32_and_fires_in_bf16():
-    """The moment's correction fires on the in-span turn storage adds, and only then."""
+def test_a_horizontal_move_carries_no_rotation_until_bf16_storage_adds_one():
+    """A horizontal moment moves the frame with a symmetric overlap, so there is
+    no in-span rotation to carry the moment by in fp32; bf16 storage adds one.
+    Taken at a per-step angle of ~0.02, the size the twin moves by: the
+    rotation comes from one retraction of the overlap, exact only at small angles."""
     torch.manual_seed(0)
     q = torch.linalg.qr(torch.randn(COLS, RANK))[0]
-    tangent = _horizontal_tangent(q)
-    exact = _turn(q, tangent, 0.02)
-    torch.testing.assert_close(exact.rotation, torch.eye(RANK), atol=1e-5, rtol=0)
+    horizontal = 0.002 * _horizontal_tangent(q)
+    torch.testing.assert_close(frame.follow(q, horizontal).rotation, torch.eye(RANK), atol=1e-4, rtol=0)
 
-    rounded = _turn(q.bfloat16(), tangent, 0.02)
-    rotation = rounded.rotation
-    torch.testing.assert_close(rotation.mT @ rotation, torch.eye(RANK), atol=1e-4, rtol=0)
+    rotation = frame.follow(q.bfloat16(), horizontal).rotation
+    torch.testing.assert_close(rotation.mT @ rotation, torch.eye(RANK), atol=1e-3, rtol=0)
     assert float((rotation - rotation.mT).abs().max()) > 1e-4
+
+
+def test_the_frame_settles_on_a_held_gradients_leading_eigenspace():
+    """Followed under one gradient, from a random start, the frame converges to
+    the top `r` eigenspace of its Gram."""
+    torch.manual_seed(0)
+    spectrum = torch.cat([torch.full((RANK,), 3.0), torch.linspace(1.0, 0.1, COLS - RANK)])
+    basis = torch.linalg.qr(torch.randn(COLS, COLS))[0]
+    gradient = torch.randn(ROWS, COLS) @ basis @ torch.diag(spectrum) @ basis.mT
+    top = torch.linalg.eigh(gradient.mT @ gradient).eigenvectors[:, -RANK:]
+    q = torch.linalg.qr(torch.randn(COLS, RANK))[0]
+    frame_moment = torch.zeros_like(q)
+    for _ in range(300):
+        _projected, aim = frame.project_and_aim(gradient, q)
+        frame_moment = 0.95 * frame_moment + 0.05 * aim
+        q = frame.follow(q, frame_moment).frame
+    assert float((top.mT @ q).norm().square()) / RANK > 0.99
 
 
 def test_rank_is_a_fraction_of_the_size_capped_at_half_the_smaller_side():

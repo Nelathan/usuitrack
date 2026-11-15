@@ -69,9 +69,9 @@ first-steps read on the LFM lane against the eigh fit of `lab` at `be3f298`.
 
 Release frees each gradient in its hook, so it takes one backward per step; a
 model whose weights plus gradients do not fit needs both release and
-accumulation. Projecting per micro-batch is rank-sized, but the Oja tangent is
-quadratic in `G` (`A = G^T G Q`), so summed per-micro-batch tangents are not the
-summed gradient's tangent. The in-optimizer fold that did this was removed
+accumulation. Projecting per micro-batch is rank-sized, but the frame's aim is
+quadratic in `G` (`A = G^T G Q`), so summed per-micro-batch aims are not the
+summed gradient's aim. The in-optimizer fold that did this was removed
 (`ARCHIVE.md`, "accumulation is removed"); its open questions (B1-B4 there) are
 this one's prior.
 
@@ -147,7 +147,7 @@ defaults).
 ### T1. Anima under `auto`, with a few exceptions
 
 ai-toolkit carries a hardcoded side table (residual-facing, plus cross-attention
-K/V). Since liveness masking, `auto` may do as well with one or two exceptions.
+K/V). `auto` may do as well with one or two exceptions.
 Settling it needs the per-role reads the release no longer has: open is how the
 ai-toolkit lane gets `LabDiagnostics`, which lives in this repo's `experiments/`.
 

@@ -39,11 +39,6 @@ READS = {
         "steps under-travel and the gradient keeps its direction. Near zero: critically damped. "
         "Negative: overshoot. Noisy; read its trend against lr."
     ),
-    "tangent_live_fraction": (
-        "Share of tracked planes the frame update can resolve above float noise. Below 1, "
-        "rank_fraction asks for more planes than the gradient carries at this batch size: "
-        "lower the rank or raise the batch."
-    ),
     "projected_grad_norm": (
         "||G Q||, per matrix. The step ignores gradient magnitude, so bursts do not reach "
         "it, but they mark outlier batches that a fallback optimizer does see."
@@ -94,11 +89,8 @@ class Diagnostics:
         cosine = (unit_grad * before).sum() / (unit_grad.norm() * before.norm()).clamp_min(1e-12)
         self.add("grad_moment_cosine", cosine)
 
-    def frame_turn(self, params: list[Tensor], before: list[Tensor], turned: list) -> None:
-        """Per basis update: the stored frames before, and `frame.Turned` after."""
-
-        for item in turned:
-            self.add("tangent_live_fraction", item.live.float().mean())
+    def frame_move(self, params: list[Tensor], before: list[Tensor], moved: list) -> None:
+        """Per frame update: the stored frames before, and `frame.Moved` after; a hook the release reads nothing from."""
 
     def update(self, param: Tensor, update_norm: Tensor) -> None:
         square = update_norm.square()

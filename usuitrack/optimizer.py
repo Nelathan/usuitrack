@@ -20,9 +20,8 @@ from .diagnostics import Diagnostics
 from .polar import unit_polar
 from .stochastic import round_into
 
-# The frame's turn per basis update, in radians on every live plane. Constant,
-# not scheduled (SPEC step 4, "The turn is constant").
-GEODESIC_STEPSIZE = 0.02
+# The frame moment's memory: `Y = beta Y + (1 - beta) a` (SPEC step 4).
+TRACKER_BETA = 0.95
 
 # How a param group sizes its write (SPEC step 8): against the weight's norm, or
 # by the matrix's shape alone.
@@ -39,8 +38,8 @@ class Prepared:
 
     projected: Tensor
     """`Z = G Q`, oriented `[other, r]`, in the gradient's dtype."""
-    tangent: Tensor | None
-    """The Oja tangent `[d, r]`, fp32; `None` on the step that fits the frame."""
+    aim: Tensor | None
+    """The normalized action `[d, r]`, fp32; `None` on the step that fits the frame."""
     raw_norm: Tensor
     """`||G||_F` before sanitizing, fp32: non-finite iff the gradient was."""
     probed: bool = False
@@ -51,8 +50,9 @@ class UsuiTrack(Optimizer):
     """Optimizer for 2D weights that are shared linear maps.
 
     Biases, norms, embeddings and other lookup tables go to a separate
-    optimizer (README, "Usage"). Per matrix it keeps a frame `[d, r]` and a
-    moment `[other, r]`, both in the parameter's dtype.
+    optimizer (README, "Usage"). Per matrix it keeps a frame `[d, r]`, a
+    moment `[other, r]` and the frame's moment, `[d, r]` in the parameter's
+    dtype plus its in-span part `[r, r]` in fp32.
 
     `release_matrix_grads` consumes each matrix gradient in a backward hook
     as soon as it is complete and frees it, rather than holding every gradient
@@ -152,6 +152,14 @@ class UsuiTrack(Optimizer):
             group["norm_bounds"] = tuple(group.setdefault("norm_bounds", bounds))
         # torch rebuilds the group dicts, so re-point the index at the live ones.
         self._group_of = {param: group for group in self.param_groups for param in group["params"]}
+        # torch casts loaded state to the param's dtype; the frame moment's span is fp32 (SPEC step 4),
+        # so it is taken again from the checkpoint, matched to params by order as torch matches them.
+        indices = [index for group in state_dict["param_groups"] for index in group["params"]]
+        live = [param for group in self.param_groups for param in group["params"]]
+        for index, param in zip(indices, live, strict=True):
+            span = state_dict["state"].get(index, {}).get("frame_moment_span")
+            if span is not None:
+                self.state[param]["frame_moment_span"] = span.to(param.device, torch.float32, copy=True)
         # A param the checkpoint holds no state for gets its drawn frame back, so it does not fit one.
         for group in self.param_groups:
             for param in group["params"]:
@@ -200,8 +208,8 @@ class UsuiTrack(Optimizer):
             state["frame"] = frame.fit(grad, frame.rank(param.shape, group["rank_fraction"]))
             self._pending[param] = Prepared(grad @ state["frame"], None, raw_norm)
         else:
-            projected, tangent = frame.project_and_aim(grad, state["frame"])
-            self._pending[param] = Prepared(projected, tangent, raw_norm)
+            projected, aim = frame.project_and_aim(grad, state["frame"])
+            self._pending[param] = Prepared(projected, aim, raw_norm)
         param.grad = None
 
     @torch.no_grad()
@@ -229,25 +237,39 @@ class UsuiTrack(Optimizer):
             self._write_weight(param, unit_polar(moment), group)
 
         # The weights were lifted through the held frame; only now does it move.
-        # A matrix whose frame was fitted this step has no tangent and holds still.
-        turning = [(param, prepared.tangent) for param, prepared in entries if prepared.tangent is not None]
-        spectra = frame.tangent_spectra([tangent for _param, tangent in turning])
-        turned = {
-            param: frame.turn(self.state[param]["frame"], tangent, spectrum, GEODESIC_STEPSIZE)
-            for (param, tangent), spectrum in zip(turning, spectra, strict=True)
-        }
-        if turned and self.diagnostics is not None:
-            self.diagnostics.frame_turn(list(turned), [self.state[param]["frame"] for param in turned], list(turned.values()))
+        # A matrix whose frame was fitted this step has no aim and holds still.
+        moved = {param: self._follow(param, prepared.aim) for param, prepared in entries if prepared.aim is not None}
+        if moved and self.diagnostics is not None:
+            self.diagnostics.frame_move(list(moved), [self.state[param]["frame"] for param in moved], list(moved.values()))
 
         # SPEC step 6: the frame is stored, the moment follows its in-span
         # rotation, then is rounded once.
         for (param, _prepared), moment in zip(entries, moments, strict=True):
             state = self.state[param]
-            item = turned.get(param)
+            item = moved.get(param)
             if item is not None:
                 state["frame"].copy_(item.frame)
                 moment = moment @ item.rotation
             round_into(state["moment"], moment)
+
+    def _follow(self, param: Tensor, aim: Tensor) -> frame.Moved:
+        """SPEC step 4: blend the aim into the frame's moment, commit it, and move the frame to `polar(Q + Y)`."""
+
+        state = self.state[param]
+        frame_moment = (1.0 - TRACKER_BETA) * aim
+        if "frame_moment" in state:
+            held = state["frame"].float() @ state["frame_moment_span"] + state["frame_moment"].float()
+            frame_moment = frame_moment.add_(held, alpha=TRACKER_BETA)
+        moved = frame.follow(state["frame"], frame_moment)
+        # Held against the new frame as stored: `Y = Q S + H`, `S` in fp32. `H` is small
+        # where `Y`'s in-span part is large, so storing it rounds away only noise; each
+        # update moves `H` by `1 - beta_f` of an aim, far above a bf16 half-ulp, so
+        # round-to-nearest has no dead zone to lose a step in.
+        new = moved.frame.float()
+        span = new.mT @ frame_moment
+        state["frame_moment_span"] = span
+        state["frame_moment"] = (frame_moment - new @ span).to(state["frame"].dtype)
+        return moved
 
     def _blend_moment(self, param: Tensor, prepared: Prepared, beta: float) -> Tensor:
         """SPEC step 5: `M = beta M + (1 - beta) Z / ||Z||`, in fp32 until the commit."""

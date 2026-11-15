@@ -34,7 +34,10 @@ difference that matters is retention: LoRA's source loss rises 1.8x to 2.2x as
 far as UsuiTrack's, and raising its lr buys target at roughly nine times its
 cost in source. LoRA steps faster; its adapters cost activation memory instead.
 One seed and two LoRA learning rates: this is a measured comparison, not a
-sweep.
+sweep. The UsuiTrack rows predate the twin tracker. Its frame moment adds about
+29% to the matrix state on LFM3's native sides, 431 against 334 MiB (`FACTS.md`
+on `lab`, "The frame moment's in-span part needs fp32"); these rows are not
+rerun.
 
 ## Install
 
@@ -145,9 +148,8 @@ if step % 25 == 0:
 
 Each value is the mean since the last call (`nonfinite_grads` is a count), so call it on your logging cadence:
 it is the one device-to-host transfer. `usuitrack.diagnostics.READS` says how to
-read each key. The two that tell you the most about a new setup are
-`tangent_live_fraction` (does the rank fit what the gradient carries at this batch
-size?) and `grad_capture` (how much of the gradient does the frame hold?). Under
+read each key. The one that tells you the most about a new setup is
+`grad_capture`: how much of the gradient does the frame hold? Under
 Molegrad it is `grad_capture_probe`, over an estimated `||G||`.
 
 UsuiTrack is built for full-parameter training; LoRA is the comparison point
@@ -207,13 +209,14 @@ of the same mechanism, written for intuition rather than reference. The two
 are meant to be read together and are checked against each other.
 
 In short: each matrix keeps a small orthonormal basis (`r` columns, sized by `rank_fraction`) and a
-projected first moment in that basis. The basis moves via an exact
-Grassmann-geodesic step driven by an Oja covariance tangent, so momentum
-transports through basis motion as a rigid rotation instead of being
-re-projected and losing energy. Every tracked plane the gradient resolves turns
-by the same constant angle per step -- the tangent's magnitudes would only decide
-how motion is split between planes, and on a single batch they are the least
-trustworthy thing in it. Direction comes from two steps kept apart:
+projected first moment in that basis. The basis keeps a moment of its own: each
+step's covariance action `G^T G Q`, over its mean Rayleigh quotient, is averaged
+into `Y`, and the basis becomes the polar factor of `Q + Y`, by Newton-Schulz and
+one retraction, with no eigendecomposition and nothing read back to the host.
+The held basis anchors it, so no direction collapses, and a basis on the
+gradient's leading eigenspace holds still. Momentum transports through basis
+motion by the in-span rotation between old and new basis, instead of being
+re-projected and losing energy. Direction comes from two steps kept apart:
 a leverage-balancing row rescale
 ([Aurora](https://github.com/tilde-research/aurora-release), from Tilde
 Research), then a Newton-Schulz polar map that does the orthogonalizing, using
@@ -249,7 +252,7 @@ generic-PyTorch integration surface is not yet fully swept:
 - Not tested under `autocast`/`GradScaler`, `torch.compile` of the optimizer
   step, or exotic tensor subclasses.
 - Checkpoints from before this release's state layout (`frame`, `moment`) do not
-  load.
+  load; one without `frame_moment` loads and starts it at zero.
 - Minimum PyTorch version (`2.1`) is inferred from the API surface used
   (`register_post_accumulate_grad_hook`), not empirically swept across
   versions.

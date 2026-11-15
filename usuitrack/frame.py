@@ -14,6 +14,8 @@ from typing import NamedTuple
 import torch
 from torch import Tensor
 
+from .polar import newton_schulz
+
 SIDES = ("auto", "left", "right")
 
 # Polar Express's converged triple: one step pulls a near-orthonormal frame back
@@ -79,10 +81,9 @@ def draw(length: int, rank: int, generator: torch.Generator, dtype: torch.dtype)
 
 
 def project_and_aim(grad: Tensor, frame: Tensor) -> tuple[Tensor, Tensor]:
-    """The held-frame projection `Z = G Q`, and the Oja tangent built from it.
+    """The held-frame projection `Z = G Q`, and the aim built from it.
 
-    SPEC steps 3-4. `Z` keeps the gradient's dtype; the tangent is fp32 and
-    horizontal, `Q^T Delta = 0`.
+    SPEC steps 3-4. `Z` keeps the gradient's dtype; the aim is fp32.
     """
 
     projected = grad @ frame
@@ -90,13 +91,13 @@ def project_and_aim(grad: Tensor, frame: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def aim(action: Tensor, frame: Tensor) -> Tensor:
-    """The Oja tangent from the frame's action `A = G^T G Q`, fp32: its
-    horizontal part, scaled by the mean Rayleigh quotient (SPEC step 4)."""
+    """The frame's action `A = G^T G Q` over its mean Rayleigh quotient, fp32:
+    `Q^T a` has mean diagonal 1, so the aim is blind to the gradient's scale
+    (SPEC step 4). The floor guards only an exactly zero gradient: the twin
+    reads the aim's size, so a larger one would stall a matrix of tiny entries."""
 
-    q = frame.float()
-    rayleigh = q.mT @ action
-    rayleigh = 0.5 * (rayleigh + rayleigh.mT)
-    return (action - q @ rayleigh) / rayleigh.diagonal().mean().clamp_min(1e-12)
+    rayleigh = (frame.float() * action).sum() / frame.shape[-1]
+    return action / rayleigh.clamp_min(1e-30)
 
 
 def retract(frame: Tensor) -> Tensor:
@@ -112,70 +113,28 @@ def retract(frame: Tensor) -> Tensor:
     return frame @ correction
 
 
-class Turned(NamedTuple):
+class Moved(NamedTuple):
     frame: Tensor
     """The moved frame, rounded to the stored frame's dtype."""
     rotation: Tensor
-    """`[r, r]`, fp32: the in-span rotation between the old and new frames as stored.
-    The identity unless rounding turned the columns inside their span (SPEC step 6)."""
-    eigenvalues: Tensor
-    """The tangent Gram's spectrum, ascending."""
-    live: Tensor
-    """`[r]` bool: the planes that turned."""
+    """`[r, r]`, fp32: the in-span rotation between the old and new frames as
+    stored, which the moment is carried by (SPEC step 6)."""
 
 
-def tangent_spectra(tangents: list[Tensor]) -> list[tuple[Tensor, Tensor]]:
-    """`eigh` of each tangent Gram `Delta^T Delta`: eigenvalues ascending, vectors.
+def follow(stored: Tensor, frame_moment: Tensor) -> Moved:
+    """The frame as the polar factor of `Q + Y`, `Y` the moment of aims (SPEC step 4).
 
-    The Grams are `[r, r]`, where `eigh` is launch-bound and reads its status
-    back to the host, so all of them share one call: each is padded to the
-    largest rank with `-1` on the padded diagonal, a block apart whose
-    eigenpairs sort first and are dropped. They are the only per-matrix tensors
-    stacked, and they are small. Each Gram is divided by its mean diagonal for
-    the `eigh` and its eigenvalues multiplied back: cuSOLVER's fp32 `eigh`
-    returns non-orthonormal vectors for a Gram whose entries are tiny (a matrix
-    behind a still-closed gate, ~1e-22), and the turn then throws the frame off
-    the manifold. A scaled Gram is PSD, so its eigenvalues stay above the
-    padding's.
-    """
-
-    if not tangents:
-        return []
-    grams = [tangent.mT @ tangent for tangent in tangents]
-    width = max(gram.shape[-1] for gram in grams)
-    padding = -torch.eye(width, device=grams[0].device)
-    scales = [gram.diagonal().mean().clamp_min(1e-30) for gram in grams]
-    stacked = torch.stack([torch.block_diag(gram / scale, padding[gram.shape[-1] :, gram.shape[-1] :]) for gram, scale in zip(grams, scales, strict=True)])
-    eigenvalues, vectors = torch.linalg.eigh(0.5 * (stacked + stacked.mT))
-    spectra = []
-    for gram, scale, values, basis in zip(grams, scales, eigenvalues, vectors, strict=True):
-        rank = gram.shape[-1]
-        spectra.append((values[width - rank :] * scale, basis[:rank, width - rank :]))
-    return spectra
-
-
-def turn(stored: Tensor, tangent: Tensor, spectrum: tuple[Tensor, Tensor], eta: float) -> Turned:
-    """Move the frame along its polar tangent by `eta` on every live plane.
-
-    SPEC step 4. With `Delta^T Delta = V diag(sigma^2) V^T`, the polar tangent
-    is `Delta V diag(1/sigma) V^T`, so the geodesic is
-    `[(Q V) cos(eta) + (Delta V) diag(sin(eta) / sigma)] V^T` on live planes.
-    A plane is dead below the Gram's own backward error, `sqrt(r eps) sigma_max`,
-    and is held still: angle zero, not merely a zero tangent column.
-    `spectrum` is the tangent Gram's, from `tangent_spectra`.
+    `Q` anchors the target: `T = Q + Y` has its singular values at or above one
+    while the symmetric part of `Q^T Y` is positive semidefinite, so no plane
+    collapses, and an aim inside the span holds the frame exactly. Newton-Schulz lands within a few percent of
+    orthonormal and the retraction finishes it; there is no `eigh` and nothing
+    read back to the host.
     """
 
     q = stored.float()
-    eigenvalues, vectors = spectrum
-    sigma = eigenvalues.clamp_min(0.0).sqrt()
-    floor = math.sqrt(sigma.shape[-1] * torch.finfo(sigma.dtype).eps)
-    live = sigma > floor * sigma.amax().clamp_min(1e-30)
-    inverse = torch.where(live, 1.0 / sigma.clamp_min(1e-30), torch.zeros_like(sigma))
-    cosine = torch.cos(eta * live.float())
-    moved = ((q @ vectors) * cosine + (tangent @ vectors) * (inverse * math.sin(eta))) @ vectors.mT
     # Round-to-nearest, unlike the moment: the frame moves by a real angle
     # every update, so there is no sub-ulp step to lose, and stochastic
     # rounding measured sqrt(2) more in-span rotation.
-    new = retract(moved).to(stored.dtype)
+    new = retract(newton_schulz(q + frame_moment)).to(stored.dtype)
     rotation = retract(q.mT @ new.float())
-    return Turned(new, rotation, eigenvalues, live)
+    return Moved(new, rotation)

@@ -34,9 +34,6 @@ def test_every_lab_read_is_published_and_describes_itself():
     assert set(drained) == set(ALL_READS) - {"grad_capture_probe"}
     assert 0.0 < drained["transport_lag"] <= 1.0
     assert 0.0 <= drained["transport_curve"] < 1.0
-    assert 1.0 / RANK <= drained["tangent_concentration"] <= 1.0
-    # fp32 frames store the geodesic exactly, so there is no in-span turn to correct.
-    assert drained["transport_correction"] < 1e-4
 
 
 def test_moment_persistence_reads_zero_on_an_independent_stream_and_one_on_a_held_one():
