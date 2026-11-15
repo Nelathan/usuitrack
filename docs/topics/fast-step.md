@@ -72,6 +72,22 @@ Each chapter is one or more reviewed commits, then a compaction.
    needed only by the next backward's `Z = G Q`. It runs deferred on a side stream during the next forward, ordered
    by events. The training loop needs a seam for this; design it with the user. tiny-dit accumulates 4
    micro-batches, so only the last backward steps.
+   *Proposal, 2026-11-16, unbuilt (the user designs the seam):*
+   - A block is complete when its earliest layer's backward has returned `Z`: its members are consecutive
+     layers of one shape, and backward runs from the last layer down. A hook on the leaves of that member writes
+     the block's weights; each `W` is then past its last use in this backward (`grad_x` is taken in the same
+     call), and a checkpointed layer's recompute runs before its backward, so nothing reads `W` after the write.
+   - Only the last micro-batch's backward may write, and nothing inside autograd knows which one that is. That is
+     the seam: the loop must say so before the backward. Candidates: a context manager around the last backward
+     (`with optimizer.final_backward(): loss.backward()`); a call before it (`optimizer.arm()`); or a micro-batch
+     count given to Molegrad at build, which a loop that skips a batch silently breaks. `step()` stays the call
+     that closes the step, finishing any block that had no hook.
+   - The deferred tracker cannot write a frame while the next forward has it saved: Molegrad saves `basis` at
+     forward, and a block's frames share one version counter (chapter 3's review found the same hazard in the
+     backward). So each block's tracker must finish before its first layer's forward, ordered by an event that
+     a forward pre-hook waits on, not merely before the next backward.
+   - The side stream's transients run beside the forward's activations, so the step's peak moves into the
+     forward's. Unmeasured.
 5. **CUDA graph.** The graph covers the step only. Forward and backward are compiled blocks already, and graphing
    them is a separate matter. The deferred tracker comes first: it is pure optimizer state at static addresses once
    chapter 3 is done. Prerequisites:
@@ -81,6 +97,12 @@ Each chapter is one or more reviewed commits, then a compaction.
    - Molegrad's leaves copied into static buffers.
 
    Capture costs one step. If chapters 3 and 4 make it easy, it may come earlier.
+   *Read after chapter 3, 2026-11-16:* nanodit's 77 matrices stepped alone on synthetic `.grad` (the `G`
+   path), every group on the input side: 70-76 ms of summed GPU time against 68-78 ms of unsynced wall, over
+   4.3k CUDA events per step, against 14.3k and 60% idle before (`outputs/nanodit_step_profile_ch5.log`). The
+   step no longer waits on the host, so a graph buys little there; the GPU time is fp32 SGEMM (~35 ms, mostly
+   `prepare`'s projection and aim and the lift) and the write's elementwise chain (~18 ms), chapter 6's target.
+   Not built; the order is the user's call.
 6. **Triton.** The weight write first: lift, decay, norm bound and stochastic rounding in one pass over `W`. Eager
    makes about 10 passes; the compiled write measured -0.22 s/step on LFM3 (FACTS, "The compiled weight write
    saves 0.22 s/step"). Then the moment blend, which is less gain but easy. Newton-Schulz and the other matmuls stay
