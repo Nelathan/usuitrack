@@ -189,6 +189,14 @@ long run arrival matters little (user). Runner: `outputs/tools/twin_frame.py`.
 
 ## Dropped or elsewhere
 
+- Turning less often, on fewer planes, or without the polar map, on the input
+  side: dropped 2026-11-15 (FACTS, "Cutting the input side's turn"). The
+  low-rank accumulator, the form that saves state, loses most. Hypothesis,
+  unmeasured: each batch's tangent is large where that batch is idiosyncratic,
+  what consecutive batches agree on sits in each one's tail, and truncating
+  every step discards it before it can add up. A read: the agreement of
+  consecutive tangents outside each one's top `p`.
+
 - Frame rotation as a sensor for attention lock-in: withdrawn, it conflates
   frame evolution with q/k evolution.
 - "Activation-side tracking explores worse because it is PCA of the inputs":

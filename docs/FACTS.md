@@ -1583,6 +1583,49 @@ same-tree rerun (`std-lr4e5-rerun-s1`) lands within 2.1e-4 at every eval and
 6e-5 on source. Runners `outputs/tools/xside_lr.py`
 (`WRITER_LR_SCALE`), `outputs/tools/xside_role.py` (`ROLE`).
 
+### Cutting the input side's turn loses to the full polar turn every step; summing over 5 steps ties
+
+2026-11-15, the replay of "A warm frame matches an exact Gram EMA's" (one pass
+over the recorded stream, no run-to-run noise measured), the matrices on the
+input side, aim `G`, fitted start. Each tracker against today's turn (polar
+tangent of the live planes, `eta` 0.02, every step): the signed difference in
+`cap` and `sig` on the next batch over steps 201-300 (x1e3), as a range over the
+matrices named. `r` is the frame's rank, `p` a cut tracker's; "state" is what a
+tracker holds beyond the frame.
+
+| tracker | matrices | state | `cap` | `sig` |
+|---|---|---|---|---|
+| sum the normalized tangent, turn every 5 at `5 eta` (`every/5`) | 7 | `[n, r]` | -2 to +7 | -6 to -2 |
+| the same every 10 at `10 eta` (`every/10`) | 7 | `[n, r]` | -5 to +3 | -16 to -11 |
+| the twin, retracted every 10 (`shiftk/10`) | 7 | `[n, r]` | -5 to +5 | -8 to -3 |
+| the tangent summed in a rank-32 state truncated every step, turned every 10 (`sketch/10/32`), `eta` 0.02 | 7 | `[n, 32] + [32, r]` | -39 to -10 | -40 to -13 |
+| `sketch/10/32` at `eta` 0.0357 | `o12`, `c11` | `[n, 32] + [32, r]` | -26 to -23 | -43 to -39 |
+| `sketch/10/16` at `eta` 0.0505 | `o12`, `c11` | `[n, 16] + [16, r]` | -49 to -46 | -87 to -76 |
+| one step's tangent cut to its top 32 planes (`low/32`), `eta` 0.0357 | `o12`, `c11` | none | -5 | -7 to -3 |
+| `low/16`, `eta` 0.0505 | `o12`, `c11` | none | -13 to -10 | -14 to -6 |
+| the raw tangent, no polar, fixed angle 0.03 (best `cap` of 0.01 / 0.03 / 0.1) | `o12`, `q12`, `w1` | none | -20 to -7 | -54 to -11 |
+
+The 7 are `o12`, `c11`, `w2`, `o2`, `o20`, `q12`, `w1`
+(`outputs/runs/replay-every.log`, `replay-sketch.log`); the others are from
+`replay-sketch-eqtravel.log` and `replay-diagG.log`. A rank-`p` turn at angle
+`eta` travels `eta sqrt(p / r)`: at 0.02 a rank-32 cut on `r` 102 moves 0.0112
+per step against today's 0.02. The raised angles (0.0357, 0.0505) restore 0.02
+for `low` on `r` 102; the sketches reach 0.016-0.020.
+
+Summing the full tangent over 5 steps ties today's turn; over 10 it keeps `cap`
+and loses `sig`. A rank-`p` accumulator, the form that saves state, loses on
+every matrix at both angles, by more as `p` halves, and raising its angle
+makes it worse while it helps `low` (`low/32` on `o12`: `cap` -10 at 0.02, -5
+at 0.0357). At equal travel the sketch loses `sig` ~1.7x faster than `cap`. One
+step's tangent cut to 32 planes is within 7e-3 at equal travel, and loses more
+at each halving. The raw tangent's `sig` is best at 0.01 on `w1` (-24). Under
+Molegrad's diagonal aim (`K`, `o12` and `q12`, `replay-diagK.log`) the signs
+are the same and the margins 1-3e-3 smaller: raw at 0.03 `cap` -4 and -9,
+`low/32` at 0.02 `cap` -7 and -11. The replay's SVD of `old^T new` failed on
+`w1` under `K` and on `o20` under the raised-angle sketches. Not beaten here:
+the untruncated twin (`shift/0.95/1`, "A warm frame matches") holds `cap` +2 to
++9 over today's turn on `o12`, `w2`, `o2` and `o20` in 201-300, at `sig` -1 to -5.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
