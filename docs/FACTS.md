@@ -1778,6 +1778,26 @@ it off `step()` costs 68 ms. A lower bound on diagnostics' cost: Molegrad's
 probe and the `raw_norm` pass in `_prepare` stay in, and the bench never drains
 the reads (`pop_diagnostics`).
 
+### Blocks take nanodit's `step()` from 140 to about 62 ms
+
+2026-11-16, fast-step chapter 3: same-shaped matrices step batched in blocks whose
+state is one buffer per entry (SPEC "Blocks"). nanodit, every group on the input side
+(`outputs/tools/nanodit_xside_bench.py`), paired against chapter 2 (`af8ef61`) over
+three passes, alternating trees (`outputs/nanodit_ch3_bench.log`): the training step
+reads 370-404 ms per matrix and 291-293 in blocks (the first blocks pass 310-335,
+warming); with `step()` stubbed both read 230-264, so `step()` falls from about 140
+to about 62 ms, below the polar-and-turn prototype's 88. Same maths: from one state on
+CUDA, 5 + 2 same-shaped matrices and Molegrad on 4 stacked Linears, fp32 weights agree
+with the per-matrix tree to 1.5e-7 and state to 1e-5 of each tensor's max (summation
+order); in bf16 weights and moments differ as much as two per-matrix runs with other
+rounding draws, and frames and `H` by the fp32 order's last bits rounded to bf16.
+The step's peak above its start, eight bf16 `[1024, 1024]` in one block: 16.7 MiB per
+matrix, under the cap's estimate of 19.6. LFM3, standard arm, 100 steps
+(`outputs/runs/blocks-s1-100.log`) against the new defaults' run at its step 100
+(chapter 1, `defaults-xside-mole-s1`): target 1.423493 against 1.423241, inside the
+floor; 3.41 against 3.88 s/step; optimizer peak 4.90 against 5.42 GB allocated,
+backward peak 7.38 against 7.49.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

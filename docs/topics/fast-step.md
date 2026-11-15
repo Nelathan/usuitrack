@@ -62,6 +62,10 @@ Each chapter is one or more reviewed commits, then a compaction.
    the block. The earlier OOM came from stacking the whole model's same-shape matrices (FACTS, "bs16 fits once the
    polar runs per matrix"). The weights belong to the model, so they are written with `torch._foreach_*` or the
    chapter 6 kernel. Diagnostics become batched reductions per block, nearly free, so they keep every step.
+   *Done 2026-11-16.* The optimizer sees params, not model blocks, so a block is a run of same-shaped matrices
+   (and side, device, dtype) in param order, closed at `BLOCK_BYTES`, 256 MiB of transient, the prototype's cap,
+   unmeasured as a peak on Anima. Weights are stacked for the write and copied back with `_foreach_copy_`.
+   nanodit `step()` 140 to about 62 ms (FACTS, "Blocks take nanodit's `step()` from 140 to about 62 ms").
 4. **Weights first, and the preamble.** The weight write needs only the held moment and frame. In the last
    micro-batch's backward hooks, each block's matrices prepare and write as their gradients land, so the launches
    hide behind backward's GPU work. The tracker work (twin `Y`, Newton-Schulz, retraction, moment rotation) is

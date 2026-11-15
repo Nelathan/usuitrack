@@ -9,7 +9,9 @@ A new arc: `docs/topics/fast-step.md` carries the decisions, the six chapters in
 the open nuance. Chapter 1, the defaults, is in: the twin with Newton-Schulz every step is the release's
 tracker (`063dc18`), its frame moment stored split with the in-span part in fp32 (FACTS, "The frame moment's
 in-span part needs fp32"); `side` defaults to `right`, and the harness runs Molegrad, so the diagonal aim, by default.
-Chapter 2 is next. Compact after each chapter is committed.
+Chapter 2 (`||Z||` once, phase two per matrix) and chapter 3 (blocks: SPEC "Blocks", FACTS "Blocks take
+nanodit's `step()` from 140 to about 62 ms") are in. A block is a run of same-shaped matrices in param order under a
+256 MiB cap, not a model block, which the optimizer cannot see. Compact after each chapter is committed.
 
 ## Group X, 2026-11-15
 
@@ -54,7 +56,7 @@ The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
   `polar.py` (balanced Newton-Schulz), `optimizer.py`, `molegrad.py`,
   `diagnostics.py`, `stochastic.py`. Left is right on the transpose; state per matrix is `frame`,
   `moment`, `frame_moment` and `frame_moment_span` (fp32). **Old checkpoints do not load** (a `left` moment is now
-  `[n,r]`); one without the frame moment starts it at zero. Polar and `follow` run per matrix, with no `eigh`
+  `[n,r]`); one without the frame moment starts it at zero. Phase two runs batched per block (SPEC "Blocks"), with no `eigh`
   and no host read after the first frame's fit.
 - **Surface:** `lr`, `beta`, `weight_decay`, `rank_fraction`, `side`,
   `release_matrix_grads`, `diagnostics`; per group also `step_rule`,
