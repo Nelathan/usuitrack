@@ -80,7 +80,10 @@ Each chapter is one or more reviewed commits, then a compaction.
 
 - **Clip instead of normalize `Z`, and clip to what?** One candidate is `||Z||` capped at `c` times a running
   (log-space) EMA of `||Z||`. That keeps magnitude information and caps bursts. Unmeasured; PLAN V1,
-  not a chapter.
+  not a chapter. The user once logged `||Z|| / ||M||`: strongly `beta`-dependent, about 4-5 at `beta` 0.90.
+  That is the white stream's value: the EMA of independent unit vectors has norm `sqrt((1-beta)/(1+beta))`,
+  0.229 at 0.90, so the ratio is 4.36. The ratio read the incomplete-cancellation floor, not bursts. So the
+  clip's reference is `||Z||`'s own running scale, not `||M||`, which carries that floor.
 - **Diagnostics granularity.** Accumulating only on logging steps samples 1 in `k` steps rather than averaging all of
   them. That is nearly free for slow means, but it would miss events in the totals (`nonfinite_grads`). The aim is
   instead to make the reads cheap enough, by chapter 3, to keep every step.
