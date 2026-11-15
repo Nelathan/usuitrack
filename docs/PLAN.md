@@ -132,6 +132,16 @@ is the candidate tracker for a sync-free step on xside under `K` (FACTS, 2026-11
 
 ---
 
+## Group V. A fast step for small, deep models
+
+The step is launch-bound on small, deep models. Decisions, chapters, baselines and open nuance:
+`docs/topics/fast-step.md`. State (2026-11-15): decided, chapter 1 next (twin, xside, Molegrad and `K` as
+defaults).
+
+- V1. Clip instead of normalize `Z`, and clip to what? (topic, "Open nuance")
+
+---
+
 ## Group T. Side
 
 ### T1. Anima under `auto`, with a few exceptions

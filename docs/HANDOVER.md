@@ -3,7 +3,13 @@
 Written 2026-10-28, updated 2026-11-15. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
-## Group X, 2026-11-15 (read this first)
+## Group V, 2026-11-15 (read this first)
+
+A new arc: `docs/topics/fast-step.md` carries the decisions, the six chapters in order, the nanodit baselines and
+the open nuance. Chapter 1, the defaults (twin with Newton-Schulz every step, xside, Molegrad on, aim `K`), is next.
+Compact after each chapter is committed.
+
+## Group X, 2026-11-15
 
 State: `docs/topics/subspace-evolution.md` (Status, Candidates) and FACTS, "A
 warm frame matches an exact Gram EMA's" and "Residual writers on the input
