@@ -96,20 +96,20 @@ def aim(action: Tensor, frame: Tensor) -> Tensor:
     (SPEC step 4). The floor guards only an exactly zero gradient: the twin
     reads the aim's size, so a larger one would stall a matrix of tiny entries."""
 
-    rayleigh = (frame.float() * action).sum() / frame.shape[-1]
+    rayleigh = (frame.float() * action).sum(dim=(-2, -1), keepdim=True) / frame.shape[-1]
     return action / rayleigh.clamp_min(1e-30)
 
 
 def retract(frame: Tensor) -> Tensor:
-    """One Polar Express step toward the nearest orthonormal frame; exact enough
-    only for a frame already within small principal angles of one."""
+    """One Polar Express step toward the nearest orthonormal frame, per frame of
+    a stack; exact enough only for a frame already within small principal angles of one."""
 
     gram = frame.mT @ frame
     a, b, c = RETRACTION_COEFFICIENTS
     correction = c * gram
-    correction.diagonal().add_(b)
+    correction.diagonal(dim1=-2, dim2=-1).add_(b)
     correction = correction @ gram
-    correction.diagonal().add_(a)
+    correction.diagonal(dim1=-2, dim2=-1).add_(a)
     return frame @ correction
 
 
@@ -122,7 +122,8 @@ class Moved(NamedTuple):
 
 
 def follow(stored: Tensor, frame_moment: Tensor) -> Moved:
-    """The frame as the polar factor of `Q + Y`, `Y` the moment of aims (SPEC step 4).
+    """The frame as the polar factor of `Q + Y`, `Y` the moment of aims (SPEC step 4); per frame of a
+    `[b, d, r]` stack too.
 
     `Q` anchors the target: `T = Q + Y` has its singular values at or above one
     while the symmetric part of `Q^T Y` is positive semidefinite, so no plane

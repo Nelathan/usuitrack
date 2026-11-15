@@ -6,7 +6,9 @@ on the caller's logging cadence. A drained value is the mean over every
 matrix and step since the last `pop`; `nonfinite_grads` is a total.
 
 `READS` says how to read each key. A subclass adds reads by overriding the
-event methods, which the optimizer calls only while diagnostics are on.
+event methods, which the optimizer calls only while diagnostics are on, once per
+block step: `params` are the block's members that stepped, and each tensor
+carries them on its leading dimension.
 """
 
 from __future__ import annotations
@@ -69,34 +71,38 @@ class Diagnostics:
         self._sums[name] = sample if current is None else current + sample.to(current.device)
         self._counts[name] += count
 
-    def add_total(self, name: str, value: Tensor) -> None:
-        """A count reported as a total, which a mean over a quiet window would hide."""
+    def add_each(self, name: str, values: Tensor, params: list[Tensor], total: bool = False) -> None:
+        """One sample per matrix of `params`, `values` `[b]`; a `total` is a count
+        reported as a total, which a mean over a quiet window would hide."""
 
-        self.add(name, value)
-        self._totals.add(name)
+        self.add(name, values.sum(), count=len(params))
+        if total:
+            self._totals.add(name)
 
-    def gradient(self, param: Tensor, projected_norm: Tensor, raw_norm: Tensor, probed: bool) -> None:
-        self.add("projected_grad_norm", projected_norm)
+    def gradient(self, params: list[Tensor], projected_norm: Tensor, raw_norm: Tensor, probed: bool) -> None:
+        self.add_each("projected_grad_norm", projected_norm, params)
         # A non-finite gradient reads as zero capture rather than taking the
         # whole window's mean to NaN; `nonfinite_grads` flags that window.
+        finite = torch.isfinite(raw_norm)
         capture = projected_norm / raw_norm.clamp_min(1e-12)
         name = "grad_capture_probe" if probed else "grad_capture"
-        self.add(name, torch.where(torch.isfinite(raw_norm), capture, 0.0))
-        self.add_total("nonfinite_grads", (~torch.isfinite(raw_norm)).float())
+        self.add_each(name, torch.where(finite, capture, 0.0), params)
+        self.add_each("nonfinite_grads", (~finite).float(), params, total=True)
 
-    def moment(self, param: Tensor, unit_grad: Tensor, before: Tensor, after: Tensor, beta: float) -> None:
+    def moment(self, params: list[Tensor], unit_grad: Tensor, before: Tensor, after: Tensor, beta: float) -> None:
         """`before` is the moment as it stood ahead of this step's blend, so the
         cosine does not measure the gradient against itself."""
 
         # `unit_grad` has norm one up to the clamp, or is zero for a zero gradient.
-        cosine = (unit_grad * before).sum() / before.norm().clamp_min(1e-12)
-        self.add("grad_moment_cosine", cosine)
+        dims = (-2, -1)
+        cosine = (unit_grad * before).sum(dim=dims) / torch.linalg.vector_norm(before, dim=dims).clamp_min(1e-12)
+        self.add_each("grad_moment_cosine", cosine, params)
 
-    def frame_move(self, param: Tensor, before: Tensor, moved: Moved) -> None:
-        """Per frame update: the stored frame before, and `Moved` after; a hook the release reads nothing from."""
+    def frame_move(self, params: list[Tensor], before: Tensor, moved: Moved) -> None:
+        """Per frame update: the stored frames before, and `Moved` after; a hook the release reads nothing from."""
 
-    def update(self, param: Tensor, update_norm: Tensor) -> None:
-        square = update_norm.square()
+    def update(self, params: list[Tensor], update_norm: Tensor) -> None:
+        square = update_norm.square().sum()
         if self._step_update_sq is not None:
             square = self._step_update_sq + square.to(self._step_update_sq.device)
         self._step_update_sq = square

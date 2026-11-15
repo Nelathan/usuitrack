@@ -379,3 +379,22 @@ def test_a_projected_linear_compiles_whole_from_its_first_step():
         (compiled(inputs) * target).sum().backward()
         optimizer.step()
     assert all(torch.isfinite(p).all() for p in model.parameters())
+
+
+def test_a_linear_that_first_trains_late_fits_beside_a_trained_one_of_its_block():
+    """Same-shaped Linears share a block. One reached only from step 2 fits its frame in that
+    backward, while the other's stored frame is saved in the same graph."""
+
+    torch.manual_seed(0)
+    early, late = torch.nn.Linear(IN, IN, bias=False), torch.nn.Linear(IN, IN, bias=False)
+    optimizer = UsuiTrack([early.weight, late.weight], lr=1e-3, rank_fraction=8 / IN)
+    Molegrad(torch.nn.ModuleList([early, late]), optimizer)
+    inputs = torch.randn(BATCH, TOKENS, IN)
+    early(inputs).square().sum().backward()
+    optimizer.step()
+    late(early(inputs)).square().sum().backward()
+    optimizer.step()
+    for module in (early, late):
+        stored = optimizer.state[module.weight]["frame"]
+        assert module.basis is stored
+        torch.testing.assert_close(stored.mT @ stored, torch.eye(8), atol=1e-4, rtol=0)

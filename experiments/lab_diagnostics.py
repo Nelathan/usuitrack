@@ -55,60 +55,67 @@ class LabDiagnostics(Diagnostics):
         self._updates: dict[Tensor, int] = {}
         self._snapshots: dict[Tensor, Tensor] = {}
         self._paths: dict[Tensor, Tensor] = {}
-        self._param: Tensor | None = None
+        self._indices: dict[tuple, Tensor] = {}
 
-    def add(self, name: str, value: Tensor, count: int = 1) -> None:
-        super().add(name, value, count)
-        role = self.roles.get(self._param) if self._param is not None else None
-        if role is not None and name in self.role_reads:
-            super().add(f"{name}/{role}", value, count)
-            if name in self._totals:
-                self._totals.add(f"{name}/{role}")
+    def add_each(self, name: str, values: Tensor, params: list[Tensor], total: bool = False) -> None:
+        super().add_each(name, values, params, total)
+        if name not in self.role_reads:
+            return
+        by_role: dict[str, list[int]] = {}
+        for member, param in enumerate(params):
+            role = self.roles.get(param)
+            if role is not None:
+                by_role.setdefault(role, []).append(member)
+        for role, members in by_role.items():
+            super().add_each(f"{name}/{role}", values[self._index(members, values.device)], [params[member] for member in members], total)
 
-    def add_total(self, name: str, value: Tensor) -> None:
-        self._totals.add(name)
-        self.add(name, value)
+    def _index(self, members: list[int], device: torch.device) -> Tensor:
+        # Made once per member set, so a role split costs no host-to-device copy per step.
+        key = (tuple(members), device)
+        if key not in self._indices:
+            self._indices[key] = torch.tensor(members, device=device)
+        return self._indices[key]
 
-    def gradient(self, param: Tensor, projected_norm: Tensor, raw_norm: Tensor, probed: bool) -> None:
-        self._param = param
-        super().gradient(param, projected_norm, raw_norm, probed)
-        self._param = None
-
-    def moment(self, param: Tensor, unit_grad: Tensor, before: Tensor, after: Tensor, beta: float) -> None:
-        self._param = param
-        super().moment(param, unit_grad, before, after, beta)
+    def moment(self, params: list[Tensor], unit_grad: Tensor, before: Tensor, after: Tensor, beta: float) -> None:
+        super().moment(params, unit_grad, before, after, beta)
         if beta > 0.0:
             floor = (1.0 - beta) / (1.0 + beta)
-            self.add("moment_persistence", (after.norm().square() - floor) / (1.0 - floor))
-        self._param = None
+            norm = torch.linalg.vector_norm(after, dim=(-2, -1))
+            self.add_each("moment_persistence", (norm.square() - floor) / (1.0 - floor), params)
 
-    def frame_move(self, param: Tensor, before: Tensor, moved: Moved) -> None:
-        super().frame_move(param, before, moved)
+    def frame_move(self, params: list[Tensor], before: Tensor, moved: Moved) -> None:
+        super().frame_move(params, before, moved)
         rotation = moved.rotation
-        self.add("transport_correction", (rotation - rotation.mT).norm() / (2.0 * math.sqrt(rotation.shape[-1])))
+        root = math.sqrt(rotation.shape[-1])
+        self.add_each("transport_correction", torch.linalg.vector_norm(rotation - rotation.mT, dim=(-2, -1)) / (2.0 * root), params)
 
         # The first `sample` matrices to move, across every group.
-        if len(self._sampled) < self.sample_size:
+        for param in params:
+            if len(self._sampled) >= self.sample_size:
+                break
             self._sampled.add(param)
-        if param not in self._sampled:
+        members = [member for member, param in enumerate(params) if param in self._sampled]
+        if not members:
             return
-        start, end = before.float(), moved.frame.float()
-        root = math.sqrt(end.shape[-1])
-        speed = (end - start @ (start.mT @ end)).norm() / root
-        self.add("transport_speed", speed)
+        index = self._index(members, before.device)
+        sampled = [params[member] for member in members]
+        start, end = before[index].float(), moved.frame[index].float()
+        speeds = torch.linalg.vector_norm(end - start @ (start.mT @ end), dim=(-2, -1)) / root
+        self.add_each("transport_speed", speeds, sampled)
         if self.snapshot_interval <= 0:
             return
-        path = self._paths.get(param)
-        self._paths[param] = speed if path is None else path + speed
-        self._updates[param] = self._updates.get(param, 0) + 1
-        if self._updates[param] % self.snapshot_interval:
-            return
-        previous = self._snapshots.get(param)
-        self._snapshots[param] = end.clone()
-        path = self._paths.pop(param)
-        if previous is None:
-            return
-        overlap = previous.mT @ end
-        lag = (end - previous @ overlap).norm() / root
-        self.add("transport_lag", lag)
-        self.add("transport_curve", 1.0 - lag / path.clamp_min(1e-12))
+        for param, speed, current in zip(sampled, speeds.unbind(0), end.unbind(0), strict=True):
+            path = self._paths.get(param)
+            self._paths[param] = speed if path is None else path + speed
+            self._updates[param] = self._updates.get(param, 0) + 1
+            if self._updates[param] % self.snapshot_interval:
+                continue
+            previous = self._snapshots.get(param)
+            self._snapshots[param] = current.clone()
+            path = self._paths.pop(param)
+            if previous is None:
+                continue
+            overlap = previous.mT @ current
+            lag = (current - previous @ overlap).norm() / root
+            self.add("transport_lag", lag)
+            self.add("transport_curve", 1.0 - lag / path.clamp_min(1e-12))

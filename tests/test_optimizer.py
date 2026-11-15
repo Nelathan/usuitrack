@@ -379,6 +379,59 @@ def test_matrices_stepped_together_match_each_stepped_alone():
         torch.testing.assert_close(together[shape], separate[shape], rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("block_bytes", [None, 1])
+def test_a_block_steps_its_matrices_as_each_would_step_alone(monkeypatch, block_bytes):
+    """Same-shaped matrices step batched, as one block or, under a cap of one byte, one each;
+    a step that reaches only some members leaves the others' weights and state as they were."""
+
+    import usuitrack.optimizer
+
+    if block_bytes is not None:
+        monkeypatch.setattr(usuitrack.optimizer, "BLOCK_BYTES", block_bytes)
+    torch.manual_seed(6)
+    shapes = [(64, 512), (96, 96), (64, 512), (64, 512)]
+    base = [torch.randn(*shape) for shape in shapes]
+    # The middle (64, 512) gets no gradient on step 3, so its block steps a subset there.
+    gradients = [[None if (step, k) == (3, 2) else torch.randn(*shape) for k, shape in enumerate(shapes)] for step in range(6)]
+
+    together = [torch.nn.Parameter(weight.clone()) for weight in base]
+    optimizer = UsuiTrack(together, lr=0.01, rank_fraction=RANK_FRACTION, side="right")
+    separate = [torch.nn.Parameter(weight.clone()) for weight in base]
+    solo = [UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION, side="right") for weight in separate]
+    for step in range(6):
+        for k in range(len(shapes)):
+            gradient = gradients[step][k]
+            together[k].grad = None if gradient is None else gradient.clone()
+            if gradient is not None:
+                separate[k].grad = gradient.clone()
+                solo[k].step()
+        optimizer.step()
+
+    for k in range(len(shapes)):
+        torch.testing.assert_close(together[k], separate[k], rtol=1e-5, atol=1e-6)
+        for name in ("frame", "moment", "frame_moment", "frame_moment_span"):
+            torch.testing.assert_close(optimizer.state[together[k]][name], solo[k].state[separate[k]][name], rtol=1e-5, atol=1e-6)
+
+
+def test_a_block_resumes_from_a_checkpoint_as_if_never_stopped():
+    torch.manual_seed(2)
+    first = [torch.nn.Parameter(torch.randn(ROWS, COLS)) for _ in range(3)]
+    first_optimizer = UsuiTrack(first, lr=0.01, rank_fraction=RANK_FRACTION)
+    _run(first, first_optimizer, 2)
+
+    second = [torch.nn.Parameter(weight.detach().clone()) for weight in first]
+    second_optimizer = UsuiTrack(second, lr=0.01, rank_fraction=RANK_FRACTION)
+    second_optimizer.load_state_dict(copy.deepcopy(first_optimizer.state_dict()))
+    for _ in range(2):
+        for one, other in zip(first, second, strict=True):
+            other.grad = torch.randn_like(one)
+            one.grad = other.grad.clone()
+        first_optimizer.step()
+        second_optimizer.step()
+    for one, other in zip(first, second, strict=True):
+        torch.testing.assert_close(one, other, rtol=0, atol=0)
+
+
 def test_the_frame_moves_from_the_very_first_update_after_its_fit():
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(ROWS, COLS))
@@ -715,7 +768,7 @@ def test_the_first_norm_of_a_bf16_matrix_survives_a_checkpoint_unrounded():
     assert restored.state[restored_weight]["init_norm"] == optimizer.state[weight]["init_norm"]
     restored_weight.grad = torch.randn(ROWS, COLS).bfloat16()
     restored.step()
-    assert restored_weight.detach().float().norm().item() == pytest.approx(optimizer.state[weight]["init_norm"], rel=1e-2)
+    assert restored_weight.detach().float().norm().item() == pytest.approx(optimizer.state[weight]["init_norm"].item(), rel=1e-2)
 
 
 def test_bounds_refuse_a_zero_matrix_and_malformed_settings():

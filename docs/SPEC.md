@@ -407,8 +407,8 @@ $$U_t=\sqrt{\max(1,m/n)}\,\sqrt r\;\Lambda_{Q_t}(O_t),\qquad
 
 **Norm bounds.** A param group's `norm_bounds = (low, high)` (default
 `(None, None)`) bounds each matrix's Frobenius norm in multiples of `R`, its norm
-before its first write (state `init_norm`, a float, so a bf16 checkpoint does not
-round it). The written weight is clamped radially,
+before its first write (state `init_norm`, fp32 also for a bf16 matrix, and loaded
+from the checkpoint unrounded). The written weight is clamped radially,
 
 $$W_t=\tilde W_t\,\frac{\operatorname{clamp}(\|\tilde W_t\|_F,\ \mathrm{low}\,R,\ \mathrm{high}\,R)}{\|\tilde W_t\|_F},$$
 
@@ -417,7 +417,7 @@ same single rounding; `None` opens a side. A write inside the bounds is unchange
 `(1, 1)` pins the norm: under the trust rule `lr` is then the relative step at every
 step, not only the first, and weight decay only rescales the step by
 `1/(1 - lr lambda)`. A ceiling alone lets the norm move below it, so decay acts
-until the floor, if any, holds it. `R` is read to the host once per matrix; a matrix
+until the floor, if any, holds it. `R` is read to the host once, at a matrix's first write; a matrix
 whose `R` is zero cannot be bounded relative to it and raises. A checkpoint without
 `init_norm` (saved without bounds) takes `R` from the weights it resumes with. The diagnostics read
 the update before the clamp.
@@ -462,8 +462,8 @@ For each matrix, phase one runs exactly once after its full gradient is complete
 
 Phase one does not move the basis, update the moment, or update the parameter:
 the moment is rotated and committed after the frame moves (step 6), so it is
-written only in `step()`. Phase two runs in `step()`, one matrix at a time, so
-no fp32 moment outlives its matrix: it blends the unit `Z_t` into `M_t`,
+written only in `step()`. Phase two runs in `step()`, one block at a time
+(below), so no fp32 moment outlives its block: it blends the unit `Z_t` into `M_t`,
 applies the balanced polar map, lifts `O_t` through `Q_t`, updates `W`, then
 blends the aim into `Y`, moves the frame to `Q_{t+}` and commits the moment.
 
@@ -487,6 +487,33 @@ that must bail out mid-step regardless (an OOM-retry loop, say) is allowed to:
 call, with a warning naming how many. Nothing needs rolling back: neither the
 moment nor the frame moves before `step()`, so what is dropped is the gradients
 themselves, plus a frame fitted on a first step.
+
+## Blocks
+
+A group's matrices step in blocks: matrices of one side, shape, device and dtype,
+taken in param order, a block closing once its members' batched work would pass
+`BLOCK_BYTES` (256 MiB). A member's work is its share of the write -- the stacked
+weight and four fp32 temporaries at the write's peak, 18 bytes an entry for bf16 --
+plus about four fp32 copies of its moment and frame. A group forms its blocks at its
+first frame, from its side and `rank_fraction` then, and a block allocates its
+buffers whole at its first frame, so a member that never trains holds zeroed state.
+
+A block holds each state entry (Persistent state) as one `[b, ...]` buffer, and each
+member's state is a view into it, so phase two runs as batched calls on the buffers
+themselves: a step's launch count follows its blocks, not its matrices. The weights
+belong to the model, so a block stacks them for the write and copies them back in one
+call; a block of one writes in place. A step that reaches only some members gathers
+their state and scatters it back; the others keep their weights and state. A block
+steps the members that fitted their frame this step apart from those that aim, since
+only the second move their frame.
+
+Under Molegrad a fit made in the backward waits in the module's own tensor and enters
+its block at `prepare()`: the block's frames share one buffer, and so one autograd
+version counter, which a write during the backward would bump under another member's
+saved frame.
+
+A block steps each member as that member's own optimizer would; the batched kernels
+sum in another order, so fp32 results agree to about `1e-5` relative, not bitwise.
 
 ## Molegrad
 
@@ -600,8 +627,9 @@ raise.
 | `frame_moment_span` | `[r,r]` | `[r,r]` | fp32 |
 | `moment` | `[m,r]` | `[n,r]` | parameter dtype |
 
-That is the whole per-matrix state; the side is resolved from the group each
-step. A checkpoint without the frame moment starts it at zero. Projections and
+That is the whole per-matrix state, with `init_norm` (fp32, 0-dim) under norm bounds;
+each entry is a view into its block's buffer (Blocks), and a load packs a checkpoint
+into fresh blocks. A checkpoint without the frame moment starts it at zero. Projections and
 aims are transient pending work. Fallback parameters retain AdamW's fp32 first moment, second
 moment, and step tensor in their separate optimizer.
 
@@ -631,7 +659,8 @@ non-finite gradients are counted from the raw norm.
 | `nonfinite_grads` | matrix gradients whose raw norm was non-finite and were sanitized. |
 
 `usuitrack.diagnostics.READS` carries a one-line reading guide per key. A
-subclass adds reads by overriding the event methods; the lab's
+subclass adds reads by overriding the event methods, which run once per block
+step with the members' tensors stacked on the leading dimension; the lab's
 `experiments/lab_diagnostics.py` is one, with frame-motion, persistence and
 per-role reads.
 

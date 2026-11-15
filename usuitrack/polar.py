@@ -21,32 +21,33 @@ NEWTON_SCHULZ_COEFFICIENTS = (
 
 
 def newton_schulz(matrix: Tensor) -> Tensor:
-    """Approximate polar factor of `matrix`, in fp32."""
+    """Approximate polar factor of `matrix`, or of each matrix in a `[b, m, n]` stack, in fp32."""
 
     work = matrix.float()
-    work = work / work.norm().clamp_min(1e-7)
-    transposed = work.shape[0] > work.shape[1]
+    work = work / work.norm(dim=(-2, -1), keepdim=True).clamp_min(1e-7)
+    transposed = work.shape[-2] > work.shape[-1]
     x = work.mT if transposed else work
     for a, b, c in NEWTON_SCHULZ_COEFFICIENTS:
         gram = x @ x.mT
         y = c * gram
-        y.diagonal().add_(b)
+        y.diagonal(dim1=-2, dim2=-1).add_(b)
         y = y @ gram
-        y.diagonal().add_(a)
+        y.diagonal(dim1=-2, dim2=-1).add_(a)
         x = y @ x
     return x.mT if transposed else x
 
 
 def balanced_polar(matrix: Tensor) -> Tensor:
-    """Aurora's leverage balance, one iteration, then the polar map; fp32.
+    """Aurora's leverage balance, one iteration, then the polar map; fp32,
+    per matrix of a stack.
 
     The tall orientation's rows are scaled to unit norm before the polar map;
     a square matrix has nothing to balance.
     """
 
-    if matrix.shape[0] == matrix.shape[1]:
+    if matrix.shape[-2] == matrix.shape[-1]:
         return newton_schulz(matrix)
-    transposed = matrix.shape[0] < matrix.shape[1]
+    transposed = matrix.shape[-2] < matrix.shape[-1]
     work = (matrix.mT if transposed else matrix).float()
     rows = work.norm(dim=-1, keepdim=True).clamp_min(1e-7).reciprocal()
     polar = newton_schulz(rows * work)
@@ -61,4 +62,4 @@ def unit_polar(moment: Tensor) -> Tensor:
     where it lands.
     """
 
-    return balanced_polar(moment) * (1.0 / math.sqrt(min(moment.shape)))
+    return balanced_polar(moment) * (1.0 / math.sqrt(min(moment.shape[-2:])))

@@ -89,7 +89,7 @@ class Molegrad:
         self.optimizer = optimizer
         groups = {param: group for group in optimizer.param_groups for param in group["params"]}
         self._projected: list[MoleLinear] = []
-        self._fitted: set[Tensor] = set()
+        self._fitted: dict[Tensor, MoleLinear] = {}
         self._probes: dict[tuple[int, torch.device], Tensor] = {}
         self._generators: dict[torch.device, torch.Generator] = {}
         if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
@@ -124,6 +124,8 @@ class Molegrad:
         self.prepare()
 
     def _after_load(self, optimizer: UsuiTrack) -> None:
+        # The loaded state replaces a fit no step consumed.
+        self._fitted.clear()
         self._discard()
         self._bind()
 
@@ -136,6 +138,7 @@ class Molegrad:
     def _discard(self) -> int:
         """Drop leaves no step consumed; a frame they fitted stays, as on the `G` path."""
 
+        self._store_fits()
         dropped = 0
         for module in self._projected:
             dropped += module.z.grad is not None
@@ -149,6 +152,7 @@ class Molegrad:
         its phase-one work. `step()` calls it; calling it earlier exposes the
         pending raw norms, and the step's own call is then a no-op."""
 
+        self._store_fits()
         prepared = False
         for module in self._projected:
             if module.z.grad is None:
@@ -212,12 +216,18 @@ class Molegrad:
         gram = basis.grad.float().mT @ basis.grad.float()
         if not torch.allclose(gram, torch.eye(gram.shape[0], device=gram.device), atol=0.1):
             raise RuntimeError("Molegrad: a Linear had more than one call in the backward that fits its frame; call it once until its first step")
+        # The fit waits in its own tensor until the backward is over: a block's stored
+        # frames share one buffer, and with it one version counter, which a write here
+        # would bump under another member's frame saved in this graph.
         basis.copy_(basis.grad)
         basis.grad = None
         basis.requires_grad_(False)
-        self.optimizer.state[weight]["frame"] = basis
         module.test = None
-        self._fitted.add(weight)
+        self._fitted[weight] = module
+
+    def _store_fits(self) -> None:
+        for weight, module in self._fitted.items():
+            module.basis = self.optimizer._hold_frame(weight, module.basis)
 
     def _probe(self, size: int, device: torch.device, dtype: torch.dtype) -> Tensor:
         key = (size, device, dtype)
