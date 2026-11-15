@@ -174,9 +174,15 @@ averages through small turns. The twin gives the frame the moment's order:
     Y = beta_f Y + (1 - beta_f) a
     Q = polar(rho Q + Y)
 
-The polar factor comes from the padded `[r, r]` Gram `eigh` the turn already
-runs, with one retraction after; Newton-Schulz leaves weak planes up to 0.26
-off orthonormal. It has no horizontal projection, no liveness floor, no
+The polar factor comes from Newton-Schulz with one retraction after, which
+reads as the Gram `eigh` does and leaves the frame within 1.5e-4 of
+orthonormal (FACTS, "Under the diagonal aim the twin needs no `eigh`"; measured
+under aim `K` on the input side). Newton-Schulz alone leaves it up to 0.06 off
+there (worst over the run, `k` 1). The earlier "Newton-Schulz leaves weak planes
+up to 0.26 off orthonormal" (`f230e85`, setup not recorded) does not reproduce
+for this shifted twin under `K` on the input side. `rho Q + Y` has its singular
+values at or above `rho`, so it has no weak planes; the 0.26 may have come from
+the unshifted `polar(Y)` or from aim `G` (unmeasured). It has no horizontal projection, no liveness floor, no
 geodesic and no `eta`, and it takes the same action today's turn takes, so it
 runs under Molegrad's Gram. It costs one fp32 frame-sized state per matrix.
 

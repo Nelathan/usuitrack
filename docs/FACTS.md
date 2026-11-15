@@ -1626,6 +1626,39 @@ are the same and the margins 1-3e-3 smaller: raw at 0.03 `cap` -4 and -9,
 the untruncated twin (`shift/0.95/1`, "A warm frame matches") holds `cap` +2 to
 +9 over today's turn on `o12`, `w2`, `o2` and `o20` in 201-300, at `sig` -1 to -5.
 
+### In replay under aim `K`, the twin's polar from Newton-Schulz reads as `eigh`'s; retracting every step is closest to today's turn
+
+2026-11-15, three matrices, one stream, off-policy, no loss run: the replay of "A warm frame matches an exact Gram EMA's", aim `K`,
+input side, fitted start, on the three matrices whose input-side `K` the stream
+records (`o12`, `q12`, `w1`; `outputs/runs/replay-shiftK.log`,
+`replay-shiftK-readers.log`, `replay-shiftKns.log`). The twin (`beta_f` 0.95,
+`rho` 1) with `Y` taking every batch and the frame retracted every `k` steps,
+against today's turn: signed difference in `cap` / `sig` x1e3.
+
+| tracker | 31-100 `o12` | `q12` | `w1` | 201-300 `o12` | `q12` | `w1` | travel 201-300 |
+|---|---|---|---|---|---|---|---|
+| twin, every step | +6 / -3 | +3 / -1 | +5 / -4 | +4 / -2 | +1 / -2 | +2 / -1 | 0.007-0.010 |
+| twin, every 5 | -1 / -9 | -5 / -10 | -2 / -15 | +3 / -2 | 0 / -3 | +2 / -2 | 0.003-0.004 |
+| twin, every 10 | -7 / -16 | -12 / -17 | -9 / -24 | +2 / -3 | -2 / -7 | 0 / -4 | 0.002-0.003 |
+| the tangent summed, turned every 10 (`every/10`) | 0 / -9 | -2 / -7 | 0 / -8 | -1 / -11 | -4 / -15 | -3 / -11 | 0.020 |
+
+Today's turn travels 0.020. At the fixed-weights steps (200, 250) the twin
+every step holds more of the source mean gradient (`sig` 0.894 / 0.823 / 0.743
+against 0.884 / 0.807 / 0.724) and ties on the target's (-4e-3 to +4e-3); every
+10 loses 25e-3 of the target's on `q12`. The twin every step ties today's turn
+late and is the nearest to it in 31-100; spacing its retraction out costs
+arrival. Summing the tangent for a turn every 10 arrives better than the twin
+every 10 and holds less `sig` from step 201. `w1` runs under `K` here, unlike
+the sketch replays above.
+
+The twin's polar factor from the release's Newton-Schulz, then one
+retraction, in place of the Gram `eigh`, reads the same to three digits on
+every row, every `k` and all three matrices. Over the run, Newton-Schulz alone
+leaves the frame up to 0.06 off orthonormal (worst `|QᵀQ - I|`), and the
+retraction brings it to 1.5e-4 (`o12`, `q12`, `w1` at `k` 1:
+`outputs/tools/replay_ortho.py`, `outputs/runs/replay-ortho-ns.log`). No timing
+was measured.
+
 ### On a small deep model the step costs 38% of training; alone, the GPU idles 60% of it
 
 2026-11-15, not an LFM lane: tiny-dit's nanodit d768x12 conv4 (77 tracked

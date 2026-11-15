@@ -121,7 +121,8 @@ Can the frame's rank evolve faster, and is energy the right thing for it to
 follow? Question, gates, the paper behind it and the candidate reads:
 `docs/topics/subspace-evolution.md`. State (2026-11-15): a warm frame matches
 an exact Gram EMA's; for finetuning the residual writers keep their output side
-(ARCHIVE); X5 is open for pretraining.
+(ARCHIVE); X5 is open for pretraining. The twin, Newton-Schulz every step,
+is the candidate tracker for a sync-free step on xside under `K` (FACTS, 2026-11-15).
 
 - X1. Archetype or detail: where does the gradient's energy lie?
 - X2. Settled or starved: is there persistent gradient outside a settled frame?
