@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 
 from usuitrack import UsuiTrack, copy_stochastic_
@@ -127,3 +128,70 @@ def test_stochastic_adamw_leaves_fp32_parameters_alone():
     optimizer.step()
     assert optimizer.state[weight]["exp_avg"].dtype is torch.float32
     assert torch.isfinite(weight).all()
+
+
+def _twin_optimizers(dtype: torch.dtype):
+    """The same AdamW on CPU (the eager loop) and CUDA (the kernel): two groups apart in every
+    scalar, sizes across a launch block, one tensor that skips a step."""
+    torch.manual_seed(0)
+    shapes = [(3,), (1000,), (33, 65), (4096,)]
+    cpu = [torch.nn.Parameter(torch.randn(*shape).to(dtype)) for shape in shapes]
+    cuda = [torch.nn.Parameter(p.detach().cuda()) for p in cpu]
+
+    def build(params):
+        return StochasticAdamW([{"params": params[:2]}, {"params": params[2:], "lr": 3e-3, "betas": (0.8, 0.95), "eps": 1e-6, "weight_decay": 0.1}],
+                               lr=1e-2, betas=(0.9, 0.99))
+
+    return cpu, cuda, build(cpu), build(cuda)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the Triton step runs on CUDA")
+@pytest.mark.parametrize("dtype,tolerance", [(torch.float32, 1e-6), (torch.float16, 1e-3)])
+def test_the_cuda_step_lands_where_the_eager_step_lands(dtype, tolerance):
+    """fp16 weights round to nearest from the same fp32 result, so they agree to an fp16 ulp."""
+    cpu, cuda, eager, kernel = _twin_optimizers(dtype)
+    for step in range(5):
+        for k, (a, b) in enumerate(zip(cpu, cuda)):
+            gradient = torch.randn_like(a) if not (step == 2 and k == 1) else None
+            a.grad, b.grad = gradient, None if gradient is None else gradient.cuda()
+        eager.step()
+        kernel.step()
+    for a, b in zip(cpu, cuda):
+        torch.testing.assert_close(b.cpu(), a, rtol=tolerance, atol=tolerance)
+        for name in ("exp_avg", "exp_avg_sq"):
+            torch.testing.assert_close(kernel.state[b][name].cpu(), eager.state[a][name], rtol=1e-5, atol=1e-7)
+        assert kernel.state[b]["step"] == eager.state[a]["step"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the Triton step runs on CUDA")
+def test_the_cuda_step_rounds_bf16_within_an_ulp_and_lands_a_sub_ulp_step_in_expectation():
+    """Against the fp32 maths: every element within one bf16 ulp of it, and a step of a
+    hundredth of an ulp landing on average, in the weight and in both moments."""
+    weight = torch.nn.Parameter(torch.ones(1 << 20, device="cuda", dtype=torch.bfloat16))
+    optimizer = StochasticAdamW([weight], lr=1e-4, betas=(0.9, 0.99))
+    weight.grad = torch.full_like(weight, 0.25)
+    optimizer.step()
+    # One step from zero moments: m = 0.025, v = 6.25e-4, so the bias-corrected update is lr, 1/39 of an ulp at 1.
+    expected = {"weight": 1.0 - 1e-4, "exp_avg": 0.025, "exp_avg_sq": 6.25e-4}
+    values = {"weight": weight.detach(), "exp_avg": optimizer.state[weight]["exp_avg"], "exp_avg_sq": optimizer.state[weight]["exp_avg_sq"]}
+    for name, value in values.items():
+        target = expected[name]
+        ulp = 2.0 ** (math.floor(math.log2(target)) - 7)  # bf16 keeps 8 significant bits
+        assert float((value.float() - target).abs().max()) <= ulp
+        assert abs(float(value.float().mean()) - target) < 0.02 * ulp
+
+
+def test_a_copied_optimizer_steps():
+    """deepcopy and pickle carry only torch's optimizer state; the CUDA step's tables are rebuilt."""
+    import copy
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    weight = torch.nn.Parameter(torch.randn(100, device=device, dtype=torch.bfloat16))
+    optimizer = StochasticAdamW([weight], lr=1e-3)
+    weight.grad = torch.randn_like(weight)
+    optimizer.step()
+    copied = copy.deepcopy(optimizer)
+    twin = copied.param_groups[0]["params"][0]
+    twin.grad = torch.randn_like(twin)
+    copied.step()
+    assert copied.state[twin]["step"] == 2

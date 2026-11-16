@@ -647,7 +647,11 @@ stochastic rounding buys on the matrix side. It is not a memory optimization --
 `torch.optim.AdamW` already stores moments in the parameter dtype -- it moves
 the moment recurrences and the parameter update into fp32 accumulators that are
 rounded once, instead of rounding on every in-place bf16 op. Sparse gradients
-raise.
+raise. On CUDA its step is one Triton launch per device and dtype (`usuitrack/adamw.py`):
+each program updates a block of one tensor, reached through tables of addresses, the weight's and
+both moments' rounding bits from philox as in the weight write. The eager loop, the same fp32 maths rounded
+once, runs off CUDA and for a non-contiguous or fp64 tensor, and a test holds the two together. A fallback of many small tensors costs a launch, not a dozen per
+tensor (`docs/FACTS.md` on `lab`, "The fused fallback").
 
 ## Persistent state
 

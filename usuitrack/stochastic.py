@@ -68,6 +68,10 @@ def round_into(target: Tensor, source: Tensor) -> None:
         target.copy_(source)
 
 
+# The dtypes the CUDA step's kernel takes (`adamw.py`); others, and non-contiguous tensors, take the eager loop.
+KERNEL_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+
+
 class StochasticAdamW(Optimizer):
     """AdamW that keeps parameters and moments in bf16 with stochastic rounding.
 
@@ -108,60 +112,69 @@ class StochasticAdamW(Optimizer):
         if weight_decay < 0.0:
             raise ValueError(f"weight_decay must be non-negative, got {weight_decay}")
         super().__init__(params, dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay))
+        self._tables: dict[tuple, tuple] = {}
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        # The CUDA step's address tables (`adamw.table`), per launch: the addresses they were built from, the table.
+        self._tables = {}
 
     @torch.no_grad()
     def step(self, closure=None):
+        """On CUDA one Triton launch per device and dtype (`adamw.py`); elsewhere a loop over tensors, the same
+        maths, which a test holds the kernel to."""
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
+        launches: dict[tuple, list] = {}
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
             lr = group["lr"]
-            eps = group["eps"]
-            weight_decay = group["weight_decay"]
-
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 if p.grad.is_sparse:
                     raise RuntimeError("StochasticAdamW does not support sparse gradients")
-
                 state = self.state[p]
-                stochastic = wants_stochastic_rounding(p)
-                state_dtype = p.dtype if stochastic else torch.float32
                 if not state:
+                    state_dtype = p.dtype if wants_stochastic_rounding(p) else torch.float32
                     state["step"] = 0
                     state["exp_avg"] = torch.zeros_like(p, dtype=state_dtype)
                     state["exp_avg_sq"] = torch.zeros_like(p, dtype=state_dtype)
                 state["step"] += 1
-                step = state["step"]
-
-                grad = p.grad.float()
-                exp_avg = state["exp_avg"].float()
-                exp_avg_sq = state["exp_avg_sq"].float()
-
-                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-
-                bias_correction1 = 1.0 - beta1**step
-                bias_correction2_sqrt = (1.0 - beta2**step) ** 0.5
-                denom = (exp_avg_sq.sqrt() / bias_correction2_sqrt).add_(eps)
-
-                work = p.float() if stochastic else p
-                if weight_decay:
-                    work.mul_(1.0 - lr * weight_decay)
-                work.addcdiv_(exp_avg, denom, value=-lr / bias_correction1)
-
-                if stochastic:
-                    # One rounding per tensor per step, at the end, after the
-                    # whole update has been accumulated in fp32.
-                    copy_stochastic_(p, work)
-                    copy_stochastic_(state["exp_avg"], exp_avg)
-                    copy_stochastic_(state["exp_avg_sq"], exp_avg_sq)
+                scalars = (beta1, beta2, group["eps"], 1.0 - lr * group["weight_decay"],
+                           lr / (1.0 - beta1 ** state["step"]), 1.0 / (1.0 - beta2 ** state["step"]) ** 0.5)
+                if p.is_cuda and p.dtype in KERNEL_DTYPES and p.is_contiguous() and p.grad.is_contiguous():
+                    launches.setdefault((p.device, p.dtype, state["exp_avg"].dtype), []).append((p, state, scalars))
                 else:
-                    state["exp_avg"].copy_(exp_avg)
-                    state["exp_avg_sq"].copy_(exp_avg_sq)
+                    _step_eager(p, state["exp_avg"], state["exp_avg_sq"], scalars)
 
+        for launch, members in launches.items():
+            from . import adamw
+
+            _device, dtype, state_dtype = launch
+
+            params = [p for p, _state, _scalars in members]
+            avgs = [state["exp_avg"] for _p, state, _scalars in members]
+            squares = [state["exp_avg_sq"] for _p, state, _scalars in members]
+            key = tuple((p.data_ptr(), a.data_ptr(), q.data_ptr(), p.numel()) for p, a, q in zip(params, avgs, squares))
+            if launch not in self._tables or self._tables[launch][0] != key:
+                self._tables[launch] = (key, adamw.table(params, avgs, squares))
+            adamw.step(self._tables[launch][1], [p.grad for p in params], [x for *_rest, scalars in members for x in scalars], dtype, state_dtype)
         return loss
+
+
+@torch.no_grad()
+def _step_eager(p: Tensor, avg: Tensor, square: Tensor, scalars: tuple[float, ...]) -> None:
+    """One tensor's AdamW step, its moments and update accumulated in fp32 and rounded once at the end."""
+    beta1, beta2, eps, decay, step_size, correction = scalars
+    grad = p.grad.float()
+    exp_avg = avg.float().mul_(beta1).add_(grad, alpha=1.0 - beta1)
+    exp_avg_sq = square.float().mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+    denom = (exp_avg_sq.sqrt() * correction).add_(eps)
+    work = p.float().mul_(decay).addcdiv_(exp_avg, denom, value=-step_size)
+    round_into(p, work)
+    round_into(avg, exp_avg)
+    round_into(square, exp_avg_sq)

@@ -50,9 +50,10 @@ Not yet on PyPI:
 uv add git+https://github.com/Nelathan/usuitrack
 ```
 
-Requires `torch>=2.1`, Python `>=3.11`. On CUDA the weight write is a Triton
-kernel, and Triton comes with torch's Linux CUDA wheels. It is measured on one
-Ada card; its lift runs in TF32, untried on cards older than Ampere. Off CUDA
+Requires `torch>=2.1`, Python `>=3.11`. On CUDA the weight write, the polar
+map's `r x r` iterations and `StochasticAdamW`'s step are Triton kernels, and
+Triton comes with torch's Linux CUDA wheels. It is measured on one
+Ada card; the write's lift runs in TF32, untried on cards older than Ampere. Off CUDA
 the optimizer is plain PyTorch.
 
 ## Use
