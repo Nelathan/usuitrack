@@ -1,6 +1,6 @@
 # Handover
 
-Written 2026-10-28, updated 2026-11-15. Orientation only; `PLAN.md` carries the questions,
+Written 2026-10-28, updated 2026-11-16. Orientation only; `PLAN.md` carries the questions,
 `FACTS.md` the insights, `AGENTS.md` how to run things.
 
 ## Group V, 2026-11-15 (read this first)
@@ -12,6 +12,11 @@ in-span part needs fp32"); `side` defaults to `right`, and the harness runs Mole
 Chapter 2 (`||Z||` once, phase two per matrix) and chapter 3 (blocks: SPEC "Blocks", FACTS "Blocks take
 nanodit's `step()` from 140 to about 62 ms") are in. A block is a run of same-shaped matrices in param order under a
 256 MiB cap, not a model block, which the optimizer cannot see. Compact after each chapter is committed.
+Night of 2026-11-16: chapter 4's seam is a proposal in the topic, unbuilt; chapter 5's read finds the step
+GPU-bound after blocks, so no graph was built; chapter 6's fused write is a prototype in
+`outputs/tools/fused_write.py` (FACTS, "A fused Triton write cuts nanodit's step by about 18 ms"), waiting on
+the three decisions listed under chapter 6. To review, each read by a review subagent: `af8ef61`, `6698f19`,
+`ea3092b`, `5ba1ae4`, `b4edb07`.
 
 ## Group X, 2026-11-15
 
