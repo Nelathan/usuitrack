@@ -1917,6 +1917,41 @@ by under 0.005. Same harness as the table, micro-batch 64, two A/B pairs (`outpu
 178 to 138 ms and `step()` 49 to 42 at rank 0.1: Molegrad's padding, the polar on the Gram and ranks in steps of
 32 between them, not separated. The training step, by phase sums, goes from 316 to 258 ms.
 
+### Full space wins wall time at every shape, and GPU time against `r = 32` up to `s = 128`
+
+2026-11-16, PLAN X5. One block's step on bf16 `[2048, s]` and `[s, 2048]`, synthetic `.grad`: tracked, the
+release's `step()` with the rank patched; full, a hand-written loop of the step full space would run (`Z = G`
+oriented to the short side, the blend, the unit polar, the CUDA write with frame `I` -- the lift the build skips
+kept in). The full arm skips the optimizer's per-matrix bookkeeping, so its wall is a lower bound and the wall
+gap is not all tracking's launches. Wall per step over 30 steps, GPU kernel time per step from the profiler
+(`outputs/tools/full_space_bench.py`, `outputs/full_space_bench.log`; the full arm with the polar kernel at
+widths up to 64 only, `outputs/full_space_cap64.log`). Wall / GPU ms, 12 matrices, the two orientations' range:
+
+| s | full | tracked r 32 | r 64 | r 96 |
+|---|---|---|---|---|
+| 68 | 1.64 / 0.62-0.63 | 3.55 / 0.75-1.02 | | |
+| 96 | 1.65-1.66 / 0.67-0.70 | 3.53-3.55 / 0.76-1.03 | | |
+| 128 | 1.65-1.66 / 0.77-0.79 | 3.53-3.54 / 0.78-1.06 | 3.57-3.59 / 1.25-1.56 | |
+| 192 | 1.64-1.68 / 1.33-1.37 | 3.55-3.61 / 0.84-1.13 | 3.60-3.62 / 1.32-1.64 | 3.66-3.67 / 2.28-2.61 |
+| 256 | 1.90-1.95 / 1.85-1.90 | 3.56-3.59 / 0.91-1.19 | 3.58-3.63 / 1.39-1.71 | 3.63-3.70 / 2.37-2.74 |
+
+On GPU time full space is under `r = 32` at `s = 68-96`, ties it at 128, and above crosses near `r = s/3` (ties
+`r = 64` at 192, lies between `r = 64` and 96 at 256); at `r = s/4` above 128 tracking is cheaper, 1.39-1.71
+against 1.85-1.90 at 256. The polar kernel at its cap of 96 runs the full arm at `s = 68` and 96 in 0.96-1.03 ms
+wall and 0.94-1.01 GPU (the first log). One matrix alone: 1.3-1.8 ms wall and 0.18-0.28 GPU in both arms. The
+frame on the long side costs the tracked arm 0.3 ms GPU more. State goes the other way: full space holds
+`[long, s]` against `[long, r]` plus `2 s r + r²`, 2x at `patch_embed`'s 2048x68 under `r = 32`, 3.5x at
+`s = 128`, the most the quarter admits at the 32 grid. The user takes full space from `r >= s/4`, wall over GPU
+time and state: a rule, not a measured crossing.
+
+The `r x r` Gram kernel runs one program per matrix. CUDA events, back-to-back calls of `FOLLOW_SCHEDULE`
+(`outputs/tools/gram_kernel_bench.py`, `outputs/gram_kernel_bench.log`): kernel 0.04 ms at width 32, 0.24 at 64,
+0.67-0.75 at 68 and 96 at any stack of 1 to 56, 1.5 at 128 (2.2 from 28 matrices up); the eager loop ~1.0 ms
+everywhere, its launches. GPU kernel time (profiler, `outputs/tools/gram_eager_gpu.py`,
+`outputs/gram_eager_gpu.log`), 1 and 12 matrices: kernel 0.26, 0.75 and 1.69 ms at 64, 96 and 128; eager 0.15-0.24,
+0.15-0.32 and 0.15-0.39. At 128 the kernel loses on both counts; at 96 it wins against the launches and costs
+0.4-0.6 ms GPU more per call where the step is GPU-bound. The user caps it at 96.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
