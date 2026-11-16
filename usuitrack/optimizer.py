@@ -36,6 +36,8 @@ FRAME_INITS = ("range_finder", "random")
 # `lab`, "On a small deep model the step costs 38% of training"); as a peak on
 # LFM3 or Anima, unmeasured.
 BLOCK_BYTES = 256 * 2**20
+# The CUDA write launches one grid row per member, and a grid's third axis holds 65535.
+BLOCK_MEMBERS = 65535
 
 # The state a block holds as one buffer per entry, each matrix's a view into it.
 BLOCK_STATE = ("frame", "frame_moment", "frame_moment_span", "moment")
@@ -74,6 +76,8 @@ class Block:
     """`[b]`, fp32: each matrix's norm before its first write, under `norm_bounds`."""
     indices: dict[tuple[int, ...], Tensor] = field(default_factory=dict)
     """Device index tensors for steps that reach only some members, made once per subset."""
+    pointers: dict[tuple[int, ...], Tensor] = field(default_factory=dict)
+    """The CUDA write's tables of weight addresses, made once per set of addresses."""
 
     def index(self, members: list[int]) -> Tensor | None:
         """`None` for the whole block, which then reads its buffers as they are."""
@@ -84,6 +88,12 @@ class Block:
         if key not in self.indices:
             self.indices[key] = torch.tensor(members, device=self.params[0].device)
         return self.indices[key]
+
+    def pointer_table(self, params: list[Tensor]) -> Tensor:
+        key = tuple(param.data_ptr() for param in params)
+        if key not in self.pointers:
+            self.pointers[key] = torch.tensor(key, dtype=torch.int64, device=params[0].device)
+        return self.pointers[key]
 
     def take(self, name: str, index: Tensor | None) -> Tensor:
         buffer = self.buffers[name]
@@ -209,7 +219,8 @@ class UsuiTrack(Optimizer):
 
     def _form_blocks(self, group: dict) -> None:
         """Split a group into blocks: one per side and shape (and device, dtype), in
-        param order, a new one each time the open one's work would pass `BLOCK_BYTES`.
+        param order, a new one each time the open one's work would pass `BLOCK_BYTES` or
+        its members `BLOCK_MEMBERS`.
         Formed at the group's first frame, so side and rank are read when they first matter."""
 
         open_blocks: dict[tuple, Block] = {}
@@ -218,7 +229,7 @@ class UsuiTrack(Optimizer):
             rank = frame.rank(param.shape, group["rank_fraction"])
             key = (param.device, param.dtype, side, tuple(param.shape))
             block = open_blocks.get(key)
-            if block is None or (len(block.params) + 1) * _work_bytes(param, rank) > BLOCK_BYTES:
+            if block is None or len(block.params) == BLOCK_MEMBERS or (len(block.params) + 1) * _work_bytes(param, rank) > BLOCK_BYTES:
                 block = open_blocks[key] = Block([], side, rank)
             self._block_of[param] = (block, len(block.params))
             block.params.append(param)
@@ -422,52 +433,73 @@ class UsuiTrack(Optimizer):
         return moment
 
     def _write_weights(self, group: dict, block: Block, index: Tensor | None, params: list[Tensor], direction: Tensor, frames: Tensor) -> None:
-        """SPEC step 8: `W -= lr size lift(O)` for each member, decay folded in, rounded once."""
+        """SPEC step 8: `W -= lr size lift(O)` for each member, decay folded in, rounded once;
+        on CUDA by the Triton write (`write.py`), elsewhere in eager PyTorch."""
 
-        lift = frame.orient(direction @ frames.float().mT, block.side)
-        # One member is written in place; more are stacked, then copied back in one call.
-        weights = params[0].unsqueeze(0) if len(params) == 1 else torch.stack(params)
+        lr = group["lr"]
+        decay = 1.0 - lr * group["weight_decay"]
+        fixed_scale = None
         if group["step_rule"] == "fixed":
             # Muon's aspect factor on the stored [out, in] shape, times the polar factor's norm.
             rows, cols = params[0].shape
-            scale = group["lr"] * math.sqrt(max(1.0, rows / cols) * block.rank)
+            fixed_scale = lr * math.sqrt(max(1.0, rows / cols) * block.rank)
+        bounds = group["norm_bounds"]
+        reference = None if bounds == (None, None) else self._reference_norms(block, index, params)
+        if params[0].is_cuda:
+            from .write import write_block
+
+            scale = write_block(params, block.pointer_table(params), block.side, direction, frames, decay, lr, fixed_scale, bounds, reference)
         else:
-            scale = group["lr"] * torch.linalg.vector_norm(weights, dim=(-2, -1), keepdim=True, dtype=torch.float32)
-        written = weights.float() * (1.0 - group["lr"] * group["weight_decay"]) - scale * lift
-        low, high = group["norm_bounds"]
-        if (low, high) != (None, None):
-            written = self._bound_norm(block, index, params, weights, written, low, high)
-        round_into(weights, written)
-        if len(params) > 1:
-            torch._foreach_copy_(params, list(weights.unbind(0)))
+            scale = _write_eager(block, params, direction, frames, decay, lr, fixed_scale, bounds, reference)
         if self.diagnostics is not None:
             # The lift is an isometry, so `||U|| = ||O|| lr size` without a pass over `W`.
-            self.diagnostics.update(params, (torch.linalg.vector_norm(direction, dim=(-2, -1), keepdim=True) * scale).flatten())
+            self.diagnostics.update(params, torch.linalg.vector_norm(direction, dim=(-2, -1)) * scale)
 
-    def _bound_norm(self, block: Block, index: Tensor | None, params: list[Tensor], weights: Tensor, written: Tensor, low: float | None, high: float | None) -> Tensor:
-        """SPEC step 8, norm bounds: clamp `||W||` into `[low R, high R]`, `R` the norm before the first write."""
+    def _reference_norms(self, block: Block, index: Tensor | None, params: list[Tensor]) -> Tensor:
+        """SPEC step 8, norm bounds: each member's `R`, its norm before its first write, `[b]`."""
 
         fresh = [member for member, param in enumerate(params) if "init_norm" not in self.state[param]]
         if fresh:
-            norms = torch.linalg.vector_norm(weights[fresh], dim=(-2, -1), dtype=torch.float32)
+            norms = torch.stack([torch.linalg.vector_norm(params[member], dtype=torch.float32) for member in fresh])
             # One host read, on a matrix's first step only.
             if bool((norms == 0.0).any()):
                 raise ValueError("UsuiTrack: norm_bounds are relative to a matrix's first norm, and this matrix starts at zero")
             for member, norm in zip(fresh, norms.unbind(0)):
                 self._hold_init_norm(params[member], norm)
-        reference = (block.init_norm if index is None else block.init_norm[index])[:, None, None]
+        return block.init_norm if index is None else block.init_norm[index]
+
+
+def _write_eager(block: Block, params: list[Tensor], direction: Tensor, frames: Tensor, decay: float, lr: float,
+                 fixed_scale: float | None, bounds: tuple, reference: Tensor | None) -> Tensor:
+    """`write_block`'s maths without its kernel: the members are stacked, written, rounded and copied back."""
+
+    lift = frame.orient(direction @ frames.float().mT, block.side)
+    # One member is written in place; more are stacked, then copied back in one call.
+    weights = params[0].unsqueeze(0) if len(params) == 1 else torch.stack(params)
+    if fixed_scale is None:
+        scale = lr * torch.linalg.vector_norm(weights, dim=(-2, -1), dtype=torch.float32)
+    else:
+        scale = torch.full((len(params),), fixed_scale, device=weights.device)
+    written = weights.float() * decay - scale[:, None, None] * lift
+    low, high = bounds
+    if (low, high) != (None, None):
         norm = torch.linalg.vector_norm(written, dim=(-2, -1), keepdim=True)
-        bounded = norm.clamp(None if low is None else low * reference, None if high is None else high * reference)
-        return written * (bounded / norm.clamp_min(1e-12))
+        bounded = norm.clamp(None if low is None else low * reference[:, None, None], None if high is None else high * reference[:, None, None])
+        written = written * (bounded / norm.clamp_min(1e-12))
+    round_into(weights, written)
+    if len(params) > 1:
+        torch._foreach_copy_(params, list(weights.unbind(0)))
+    return scale
 
 
 def _work_bytes(param: Tensor, rank: int) -> int:
-    """A matrix's share of its block's transient: the stacked weight and the four fp32
-    temporaries live at the write's peak (the lift, the decayed copy, the scaled lift, the
-    result), and about four fp32 copies of its moment and frame."""
+    """A matrix's share of its block's transient: about four fp32 copies of its moment and
+    frame, and off CUDA the eager write's stacked weight and its four fp32 temporaries (the
+    lift, the decayed copy, the scaled lift, the result); the CUDA write holds none."""
 
     rows, cols = param.shape
-    return (param.element_size() + 16) * rows * cols + 16 * (rows + cols) * rank
+    write = 0 if param.is_cuda else (param.element_size() + 16) * rows * cols
+    return write + 16 * (rows + cols) * rank
 
 
 def _valid_bounds(bounds) -> bool:

@@ -413,6 +413,73 @@ def test_a_block_steps_its_matrices_as_each_would_step_alone(monkeypatch, block_
             torch.testing.assert_close(optimizer.state[together[k]][name], solo[k].state[separate[k]][name], rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the Triton write runs on CUDA")
+@pytest.mark.parametrize("side,bounds,fixed", [("right", (None, None), False), ("left", (None, 0.99), False), ("right", (1.0, 1.0), True)])
+def test_the_cuda_write_lands_where_the_eager_write_lands(side, bounds, fixed):
+    """Against the eager maths in fp32: fp32 weights take the same step up to the lift's
+    TF32 error, and bf16 weights take it in expectation, within an ulp of it."""
+    from usuitrack.optimizer import Block, _write_eager
+    from usuitrack.write import write_block
+
+    torch.manual_seed(0)
+    count, rows, cols, rank = 3, 200, 136, 40
+    length, other = (cols, rows) if side == "right" else (rows, cols)
+    start = torch.randn(count, rows, cols, device="cuda") * 0.02
+    frames = torch.linalg.qr(torch.randn(count, length, rank, device="cuda"))[0].bfloat16()
+    direction = unit_polar(torch.randn(count, other, rank, device="cuda"))
+    reference = torch.linalg.vector_norm(start, dim=(-2, -1))
+    lr, decay = 2e-2, 1.0 - 2e-2 * 0.1
+    fixed_scale = lr * math.sqrt(rows / cols * rank) if fixed else None
+    for dtype in (torch.float32, torch.bfloat16):
+        params = [weight.to(dtype) for weight in start]
+        before = torch.stack(params).float()
+        expected = list(before.clone().unbind(0))
+        block = Block(expected, side, rank)
+        _write_eager(block, expected, direction, frames, decay, lr, fixed_scale, bounds, reference)
+        expected = torch.stack(expected)
+        step = expected - before
+        write_block(params, block.pointer_table(params), side, direction, frames, decay, lr, fixed_scale, bounds, reference)
+        written = torch.stack(params).float()
+        if dtype is torch.float32:
+            assert torch.linalg.vector_norm(written - expected) < 1e-3 * torch.linalg.vector_norm(step)
+        else:
+            assert abs(((written - before) * step).sum() / step.square().sum() - 1.0) < 2e-2
+            ulp = expected.abs().bfloat16().float() * 2.0**-7
+            assert ((written - expected).abs() <= ulp * 1.01 + 1e-3 * step.abs().max()).all()
+        if bounds == (1.0, 1.0):
+            torch.testing.assert_close(torch.linalg.vector_norm(written, dim=(-2, -1)), reference, rtol=1e-2 if dtype is torch.bfloat16 else 1e-5, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the Triton write runs on CUDA")
+def test_the_cuda_write_lands_a_sub_ulp_step_in_expectation():
+    """A bf16 step of about a hundredth of an ulp moves each entry by a whole ulp with
+    that probability, so the step survives on average rather than rounding away."""
+    from usuitrack.optimizer import Block, _write_eager
+    from usuitrack.write import write_block
+
+    torch.manual_seed(0)
+    count, rows, cols, rank = 4, 512, 384, 32
+    start = (torch.randn(count, rows, cols, device="cuda") * 0.02).bfloat16()
+    frames = torch.linalg.qr(torch.randn(count, cols, rank, device="cuda"))[0].bfloat16()
+    direction = unit_polar(torch.randn(count, rows, rank, device="cuda"))
+    before = start.float()
+    expected = list(before.clone().unbind(0))
+    _write_eager(Block(expected, "right", rank), expected, direction, frames, 1.0, 1e-5, None, (None, None), None)
+    step = torch.stack(expected) - before
+    params = [weight.clone() for weight in start]
+    write_block(params, Block(params, "right", rank).pointer_table(params), "right", direction, frames, 1.0, 1e-5, None, (None, None), None)
+    moved = torch.stack(params).float() - before
+    # bf16's spacing at each entry, from its fp32 bits (bf16 is their top half).
+    magnitude = before.abs()
+    ulp = (magnitude.view(torch.int32) + (1 << 16)).view(torch.float32) - magnitude
+    # Entries near zero take steps of many ulps, and at a power of two the spacing below is half.
+    sub_ulp = (step.abs() < 0.5 * ulp) & (magnitude.view(torch.int32) & 0x7F0000 != 0)
+    assert sub_ulp.float().mean() > 0.9
+    expected_moves = (step.abs() / ulp)[sub_ulp].sum()
+    assert abs((moved != 0)[sub_ulp].sum() / expected_moves - 1.0) < 0.05
+    assert abs((moved * step).sum() / step.square().sum() - 1.0) < 0.1
+
+
 def test_a_block_resumes_from_a_checkpoint_as_if_never_stopped():
     torch.manual_seed(2)
     first = [torch.nn.Parameter(torch.randn(ROWS, COLS)) for _ in range(3)]

@@ -441,6 +441,16 @@ discards every step. `U` is never cast to `W`'s dtype on the way in; a single
 rounding happens at the write, with weight decay folded into the same
 accumulator so it is not rounded twice. See `usuitrack/stochastic.py`.
 
+**The write on CUDA** is one Triton kernel in two passes per block (`usuitrack/write.py`); off
+CUDA the same maths runs in eager PyTorch, and a test holds the two together. The measure pass
+reads `W` for `||W||^2`, and under norm bounds also `<W, L>` and `||L||^2`, so the clamp's factor
+comes from `||aW - sL||^2 = a^2||W||^2 - 2as<W, L> + s^2||L||^2` with no pass over the result;
+the write pass reads and writes `W` once, through a table of the members' addresses. Both form
+the lift `L` from the rank-sized factors in registers, in TF32: its error is about `1e-3` of a
+step, which stochastic rounding's variance hides (`docs/FACTS.md` on `lab`, "A fused Triton
+write"). The rounding bits come from philox under a seed drawn from torch's CUDA generator per
+block, so a seeded run reproduces, with draws other than the eager path's.
+
 Stochastic rounding keeps the expectation and pays in variance. A coordinate
 whose update `u` is below its ulp moves by a whole ulp with probability
 `|u| / ulp`, so after `N` steps the weights sit a random walk of variance
@@ -492,20 +502,22 @@ themselves, plus a frame fitted on a first step.
 
 A group's matrices step in blocks: matrices of one side, shape, device and dtype,
 taken in param order, a block closing once its members' batched work would pass
-`BLOCK_BYTES` (256 MiB). A member's work is its share of the write -- the stacked
-weight and four fp32 temporaries at the write's peak, 18 bytes an entry for bf16 --
-plus about four fp32 copies of its moment and frame. A group forms its blocks at its
-first frame, from its side and `rank_fraction` then, and a block allocates its
-buffers whole at its first frame, so a member that never trains holds zeroed state.
+`BLOCK_BYTES` (256 MiB) or its members `BLOCK_MEMBERS` (65535: the CUDA write
+launches a grid row per member, and that axis holds 65535). A member's work is about four fp32 copies of
+its moment and frame, plus, off CUDA, its share of the eager write -- the stacked
+weight and four fp32 temporaries at the write's peak, 18 bytes an entry for bf16;
+the CUDA write holds none. A group forms its blocks at its first frame, from its
+side and `rank_fraction` then, and a block allocates its buffers whole at its first
+frame, so a member that never trains holds zeroed state.
 
 A block holds each state entry (Persistent state) as one `[b, ...]` buffer, and each
 member's state is a view into it, so phase two runs as batched calls on the buffers
 themselves: a step's launch count follows its blocks, not its matrices. The weights
-belong to the model, so a block stacks them for the write and copies them back in one
-call; a block of one writes in place. A step that reaches only some members gathers
-their state and scatters it back; the others keep their weights and state. A block
-steps the members that fitted their frame this step apart from those that aim, since
-only the second move their frame.
+belong to the model: the CUDA write reaches them through their addresses, and the
+eager write stacks them and copies them back in one call, a block of one in place.
+A step that reaches only some members gathers their state and scatters it back; the
+others keep their weights and state. A block steps the members that fitted their
+frame this step apart from those that aim, since only the second move their frame.
 
 Under Molegrad a fit made in the backward waits in the module's own tensor and enters
 its block at `prepare()`: the block's frames share one buffer, and so one autograd
