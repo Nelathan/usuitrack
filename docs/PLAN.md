@@ -119,6 +119,13 @@ side"). The twin, Newton-Schulz every step, is the release's tracker (SPEC step 
 - X2. Settled or starved: is there persistent gradient outside a settled frame?
 - X3. Is energy the right admission rule?
 - X4. Does aggregate-then-polar reach the paper's wall?
+- X5. Narrow matrices and empty planes (user, 2026-11-16). Ranks in steps of 32 put a short side under 64
+  at its half cap (LFM3's 16x2048 at 8; Anima's `patch_embed` 2048x68 at 32, `proj_out` 64x2048 at 32),
+  and a moment that fills `k` of `r` planes steps at `sqrt(k/r)` of `lr` (FACTS, "`relative_step` under
+  `lr` on Anima is AdaLN's empty planes"). Candidates: the full space below a short side of 64 (`Q = I`, no
+  tracker); the raw ask below one step; the fallback; the unit sized by the polar's own norm rather than
+  `1/sqrt(r)`, which changes AdaLN's step about 1.5x. The half cap's reason was `eigh` on an empty
+  residual (ARCHIVE, "the `min(m,n)/2` rank cap"); the twin has none, unmeasured near full rank.
 
 ---
 
