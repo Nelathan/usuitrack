@@ -89,6 +89,14 @@ Each chapter is one or more reviewed commits, then a compaction.
      it around tiny-dit's loop, which can be adapted to fit.
    - The side stream's transients run beside the forward's activations, so the step's peak moves into the
      forward's. Unmeasured.
+   *Read after chapter 6, 2026-11-16, the go/no-go:* nanodit's training step, every group on the input side,
+   synced per phase without the profiler: forward 77 ms, backward 178, UsuiTrack's `step()` 49, the fallback
+   AdamW 12 (`outputs/tools/nanodit_phase_wall.py`, `outputs/nanodit_phase_wall.log`). Under the profiler
+   (`nanodit_phase_idle.py`, its log) the forward leaves about 19 ms of GPU idle over four micro-batches and the
+   backward about 15, so the last backward and the first forward hold about 4-5 ms each; `step()` is GPU work
+   now, not launches. Hiding it there buys at most about 10-15 ms of a 316 ms step unless a side stream shares
+   SMs with the forward's kernels, unmeasured. The fallback AdamW, a per-tensor loop over 70 tensors, spends
+   about 10 of its 12 ms on the host.
 5. **CUDA graph.** The graph covers the step only. Forward and backward are compiled blocks already, and graphing
    them is a separate matter. The deferred tracker comes first: it is pure optimizer state at static addresses once
    chapter 3 is done. Prerequisites:
