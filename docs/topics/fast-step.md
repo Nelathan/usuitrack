@@ -131,6 +131,11 @@ Each chapter is one or more reviewed commits, then a compaction.
 
 ## Open nuance (do not lose)
 
+- **A second `r x r` kernel for widths 97-128.** The kernel's one program per matrix makes it 1.5 ms per call at
+  128, above the eager loop's ~1 ms of launches, so the cap is 96 (FACTS, "Full space wins wall time
+  at every shape"). A version tuned for the wide end (more warps, 64-wide tiles) would bring 97-128 back (user: "makes
+  sense here, not now").
+
 - **Clip instead of normalize `Z`, and clip to what?** One candidate is `||Z||` capped at `c` times a running
   (log-space) EMA of `||Z||`. That keeps magnitude information and caps bursts. Unmeasured; PLAN V1,
   not a chapter. The user once logged `||Z|| / ||M||`: strongly `beta`-dependent, about 4-5 at `beta` 0.90.

@@ -18,7 +18,7 @@ graph is dropped (you). Molegrad reads a held frame at backward (`0718526`), whi
 tracker to move frames during the next forward. Chapter 4 is next, its seam around tiny-dit's loop, which
 knows its last micro-batch. The frame's polar stays Newton-Schulz's five steps: one Polar Express step loses
 most of the capture, since `Q+Y` has a condition number of 35-55 (FACTS, "One polar step cannot follow").
-Both polar maps now run on the `r x r` Gram, a Triton kernel up to `r = 128` (`usuitrack/gram.py`; topic,
+Both polar maps now run on the `r x r` Gram, a Triton kernel up to `r = 96` (`usuitrack/gram.py`; topic,
 "the polar on the Gram"). Ranks now come in steps of 32, to the nearest, capped at 256 (SPEC "Coordinates"); FACTS
 numbers before 2026-11-16 ran the old per-plane rule. `StochasticAdamW` steps in one Triton launch on
 CUDA (`usuitrack/adamw.py`; FACTS, "The fused fallback"). The 32 grid holds above 128 too (user; aligned ranks

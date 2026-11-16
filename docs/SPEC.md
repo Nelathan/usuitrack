@@ -42,8 +42,8 @@ Rank is not configured per matrix. One model-wide `rank_fraction` `c`
 $$r=\min\!\left(32\max\!\left(1,\ \operatorname{round}(c\sqrt{mn}/32)\right),\ 256,\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right),$$
 
 halves rounding up. The step of 32 is the polar kernel's tile (step 7), which pads an `r x r`
-matrix to it anyway up to `r = 128`, so a rank between steps would pay for planes it does not
-track; rounding to the nearest step keeps `c` the fraction it names, within 16 planes. Above 128
+matrix to it anyway up to `r = 96`, so a rank between steps would pay for planes it does not
+track; rounding to the nearest step keeps `c` the fraction it names, within 16 planes. Above 96
 the batched GEMMs run unpadded, and the steps hold for one grid of ranks. The ceiling of 256
 bounds the frame's `r x r` work.
 
@@ -360,7 +360,7 @@ Every iterate is `X_0 C_k` with `C_k` a polynomial in the short-side Gram `G = X
 (the tall orientation), so the schedule runs on `G`: with `M = C^T G C`, the iterate's Gram, and
 `P = aI + bM + cM^2`, an iteration is `C <- PC`, `M <- P^2 M`, every factor commuting. `G` and the
 closing `X_0 C` are the only passes over `d r^2`, against two per iteration on `X`. On CUDA, up to
-`r = 128`, the `r x r` iterations are one Triton program per matrix (`usuitrack/gram.py`), its
+`r = 96`, the `r x r` iterations are one Triton program per matrix (`usuitrack/gram.py`), its
 products in tf32x3; above that and off CUDA, batched GEMMs run the same loop, and a test holds the
 two together. The Gram squares `X`'s condition number; LFM3's moments keep their smallest singular
 value at `5e-3` of the largest or more, and the route reads as the iteration on `X` to three digits

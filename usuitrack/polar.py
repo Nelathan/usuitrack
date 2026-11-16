@@ -20,8 +20,9 @@ NEWTON_SCHULZ_COEFFICIENTS = (
     (2.8366, -3.0525, 1.2012),
 )
 # The r x r iterations run in one Triton program per matrix up to this rank (`gram.py`): one program cannot
-# spread a wider matrix across the GPU, and batched GEMMs carry it faster there.
-KERNEL_RANK = 128
+# spread a wider matrix across the GPU. At 128 it is slower than the batched GEMMs' launches; at 96 faster than
+# their launches, slower than their GPU time.
+KERNEL_RANK = 96
 
 
 def newton_schulz(matrix: Tensor, schedule: tuple[tuple[float, float, float], ...] = NEWTON_SCHULZ_COEFFICIENTS) -> Tensor:
