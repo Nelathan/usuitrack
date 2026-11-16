@@ -98,17 +98,8 @@ against 4.09 s/step (FACTS, "UsuiTrack against a memory-matched LoRA"). Open:
   the LFM3 null pair (FACTS, "Run-to-run noise"); repeated with other rounding
   draws at the same seed, 1.3e-3 at step 100 and under at all ten. A second
   seed of both arms says whether the diagonal aim buys it.
-- The next saving (FACTS, "Where the S2 step's time goes"). The weight write
-  is eager (ARCHIVE, "the release's weight write is eager"); a runner can
-  compile it for 0.22 s/step. Past it the step is host-bound, ~155 ms of idle GPU in the optimizer and ~37 ms in `prepare`,
-  which only a CUDA graph over the post-backward work reaches. That needs the
-  release diagnostics to accumulate in place with static counts, `lr` as a
-  device tensor, and molegrad's leaves to keep their grads; optional (user,
-  2026-10-30: ~5%, clean code first). A Triton write grouped by shape is the
-  other lever (user, 2026-11-01); it needs a GPU-only release or a second
-  implementation. First, a profile of today's tree splitting host time into
-  optimizer, lab diagnostics and molegrad's backward. Parked until the user
-  picks it up.
+- The next saving is Group V's (`docs/topics/fast-step.md`): on CUDA the
+  weight write is a Triton kernel, and the CUDA graph is dropped (user).
 - Accumulation works under molegrad (FACTS, "S2 accumulates"), 6e-4 from the
   unsplit step, holding no gradient: S1's answer for a user who opts in. S1
   stays open for the `G` path.
@@ -135,9 +126,8 @@ side"). The twin, Newton-Schulz every step, is the release's tracker (SPEC step 
 
 The step is launch-bound on small, deep models. Decisions, chapters, baselines and open nuance:
 `docs/topics/fast-step.md`. State (2026-11-16): chapters 1-3 are in (the defaults; `||Z||` once; blocks,
-FACTS "Blocks take nanodit's `step()` from 140 to about 62 ms"). Chapter 4's seam is proposed, chapter 5's
-graph read after blocks finds the step GPU-bound, and chapter 6's fused write is a measured prototype that
-waits on three decisions (topic, chapter 6).
+FACTS "Blocks take nanodit's `step()` from 140 to about 62 ms") and 6 (the CUDA write); chapter 5's graph
+is dropped; chapter 4, the write in the last backward, is next, its seam shaped around tiny-dit's loop.
 
 - V1. Clip instead of normalize `Z`, and clip to what? (topic, "Open nuance")
 

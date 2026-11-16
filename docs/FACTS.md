@@ -1798,28 +1798,35 @@ matrix, under the cap's estimate of 19.6. LFM3, standard arm, 100 steps
 floor; 3.41 against 3.88 s/step; optimizer peak 4.90 against 5.42 GB allocated,
 backward peak 7.38 against 7.49.
 
-### A fused Triton write cuts nanodit's step by about 18 ms of GPU time, LFM3's by 0.11 s
+### The CUDA write takes nanodit's `step()` from 79 to 45 ms, and LFM3's step 0.2-0.6 s faster
 
-2026-11-16, fast-step chapter 6 prototype, not in the release (`outputs/tools/fused_write.py`, patched over
-`_write_weights` by a runner). SPEC step 8 as two Triton passes per block through a table of weight pointers,
-nothing stacked: one reads `W` for `||W||^2`, and under norm bounds also `<W, L>` and `||L||^2`, which give the
-clamp's factor without a pass over the result; the other writes `round_sr(alpha W - sigma L)`. The write, and
-the measure under norm bounds, form the lift `L` in registers from the moment's polar factor and the frame. With an fp32 (`ieee`) `tl.dot` the two
-passes cost 22 ms on nanodit (no tensor cores, the lift formed twice at rank 77) and the step does not gain;
-with TF32 they cost 4.1-4.8 ms. TF32's error does not show above stochastic rounding's: at lr 2e-3 and 4e-5 the
-error's RMS against the eager fp32 result matches `ieee`'s to 3 digits, and the realized step projects onto
-the intended one at 0.9995-1.0007 under both (`outputs/tools/fused_write_precision.py`). Against the eager
-formula's fp32 result, `ieee` lands within 1.125 bf16 ulp with a mean error of 3e-5 to 1e-3 ulp, and its
-written norm reads 1.00000 of the reference under `(1, 1)` (`outputs/tools/fused_write_check.py`, logs in
-`outputs/fused_write_check.log` and `outputs/fused_write_precision.log`). nanodit, the chapter 5 profile, paired over
-two passes each (`outputs/tools/fused_write_bench.py`, `outputs/nanodit_fused_write_tf32_bench.log`; `ieee`
-in `outputs/nanodit_fused_write_bench.log`): summed GPU time 52-53 against 68-73 ms per step, unsynced wall
-62-63 against 77. LFM3, standard arm, two pairs of 50 steps back to back (`outputs/runs/pair*-50*.log`,
-eval time matched to 0.5%): 3.79 against 3.89 and 3.78 against 3.90 s/step; optimizer peak 4.69 against
-4.89 GB. Its 100-step run reads target 1.423447 against blocks' 1.423493, source 2.677483 against 2.677134,
-both inside the floor (`outputs/runs/fusedwrite-s1-100.log`; its own s/step is not comparable, as eval ran
-16% slower on that machine state). The random bits come from philox under a seed drawn from torch's CUDA
-generator, not from `randint_like`.
+2026-11-16, fast-step chapter 6 (`8cba722`, SPEC step 8 "The write on CUDA"). TF32 in the lift costs nothing
+measurable: with an fp32 (`ieee`) `tl.dot` the prototype's two passes cost 22 ms on nanodit (no tensor cores,
+the lift formed twice at rank 77), with TF32 4.1-4.8 ms; at lr 2e-3 and 4e-5 the error's RMS against the eager
+fp32 result matches `ieee`'s to 3 digits, and the realized step projects onto the intended one at 0.9995-1.0007
+under both (`outputs/tools/fused_write_precision.py`, `outputs/fused_write_precision.log`).
+
+nanodit's 77 matrices on synthetic `.grad`, bf16, `step()` alone (`outputs/tools/block_cap_sweep.py`; logs
+`outputs/block_cap_sweep.log`, eager write, and `outputs/block_cap_sweep_cuda_write.log`), at the 256 MiB cap:
+
+| write | blocks | wall ms | GPU ms | step peak |
+|---|---|---|---|---|
+| eager | 17 | 79-81 | 74-75 | +169 MiB |
+| CUDA | 10 | 45 | 39-41 | +139 MiB |
+
+The CUDA write holds no weight-sized transient, so its blocks are sized by rank-sized work alone and fewer form.
+A rough split: at 10 blocks each, the eager write (1024 MiB cap) reads 69 ms of wall time against the kernel's 45,
+so about 24 ms is the kernel's, and the rest of the 79 to 45 the fewer blocks'. Under the eager write the cap trades launches
+for peak: 32 MiB forms 64 blocks at 192 ms wall and +14 MiB, 1024 MiB forms 10 at 69 ms and +684 MiB; summed GPU
+time is not monotonic in the cap (59, 53, 96, 74, 64, 65 ms from 32 to 1024 MiB), unexplained. The user keeps 256.
+
+LFM3, standard arm, 50 steps, two pairs back to back of `0718526` (eager write) against `8cba722`
+(`outputs/runs/pair3-{eager,cuda}-50-{1,2}.log`), each pair matched on eval time: 4.00 against 3.78 s/step at
+15.9 s of eval, 3.78 against 3.18 at 13.8 s. The machine changed state between the pairs, so the size reads
+0.2-0.6 s, unsettled. Target 1.53115 and 1.53125 against 1.53085 twice, source within 6e-5, inside the floor;
+the 100-step run (`outputs/runs/cudawrite-s1-100.log`) reads target 1.423217 against blocks' 1.423493, source
+2.676723 against 2.677134. Optimizer peak 5.03 GB against 4.89 (larger blocks hold more rank-sized work),
+under the backward's 7.38.
 
 ## Run ledger (Anima)
 

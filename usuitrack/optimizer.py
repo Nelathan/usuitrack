@@ -32,9 +32,8 @@ STEP_RULES = ("trust", "fixed")
 FRAME_INITS = ("range_finder", "random")
 
 # A block's transient cap (SPEC "Blocks"): same-shaped matrices step together
-# until their batched work would pass it. The stacked prototype's cap (FACTS on
-# `lab`, "On a small deep model the step costs 38% of training"); as a peak on
-# LFM3 or Anima, unmeasured.
+# until their batched work would pass it. Its trade of launches against peak on
+# nanodit: FACTS on `lab`, "The CUDA write takes"; as a peak on Anima, unmeasured.
 BLOCK_BYTES = 256 * 2**20
 # The CUDA write launches one grid row per member, and a grid's third axis holds 65535.
 BLOCK_MEMBERS = 65535

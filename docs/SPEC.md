@@ -446,9 +446,8 @@ CUDA the same maths runs in eager PyTorch, and a test holds the two together. Th
 reads `W` for `||W||^2`, and under norm bounds also `<W, L>` and `||L||^2`, so the clamp's factor
 comes from `||aW - sL||^2 = a^2||W||^2 - 2as<W, L> + s^2||L||^2` with no pass over the result;
 the write pass reads and writes `W` once, through a table of the members' addresses. Both form
-the lift `L` from the rank-sized factors in registers, in TF32: its error is about `1e-3` of a
-step, which stochastic rounding's variance hides (`docs/FACTS.md` on `lab`, "A fused Triton
-write"). The rounding bits come from philox under a seed drawn from torch's CUDA generator per
+the lift `L` from the rank-sized factors in registers, in TF32, whose error does not show
+above stochastic rounding's (`docs/FACTS.md` on `lab`, "The CUDA write takes"). The rounding bits come from philox under a seed drawn from torch's CUDA generator per
 block, so a seeded run reproduces, with draws other than the eager path's.
 
 Stochastic rounding keeps the expectation and pays in variance. A coordinate
