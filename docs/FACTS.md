@@ -1851,6 +1851,44 @@ the release. Batched as a block, CUDA events (`outputs/tools/follow_polar_bench.
 `[28, 8192, 102]`. On LFM3 that estimates to under 10 ms of a 3.65 s step, from the bench's shapes, unmeasured in a step; not
 built.
 
+### On a small model Molegrad's backward is bandwidth, not FLOPs; aligned widths are the cheap gain
+
+2026-11-16, nanodit (d768, 12 blocks, 4096 tokens per 64-sample micro-batch), every group on the input side, RTX
+4070 SUPER. GPU time per call, mean of 50 back-to-back calls (`outputs/tools/molegrad_backward_bench.py`, its
+log): per micro-batch the forward GEMMs take 13.8 ms, `grad_x` 13.9, the `dW` Molegrad replaces 13.8, and
+Molegrad's body (`X[Q|P]`, `Z`, the norms, the diagonal aim) 11.6 at rank 0.1 and 10.5 at 0.05; that bench times
+each piece alone, so its sums carry launch gaps. In GPU kernel time alone (profiler, `outputs/tools/mole_kernel_gpu.py`,
+`outputs/mole_kernel_gpu.log`), at rank 0.05 the body is at the bandwidth floor of the passes it makes, `X` read
+twice and `delta` twice: 0.059 ms at 768x768 against 25 MB at 504 GB/s, 0.050; 0.136 and 0.112 ms at 3072->768
+and 768->3072 against 63 MB, 0.125 (the second under it, re-reads hitting the 48 MB L2). At rank 0.1 it sits above
+the floor, 0.100 ms at 768x768, until padded (below). A Triton body that keeps those reads (two kernels, split-K
+with atomics; `outputs/tools/mole_kernel.py`) was never faster than cuBLAS, up to 2.4x slower. Below the floor
+is only one read of each, a single-pass kernel with atomics; not built.
+
+Folding `X[Q|P]` into the forward's GEMM as rows of a stacked `[W; Qᵀ; Pᵀ]` (`outputs/tools/fold_forward_bench.py`,
+`outputs/fold_forward_bench.log`) saves at best 1.35 ms per micro-batch at rank 0.1 and 0.2 at 0.05, with the
+stack prebuilt, padded to 128 rows and `Y`'s row stride free downstream; unpadded it is slower than the two
+GEMMs (23.2 against 16.2 ms). The forward GEMM is near compute-bound, so the added columns cost their FLOPs and
+the saved read of `X` nearly cancels them. Under checkpointing the forward runs twice and the gain goes. Not
+built.
+
+Activation checkpointing per block does not pay on nanodit (`outputs/tools/nanodit_checkpoint_bench.py`,
+`outputs/nanodit_checkpoint_bench.log`), forward plus backward per 256 samples, rank 0.1:
+
+| micro-batch | unchecked | checkpointed |
+|---|---|---|
+| 64 (x4) | 246 ms, 2.21 GiB | 289 ms, 0.71 GiB |
+| 128 (x2) | 244 ms, 3.99 GiB | 285 ms, 0.99 GiB |
+| 256 (x1) | 243 ms, 7.46 GiB | 288 ms, 1.46 GiB |
+
+The step is GPU-bound at micro-batch 64, so fewer micro-batches buy about 1%, and the recompute costs 18%.
+
+Padding `[Q|P]` and the aim's factor with zero columns to a multiple of 16 (`caadbf3`): the body's GPU time at
+rank 0.1 falls 0.100 to 0.081 ms at 768x768, 0.149 to 0.128 at 768->3072 (`outputs/mole_kernel_gpu.log`); at 0.05
+by under 0.005. Same harness as the table, micro-batch 64, two A/B pairs (`outputs/molegrad_pad_ab.log`): rank
+0.1 from 262 and 255 to 242 ms, and an unpadded 246 in the table's log, so 4-20 ms; rank 0.05 from 240 and 236 to
+237 and 230, no claim against the unpadded pair's own 4 ms spread.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
