@@ -213,7 +213,8 @@ $$Q_+=Q_{raw}(aI+bS+cS^2),$$
 `1.2-1.6e-4` off orthonormal in replay on LFM3's gradients under either aim,
 and the same frame as the exact polar factor to three digits (same FACTS
 entry). A top plane holding ~30x the mean in-span energy leaves it `2e-2` off;
-the next move re-polarizes `Q + Y`, so the error does not accumulate. No
+the next move re-polarizes `Q + Y`, so the error does not accumulate. The retraction runs as one
+more iteration of step 7's loop on the same Gram. No
 eigendecomposition runs and nothing is read back to the host.
 
 The frame is stored round-to-nearest; stochastic rounding measured `sqrt(2)`
@@ -347,6 +348,16 @@ k    a         b         c
 3    2.8769   -3.1427    1.2046
 4    2.8366   -3.0525    1.2012
 ```
+
+Every iterate is `X_0 C_k` with `C_k` a polynomial in the short-side Gram `G = X_0^T X_0`
+(the tall orientation), so the schedule runs on `G`: with `M = C^T G C`, the iterate's Gram, and
+`P = aI + bM + cM^2`, an iteration is `C <- PC`, `M <- P^2 M`, every factor commuting. `G` and the
+closing `X_0 C` are the only passes over `d r^2`, against two per iteration on `X`. On CUDA, up to
+`r = 128`, the `r x r` iterations are one Triton program per matrix (`usuitrack/gram.py`), its
+products in tf32x3; above that and off CUDA, batched GEMMs run the same loop, and a test holds the
+two together. The Gram squares `X`'s condition number; LFM3's moments keep their smallest singular
+value at `5e-3` of the largest or more, and the route reads as the iteration on `X` to three digits
+(`docs/FACTS.md` on `lab`, "One polar step cannot follow `Q+Y`").
 
 The result `O_t` is an approximate leverage-balanced polar direction, not an
 exact SVD polar factor: at five iterations its orthogonality residual is ~1e-2.

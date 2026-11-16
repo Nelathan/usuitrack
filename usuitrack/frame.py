@@ -14,13 +14,15 @@ from typing import NamedTuple
 import torch
 from torch import Tensor
 
-from .polar import newton_schulz
+from .polar import NEWTON_SCHULZ_COEFFICIENTS, newton_schulz
 
 SIDES = ("auto", "left", "right")
 
 # Polar Express's converged triple: one step pulls a near-orthonormal frame back
 # onto the Stiefel manifold (SPEC step 4).
 RETRACTION_COEFFICIENTS = (1.875, -1.25, 0.375)
+# The frame's polar: Newton-Schulz, then the retraction as one more iteration on the same Gram.
+FOLLOW_SCHEDULE = NEWTON_SCHULZ_COEFFICIENTS + (RETRACTION_COEFFICIENTS,)
 
 
 def resolve_side(shape: torch.Size, side: str) -> str:
@@ -128,7 +130,7 @@ def follow(stored: Tensor, frame_moment: Tensor) -> Moved:
     `Q` anchors the target: `T = Q + Y` has its singular values at or above one
     while the symmetric part of `Q^T Y` is positive semidefinite, so no plane
     collapses, and an aim inside the span holds the frame exactly. Newton-Schulz lands within a few percent of
-    orthonormal and the retraction finishes it; there is no `eigh` and nothing
+    orthonormal and the retraction, a sixth iteration on the same Gram, finishes it; there is no `eigh` and nothing
     read back to the host.
     """
 
@@ -136,6 +138,6 @@ def follow(stored: Tensor, frame_moment: Tensor) -> Moved:
     # Round-to-nearest, unlike the moment: the frame moves by a real angle
     # every update, so there is no sub-ulp step to lose, and stochastic
     # rounding measured sqrt(2) more in-span rotation.
-    new = retract(newton_schulz(q + frame_moment)).to(stored.dtype)
+    new = newton_schulz(q + frame_moment, FOLLOW_SCHEDULE).to(stored.dtype)
     rotation = retract(q.mT @ new.float())
     return Moved(new, rotation)
