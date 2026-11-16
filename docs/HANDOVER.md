@@ -21,8 +21,17 @@ most of the capture, since `Q+Y` has a condition number of 35-55 (FACTS, "One po
 Both polar maps now run on the `r x r` Gram, a Triton kernel up to `r = 128` (`usuitrack/gram.py`; topic,
 "the polar on the Gram"). Ranks now come in steps of 32, to the nearest, capped at 256 (SPEC "Coordinates"); FACTS
 numbers before 2026-11-16 ran the old per-plane rule. `StochasticAdamW` steps in one Triton launch on
-CUDA (`usuitrack/adamw.py`; FACTS, "The fused fallback"). Open with you: PLAN X5, narrow matrices. Next:
-chapter 4.
+CUDA (`usuitrack/adamw.py`; FACTS, "The fused fallback"). The 32 grid holds above 128 too (user; aligned ranks
+run no slower than their unaligned neighbours, `outputs/rank_grid_bench.log`, one noisy read).
+Agreed next, in order (user, 2026-11-16):
+1. PLAN X5's full space: the cost bench for the crossover, then the build (frame fixed at `I`, half cap
+   dropped), then the polar-norm read on the stream ends.
+2. A whole-iteration CUDA graph probe on nanodit: capture forward and backward of tiny-dit's step, the
+   optimizer outside, and read how much of the ~34 ms GPU idle (19 forward, 15 backward over 4
+   micro-batches) comes back. A graph would need device-side `lr` and AdamW scalars (both host floats
+   now, baked at capture) and static inputs; it reopens chapter 5, dropped for the step alone.
+3. Chapter 4's seam is `optimizer.arm()` before the last backward (user); `arm()` is captured with the
+   iteration under a graph. Its overlap ceiling is ~10 ms of 258 unless a side stream shares SMs.
 float64 is unsupported (user).
 To review, each read by a review subagent: `af8ef61`, `6698f19`, `ea3092b`, `5ba1ae4`, `b4edb07`, `0718526`,
 `8cba722`, and the write-up after them.
