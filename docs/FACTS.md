@@ -1907,6 +1907,16 @@ by under 0.005. Same harness as the table, micro-batch 64, two A/B pairs (`outpu
 0.1 from 262 and 255 to 242 ms, and an unpadded 246 in the table's log, so 4-20 ms; rank 0.05 from 240 and 236 to
 237 and 230, no claim against the unpadded pair's own 4 ms spread.
 
+### The fused fallback takes nanodit's `StochasticAdamW` step from 12 to 0.5 ms
+
+2026-11-16. nanodit's fallback is 70 tensors and 0.15M elements: 34 gains of 768, 12 of `[6, 768]`, 12 of 64,
+9 depthwise convs `[768, 1, 3, 3]`, 3 others. The eager loop's ~20 small ops per tensor made it launch-bound:
+11.67 ms wall, 11.65 GPU, on synthetic bf16 grads; one Triton launch over address tables takes 0.31 / 0.30
+(`outputs/tools/nanodit_adamw_bench.py`, median of 30). In the training step it goes from 12.2 to 0.5 ms
+(`outputs/nanodit_phase_wall_adamw.log` against `outputs/nanodit_phase_wall.log`). The same pair moved backward
+178 to 138 ms and `step()` 49 to 42 at rank 0.1: Molegrad's padding, the polar on the Gram and ranks in steps of
+32 between them, not separated. The training step, by phase sums, goes from 316 to 258 ms.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
