@@ -1944,6 +1944,12 @@ frame on the long side costs the tracked arm 0.3 ms GPU more. State goes the oth
 `s = 128`, the most the quarter admits at the 32 grid. The user takes full space from `r >= s/4`, wall over GPU
 time and state: a rule, not a measured crossing.
 
+Past the rank ceiling's quarter, one matrix, the same two arms against the rule's `r = s/4`
+(`outputs/tools/full_space_wide.py`, `outputs/full_space_wide.log`), wall / GPU ms: nanodit's `ada` 4608x768,
+full 2.70 / 2.45 against tracked `r = 192` 3.57 / 0.72; 4096x1024, full 4.91 / 5.60 against `r = 256` 3.51 /
+1.11. At 768 full space still wins wall time at 3.4x the GPU time and 2.9x the state; at 1024, where the ceiling
+puts the rule's edge, it loses both. One read each, unrepeated.
+
 The `r x r` Gram kernel runs one program per matrix. CUDA events, back-to-back calls of `FOLLOW_SCHEDULE`
 (`outputs/tools/gram_kernel_bench.py`, `outputs/gram_kernel_bench.log`): kernel 0.04 ms at width 32, 0.24 at 64,
 0.67-0.75 at 68 and 96 at any stack of 1 to 56, 1.5 at 128 (2.2 from 28 matrices up); the eager loop ~1.0 ms
