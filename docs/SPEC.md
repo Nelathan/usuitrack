@@ -555,7 +555,9 @@ All three leaves are token sums, so micro-batches accumulate exactly.
 
 A matrix with no frame fits it in its first backward, formed and freed inside
 the backward; under accumulation that is the first micro-batch's gradient, not
-the step's, sanitized as in step 1. The range finder's Gaussian is drawn when
+the step's, sanitized as in step 1. A held frame is read by the backward, not saved
+at the forward, so a frame moved in place between the two is the one `Z` is taken in,
+checkpointed or not. The range finder's Gaussian is drawn when
 the waiting basis is bound, outside the backward, so a compiled backward traces
 the fit whole. The fitting step has no aim. The
 frame lives only in optimizer state, which the modules read again after every

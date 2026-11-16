@@ -398,3 +398,40 @@ def test_a_linear_that_first_trains_late_fits_beside_a_trained_one_of_its_block(
         stored = optimizer.state[module.weight]["frame"]
         assert module.basis is stored
         torch.testing.assert_close(stored.mT @ stored, torch.eye(8), atol=1e-4, rtol=0)
+
+
+class _Checkpointed(torch.nn.Sequential):
+    def forward(self, h):
+        return checkpoint(super().forward, h, use_reentrant=False)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize("checkpointed", [False, True])
+def test_a_frame_moved_after_the_forward_is_the_one_its_backward_projects_on(compiled, checkpointed):
+    """A frame that moves in place between the forward and its backward gives `Z = G Q`
+    in the moved frame, checkpointed or not, compiled or not."""
+
+    torch.manual_seed(0)
+    kind = _Checkpointed if checkpointed else torch.nn.Sequential
+    model = kind(torch.nn.Linear(IN, HIDDEN, bias=False), torch.nn.Tanh(), torch.nn.Linear(HIDDEN, IN, bias=False))
+    twin = copy.deepcopy(model)
+    optimizer = UsuiTrack(model.parameters(), lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    molegrad = Molegrad(model, optimizer)
+    run = torch.compile(model, fullgraph=True) if compiled else model
+    inputs, target = _batch(0)
+    (run(inputs) * target).sum().backward()
+    optimizer.step()
+    twin.load_state_dict(model.state_dict())
+    inputs, target = _batch(1)
+    loss = (run(inputs) * target).sum()
+    moved = {}
+    for weight in (model[0].weight, model[2].weight):
+        held = optimizer.state[weight]["frame"]
+        moved[weight] = torch.linalg.qr(torch.randn(held.shape))[0]
+        held.copy_(moved[weight])
+    loss.backward()
+    molegrad.prepare()
+    (twin(inputs) * target).sum().backward()
+    for weight, twin_weight in ((model[0].weight, twin[0].weight), (model[2].weight, twin[2].weight)):
+        grad = frame.orient(twin_weight.grad, frame.resolve_side(weight.shape, "right"))
+        torch.testing.assert_close(optimizer._pending[weight].projected, grad @ moved[weight])

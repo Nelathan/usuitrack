@@ -82,10 +82,11 @@ Each chapter is one or more reviewed commits, then a compaction.
      (`with optimizer.final_backward(): loss.backward()`); a call before it (`optimizer.arm()`); or a micro-batch
      count given to Molegrad at build, which a loop that skips a batch silently breaks. `step()` stays the call
      that closes the step, finishing any block that had no hook.
-   - The deferred tracker cannot write a frame while the next forward has it saved: Molegrad saves `basis` at
-     forward, and a block's frames share one version counter (chapter 3's review found the same hazard in the
-     backward). So each block's tracker must finish before its first layer's forward, ordered by an event that
-     a forward pre-hook waits on, not merely before the next backward.
+   - The deferred tracker must finish before the next backward reaches the block, ordered by an event its
+     hooks wait on. Molegrad reads a held frame at backward, not at forward (SPEC, "Molegrad"), so a frame
+     moved in place during the next forward is the one its backward projects on.
+   - The user (2026-11-16): the harness can tell which backward is the last, so the seam is no wall; shape
+     it around tiny-dit's loop, which can be adapted to fit.
    - The side stream's transients run beside the forward's activations, so the step's peak moves into the
      forward's. Unmeasured.
 5. **CUDA graph.** The graph covers the step only. Forward and backward are compiled blocks already, and graphing

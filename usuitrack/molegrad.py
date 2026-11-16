@@ -20,27 +20,33 @@ PROBES = 16
 
 class _Projected(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: Tensor, weight: Tensor, bias: Tensor | None, basis: Tensor, probes: Tensor, test: Tensor | None, right: bool, fit: bool, z: Tensor, action: Tensor, probed: Tensor) -> Tensor:
-        ctx.save_for_backward(x, weight, basis, probes, test)
-        ctx.right = right
+    def forward(ctx, x: Tensor, weight: Tensor, bias: Tensor | None, basis: Tensor, probes: Tensor, test: Tensor | None, module: MoleLinear, fit: bool, z: Tensor, action: Tensor, probed: Tensor) -> Tensor:
+        # The held frame is read at backward, not saved here: a frame that moves between
+        # this forward and its backward is the one `Z` must be taken in. `basis` is an
+        # input only so a frame waiting for its fit receives it as its gradient.
+        ctx.save_for_backward(x, weight, probes, test)
+        ctx.module = module
         ctx.fit = fit
         return F.linear(x, weight, bias)
 
     @staticmethod
     def backward(ctx, grad: Tensor):
-        x, weight, basis, probes, test = ctx.saved_tensors
+        x, weight, probes, test = ctx.saved_tensors
+        right = ctx.module.right
         grad_x = grad @ weight
         stream = x.reshape(-1, x.shape[-1])
         delta = grad.reshape(-1, grad.shape[-1])
         grad_bias = delta.sum(dim=0) if ctx.needs_input_grad[2] else None
         fitted = None
         if ctx.fit:
-            gradient = delta.mT @ stream if ctx.right else stream.mT @ delta
+            gradient = delta.mT @ stream if right else stream.mT @ delta
             gradient = torch.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
             basis = fitted = frame.range_find(gradient, test)
+        else:
+            basis = ctx.module.basis
         rank = basis.shape[-1]
         # The probes ride with the frame in one GEMM over each stream: [Q | P].
-        if ctx.right:
+        if right:
             projected_x = stream @ torch.cat([basis, probes], dim=1)
             z_probed = delta.mT @ projected_x
             z, probed = z_probed[:, :rank], z_probed[:, rank:]
@@ -78,7 +84,7 @@ class MoleLinear(torch.nn.Linear):
         if not torch.is_grad_enabled():
             return F.linear(x, self.weight, self.bias)
         # A basis that still requires grad is waiting for its fit.
-        return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.test, self.right, self.basis.requires_grad, self.z, self.action, self.probed)
+        return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.test, self, self.basis.requires_grad, self.z, self.action, self.probed)
 
 
 class Molegrad:
