@@ -119,14 +119,12 @@ side"). The twin, Newton-Schulz every step, is the release's tracker (SPEC step 
 - X2. Settled or starved: is there persistent gradient outside a settled frame?
 - X3. Is energy the right admission rule?
 - X4. Does aggregate-then-polar reach the paper's wall?
-- X5. Narrow matrices and empty planes (user, 2026-11-16). Agreed: a matrix whose tracking costs more than
-  the full space takes the full space, a frame fixed at `I` with `r = s` (short side) and no follow, aim
-  or rotation; the half cap goes (its reason was `eigh` on an empty residual, ARCHIVE "the `min(m,n)/2`
-  rank cap"), `r <= s` stays. Open: the crossover, half or quarter of `s` or else, from a cost bench of
-  a block tracked against full at short sides 64-256 (`patch_embed` 2048x68 should land full, user).
-  Then a read of `patch_embed`'s and `proj_out`'s polar norms against their tracked ones: a moment
-  filling `k` of `s` planes steps at `sqrt(k/s)` of `lr` (FACTS, "`relative_step` under `lr` on Anima is
-  AdaLN's empty planes"), which may steady or stall them (user). Parked candidate: the unit sized by the
+- X5. Narrow matrices and empty planes (user, 2026-11-16). The full space is built at a quarter of `s`
+  (SPEC "Coordinates"; ARCHIVE, "the full space at a quarter"). Open: which module gets how much step
+  (user). A moment filling `k` of `s` planes steps at `sqrt(k/s)` of `lr` (FACTS, "`relative_step` under
+  `lr` on Anima is AdaLN's empty planes"); a matrix that cannot fill its space has a low-rank gradient
+  and should step less (user). The read: per-module realized step and polar norm on nanodit, which
+  modules fall short of norm 1, with `ada` (4608x768, full at `c = 0.1`) full against tracked. Parked candidate: the unit sized by the
   polar's own norm in place of `1/sqrt(r)`; it changes only matrices with empty planes (AdaLN about
   1.5x), and AdaLN's shrink is wanted (user: its gradient is per image, not per token).
 
@@ -164,7 +162,6 @@ back.
 - D1. The matrix lr's peak and decay shape on each lane.
 - D6. LFM run-to-run spread: three seeds of the default arm.
 - E4. An arrival sensor for the constant turn.
-- E5. The `min(m,n)/2` cap.
 - E7. Anima's `rank_fraction`.
 - E9. Which roles move, and should step or rank follow them?
 - F1-F5. Per-matrix lr from the overshoot meter; magic numbers; device syncs;

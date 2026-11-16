@@ -1947,7 +1947,7 @@ time and state: a rule, not a measured crossing.
 Past the rank ceiling's quarter, one matrix, the same two arms against the rule's `r = s/4`
 (`outputs/tools/full_space_wide.py`, `outputs/full_space_wide.log`), wall / GPU ms: nanodit's `ada` 4608x768,
 full 2.70 / 2.45 against tracked `r = 192` 3.57 / 0.72; 4096x1024, full 4.91 / 5.60 against `r = 256` 3.51 /
-1.11. At 768 full space still wins wall time at 3.4x the GPU time and 2.9x the state; at 1024, where the ceiling
+1.11. At 768 full space still wins wall time at 3.4x the GPU time and 2.9x the state's elements; at 1024, where the ceiling
 puts the rule's edge, it loses both. One read each, unrepeated.
 
 The `r x r` Gram kernel runs one program per matrix. CUDA events, back-to-back calls of `FOLLOW_SCHEDULE`

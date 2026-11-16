@@ -24,8 +24,9 @@ numbers before 2026-11-16 ran the old per-plane rule. `StochasticAdamW` steps in
 CUDA (`usuitrack/adamw.py`; FACTS, "The fused fallback"). The 32 grid holds above 128 too (user; aligned ranks
 run no slower than their unaligned neighbours, `outputs/rank_grid_bench.log`, one noisy read).
 Agreed next, in order (user, 2026-11-16):
-1. PLAN X5's full space: the cost bench for the crossover, then the build (frame fixed at `I`, half cap
-   dropped), then the polar-norm read on the stream ends.
+1. PLAN X5: the full space is in (`df79f02`, a quarter of `s`, no frame). Next the read of which module
+   gets how much step on nanodit, `ada` full against tracked at `c = 0.1`. Checkpoints that tracked a
+   matrix now full are refused on load.
 2. A whole-iteration CUDA graph probe on nanodit: capture forward and backward of tiny-dit's step, the
    optimizer outside, and read how much of the ~34 ms GPU idle (19 forward, 15 backward over 4
    micro-batches) comes back. A graph would need device-side `lr` and AdamW scalars (both host floats

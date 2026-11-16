@@ -375,6 +375,8 @@ guard is against a burst, not against the model's own gradients.
 
 ## CLOSED -- the `min(m,n)/2` rank cap
 
+Withdrawn 2026-11-16: see "DECIDED -- the full space at a quarter".
+
 Two hard ceilings exist and neither is the halving. The frame is `[d, r]` with
 orthonormal columns, so `r <= d` is linear algebra, not policy -- `r` can never
 exceed the tracked side's dimension, whichever side that is. And the gradient has
@@ -1190,6 +1192,22 @@ matrix, the side where Molegrad's diagonal aim lives, which the fast step
 builds on (`docs/topics/fast-step.md`). Withdraws: "for finetuning the residual
 writers keep their output side" as guidance (PLAN X state, the
 subspace-evolution topic's status); the measurement it rests on stands.
+
+## DECIDED -- the full space at a quarter, and the half cap goes
+
+PLAN X5, 2026-11-16 (user). A matrix whose rank rule reaches a quarter of its
+short side steps in its full space, with no frame (SPEC "Coordinates"). The
+rule is cost, not geometry: a frame at 1/8 of `d` already matches full rank in
+pretraining (SubTrack's 128 of 1024, the user's account of the paper), so no shape needs the full space for quality; tracking
+costs more wall time than the full space's polar at every short side up to 256
+and against `r = s/4` at 768, though at 3.4x its GPU time, and loses both at
+1024, the rule's edge (FACTS, "Full space wins wall time"). No bound on
+`s` beyond the rank ceiling, which keeps sides past 1024 tracked; a bound at
+256 was tried in the build and dropped as arbitrary (user): it left a 257-side
+matrix tracking 256 planes. Withdraws "the `min(m,n)/2` rank cap" above and
+parked E5: the cap's trigger was `eigh` on an empty residual, and nothing in the
+tracker runs `eigh` now; its reason, a complement with energy for the frame to
+move into, is the quarter's: a tracked rank is under `s/4`.
 
 ## PARKED at release -- the PLAN of 2026-10-28, verbatim
 
