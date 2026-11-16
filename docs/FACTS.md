@@ -1828,7 +1828,7 @@ the 100-step run (`outputs/runs/cudawrite-s1-100.log`) reads target 1.423217 aga
 2.676723 against 2.677134. Optimizer peak 5.03 GB against 4.89 (larger blocks hold more rank-sized work),
 under the backward's 7.38.
 
-### One polar step cannot follow `Q+Y`; the Gram route is the same polar, faster only at large `d`
+### One polar step cannot follow `Q+Y`; the polar on the Gram takes nanodit's `step()` from 39 to 29 ms
 
 2026-11-16, the frame's polar (user: one Polar Express step on `Y` in place of five). Replay of the twin
 (shiftkns/1/0.95/1, diagonal aim) on LFM3's `o12`, `q12` and `w1`, 300 steps
@@ -1845,11 +1845,29 @@ retraction step from unit mean singular value diverges on `o12` within the first
 
 Newton-Schulz's iterates on `T` stay `T C_k`, so the same iterations run on the `r x r` Gram `TᵀT`, the retraction
 folded in, and end in one `T C`: about 2 passes over `d r²` against 12. On the stream it lands at most 3.7e-6 from
-the release. Batched as a block, CUDA events (`outputs/tools/follow_polar_bench.py`, `outputs/follow_polar_bench.log`):
-0.81 against 1.15 ms at nanodit's `[12, 768, 38]` (slower: six rounds of `r x r` launches, about 1.15 ms at any
-`d` at `r` 38), 1.78 against 1.16 at `[12, 3072, 38]`, 1.61 against 1.20 at LFM3's `[28, 2048, 102]`, 6.99 against 1.50 at
-`[28, 8192, 102]`. On LFM3 that estimates to under 10 ms of a 3.65 s step, from the bench's shapes, unmeasured in a step; not
-built.
+the iteration on `T`. As batched GEMMs the `r x r` rounds are launch-bound and lose at small `d` (0.81 against
+1.15 ms at nanodit's `[12, 768, 38]`; `outputs/follow_polar_bench.log`); the release runs them as one Triton
+program per matrix up to `r = 128` (SPEC step 7), for both maps, the frame's and the direction's.
+
+Release kernel against the iteration on `X` (HEAD `9921daf`), nanodit's `step()` by CUDA events, median of the
+timed steps, rank fraction at the ranks before the steps-of-32 rule (`outputs/nanodit_polar_release.log`,
+`outputs/nanodit_polar_arms.log`; arms from `outputs/tools/nanodit_polar_arms.py`):
+
+| nanodit | rank 0.05 | rank 0.1 |
+|---|---|---|
+| 12 layers, iteration on `X` | 39.3-39.5 ms | 48.4-49.5 ms |
+| 12 layers, Gram, the kernel | 29.1-29.6 ms | 40.0-40.3 ms |
+| 32 layers, iteration on `X` | 68.9, 71.9 ms | |
+| 32 layers, Gram, the kernel | 59.7 ms | |
+
+The prototype's 64-wide tiles ran rank 0.1 at 43.4-44.1 ms; the `r x r` rounds as batched `baddbmm` saved only
+3 ms at rank 0.05 and lost 2 ms at 32 layers. On LFM3's shapes alone, a call (`outputs/tools/lfm3_polar_bench.py`,
+`outputs/lfm3_polar_bench.log`): frames `[28, 2048, 102]` 1.75 against 1.76 ms, `[56, 2048, 198]` 10.9 against 4.1,
+`[28, 7680, 198]` 19.8 against 4.3; moments `[28, 2048, 102]` 1.70 against 1.51, `[56, 7680, 198]` 34.0 against 8.6;
+the `r > 128` ones on batched GEMMs. Every gap is under 5e-7. On real LFM3 moments (`o12`, `q12`, `w1`, `w2`, 300
+steps; `outputs/tools/gram_moment_check.py`, `outputs/gram_moment_check.log`) the Gram squares a condition whose
+smallest singular value is 4.9e-3 of the largest at worst; both routes sit 1.6-1.7e-2 from the exact polar factor
+(the five-step schedule's own error) and agree to the 3 digits printed.
 
 ### On a small model Molegrad's backward is bandwidth, not FLOPs; aligned widths are the cheap gain
 

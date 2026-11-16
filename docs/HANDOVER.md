@@ -18,7 +18,10 @@ graph is dropped (you). Molegrad reads a held frame at backward (`0718526`), whi
 tracker to move frames during the next forward. Chapter 4 is next, its seam around tiny-dit's loop, which
 knows its last micro-batch. The frame's polar stays Newton-Schulz's five steps: one Polar Express step loses
 most of the capture, since `Q+Y` has a condition number of 35-55 (FACTS, "One polar step cannot follow").
-float64 matrices fail in the step at `vector_norm(..., dtype=float32)`, on CPU too; an old limit, unfiled.
+Both polar maps now run on the `r x r` Gram, a Triton kernel up to `r = 128` (`usuitrack/gram.py`; topic,
+"the polar on the Gram"). Next in the agreed order: ranks in steps of 32 capped at 256, then a fast
+StochasticAdamW for the fallback, then chapter 4.
+float64 is unsupported (user).
 To review, each read by a review subagent: `af8ef61`, `6698f19`, `ea3092b`, `5ba1ae4`, `b4edb07`, `0718526`,
 `8cba722`, and the write-up after them.
 

@@ -122,6 +122,12 @@ Each chapter is one or more reviewed commits, then a compaction.
    write stays, and a test holds the kernel to it (user: the eager write as the CPU path, TF32, philox).
    Larger blocks follow, since the CUDA write holds no transient (FACTS, "The CUDA write takes nanodit's `step()` from 79 to 45 ms").
    The moment blend is not fused yet.
+   *After chapter 6, 2026-11-16, the polar on the Gram.* Newton-Schulz runs its schedule on the short-side `r x r`
+   Gram for both maps, the frame's with the retraction as a sixth iteration, the `r x r` rounds one Triton
+   program per matrix up to `r = 128` and batched GEMMs above (SPEC step 7; user: "I think it's a win"). nanodit
+   `step()` 39 to 29 ms at rank 0.05, 69-72 to 60 ms at 32 layers (FACTS, "One polar step cannot follow `Q+Y`").
+   Molegrad's backward on nanodit is bandwidth-bound; a fused Triton body never beat cuBLAS, and its GEMMs are
+   padded to a multiple of 16 instead (FACTS, "On a small model Molegrad's backward is bandwidth").
 
 ## Open nuance (do not lose)
 
