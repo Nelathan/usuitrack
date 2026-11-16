@@ -16,6 +16,11 @@ from . import frame
 from .optimizer import Prepared, UsuiTrack
 
 PROBES = 16
+ALIGN = 16
+
+
+def _aligned(width: int) -> int:
+    return -(-width // ALIGN) * ALIGN
 
 
 class _Projected(torch.autograd.Function):
@@ -44,16 +49,21 @@ class _Projected(torch.autograd.Function):
             basis = fitted = frame.range_find(gradient, test)
         else:
             basis = ctx.module.basis
-        rank = basis.shape[-1]
+        rank, count = basis.shape[-1], probes.shape[-1]
         # The probes ride with the frame in one GEMM over each stream: [Q | P].
         if right:
-            projected_x = stream @ torch.cat([basis, probes], dim=1)
+            # Zero columns pad [Q | P] to a multiple of ALIGN: an unaligned width
+            # (any rank not a multiple of 16) drops cuBLAS off its tensor-core tiles.
+            width = _aligned(rank + count)
+            joined = torch.cat([basis, probes, basis.new_zeros(basis.shape[0], width - rank - count)], dim=1)
+            projected_x = stream @ joined
             z_probed = delta.mT @ projected_x
-            z, probed = z_probed[:, :rank], z_probed[:, rank:]
+            z, probed = z_probed[:, :rank], z_probed[:, rank:rank + count]
             # ||delta_t||^2 without an fp32 copy of delta; zero past the last
             # supervised token, so it also masks the rows G never sees.
             weights = torch.linalg.vector_norm(delta, dim=-1, keepdim=True, dtype=torch.float32).square()
-            action = stream.mT @ (projected_x[:, :rank] * weights).to(stream.dtype)
+            # Aligned too: the columns past `rank` are the probes' and are cut after.
+            action = (stream.mT @ (projected_x[:, :_aligned(rank)] * weights).to(stream.dtype))[:, :rank]
         else:
             projected_delta = delta @ basis
             z = stream.mT @ projected_delta
