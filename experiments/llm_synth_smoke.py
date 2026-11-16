@@ -232,7 +232,7 @@ def optimizer_state_bytes_by_category(optimizer: torch.optim.Optimizer) -> dict[
     totals = {"matrix": 0, "fallback": 0}
     for state in optimizer.state.values():
         state_bytes = sum(value.numel() * value.element_size() for value in state.values() if torch.is_tensor(value))
-        totals["matrix" if "frame" in state else "fallback"] += state_bytes
+        totals["matrix" if "moment" in state else "fallback"] += state_bytes
     return {**totals, "total": totals["matrix"] + totals["fallback"]}
 
 

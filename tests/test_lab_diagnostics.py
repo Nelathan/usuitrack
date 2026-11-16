@@ -8,7 +8,7 @@ import torch
 from experiments.lab_diagnostics import ALL_READS, LabDiagnostics
 from usuitrack import UsuiTrack
 
-ROWS, COLS, RANK = 256, 128, 32
+ROWS, COLS, RANK = 256, 160, 32
 RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 

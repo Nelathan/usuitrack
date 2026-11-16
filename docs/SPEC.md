@@ -37,9 +37,10 @@ Let a matrix parameter and gradient be
 $$W,G\in\mathbb R^{m\times n},\qquad 1\le r\le\min(m,n).$$
 
 Rank is not configured per matrix. One model-wide `rank_fraction` `c`
-(default `0.05`) sizes every matrix by its shape:
+(default `0.05`) sizes every matrix by its shape, `s = min(m,n)` its shorter side:
 
-$$r=\min\!\left(32\max\!\left(1,\ \operatorname{round}(c\sqrt{mn}/32)\right),\ 256,\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right),$$
+$$r_c=\min\!\left(32\max\!\left(1,\ \operatorname{round}(c\sqrt{mn}/32)\right),\ 256\right),\qquad
+r=\begin{cases}s & 4r_c\ge s\\ r_c & \text{otherwise,}\end{cases}$$
 
 halves rounding up. The step of 32 is the polar kernel's tile (step 7), which pads an `r x r`
 matrix to it anyway up to `r = 96`, so a rank between steps would pay for planes it does not
@@ -54,16 +55,22 @@ per-role rank sized from measured live planes, with no measurement of its own
 (`FACTS.md` on `lab`, "Rank is a fraction of the matrix's size"). Matrices of one shape
 share one rank.
 
-The cap has two structural reasons, neither of them numerical. A gradient of shape `[m,n]`
-has rank at most `min(m,n)`, so a wider basis tracks directions the gradient
-cannot populate; half leaves an orthogonal complement for the aim's horizontal part at
-every step. And narrow modules are bottlenecks -- they carry the residual
-stream through a small waist, so a large update there destabilizes every block
-downstream, independently of how well-conditioned the step was.
+**The full space.** A matrix whose `r_c` reaches a quarter of its shorter side steps in all
+of it, `r = s`, oriented to the shorter side whatever `side` says. It has no frame: no fit, no aim and no frame moment (steps 2, 4 and 6 do not run), `Z = G_o` is
+the oriented gradient itself, the moment is `[max(m,n), s]`, and the step writes `O` oriented
+back, with no lift. Its state is bound at its first step, as a fit is. Steps 5, 7 and 8 run as
+for any matrix. The tracker's own work -- the projection, the aim, the frame's polar, its span
+and the moment's rotation -- costs more wall time there than the full space's larger polar,
+and up to `s = 128` no less GPU time; the full space holds more state, `[max(m,n), s]` against
+`[max(m,n), r]` plus `2sr + r^2` (`FACTS.md` on `lab`, "Full space wins wall time"). The
+ceiling of 256 keeps every side past 1024 tracked. Between 256 and 1024 the full space's
+larger polar costs GPU time -- 3.4x the tracked quarter's at `s = 768`, where it still wins
+wall time -- and at `s = 1024` it loses both, the rule's edge. A tracked rank is under a
+quarter of `s`, so the frame always has room to move in.
 
-Anima's `(2048, 68)` patch embedding asks for 19 planes at `c = 0.05` and runs at one step,
-32; the half cap, 34, binds on it from `c = 0.13`. At `0.1` the ceiling binds on LFM3's MLP
-matrices, which ask for 397.
+Anima's `(2048, 68)` patch embedding asks for 19 planes at `c = 0.05`, 32 on the grid, past
+its quarter of 17, and steps in its 68. At `0.1` the ceiling binds on LFM3's MLP matrices,
+which ask for 397.
 The default is the smaller: on LFM3 `0.1` buys capture and no loss under
 either aim (`ARCHIVE.md` on `lab`, "a live aim does not make a larger rank pay").
 
@@ -130,6 +137,7 @@ step. Pinned by `test_the_update_is_invariant_to_gradient_scale`.
 
 ### 2. Initialize the frame
 
+A matrix in its full space has no frame and skips this step ("Coordinates").
 Normalize `A = G_o / ||G_o||_F` and form the side Gram `K = A^T A`. `Q` is a
 randomized range finder's frame on its leading `r`-dim eigenspace, with one power
 step: `Q = qr(K qr(K Omega).Q).Q`, `Omega` an `[n,r]` Gaussian drawn from a fixed
@@ -171,6 +179,7 @@ $$Z_t=\Pi_{Q_t}(G_t).$$
 
 ### 4. Track with the frame's moment
 
+A matrix in its full space has no frame to move and skips this step and step 6.
 On every step after the fit, reuse the held-frame projection to form the
 covariance action and normalize it by the frame's mean Rayleigh quotient:
 
@@ -386,7 +395,8 @@ $$U_t=\|W_{t-1}\|_F\,\Lambda_{Q_t}(O_t),\qquad
 \frac{\|U_t\|_F}{\|W_{t-1}\|_F}=1$$
 
 for a moment that fills its rank, and `sqrt(k/r)` for one that fills `k` of
-`r` planes (step 7).
+`r` planes (step 7). In the full space the lift is the orientation alone, `U_t = ||W|| O_t`
+oriented back.
 
 The learning rate is the relative change per step -- one unit in every module,
 whatever its shape, rank or size: LAMB's trust ratio (You et al. 2019, arXiv
@@ -449,7 +459,8 @@ weight before the decay,
 
 $$W_t=(1-\alpha\lambda)W_{t-1}-\alpha U_t.$$
 
-Matrix parameters retain no full-size first or second moment.
+Matrix parameters retain no full-size second moment, and no full-size first moment
+outside the full space, where the moment is the matrix's size.
 
 **Rounding.** `W`, the lift and the update are accumulated in fp32 and written
 back once: stochastically for bf16, to nearest for fp16, exactly for fp32. A
@@ -501,7 +512,8 @@ phase one as soon as that matrix's gradient is complete and frees it. That
 takes exactly one backward per `step()`: a second gradient for a pending matrix
 raises rather than overwrite or sum into rank-sized work it can no longer
 reconstruct. Gradient clipping and norm logging in a trainer see no matrix
-gradients in this mode.
+gradients in this mode. A matrix in its full space retains `Z = G_o`, so its pending work is
+the size of `G`, as its moment is.
 
 The split is deliberately not a transaction, and cannot be made one at this
 memory budget: phase one exists so that `G` is freed the moment it is consumed,
@@ -558,6 +570,7 @@ phase one would have read from `G`:
 | `Z` (step 3), exact | `delta^T (X Q)` | `X^T (delta Q)` |
 | the aim, replacing step 4's `A` | the token diagonal, `X^T (||delta_t||^2 * X Q)` | `delta` alone, `delta^T (delta Q)` |
 | `G P`, 16 Gaussian probes | `delta^T (X P)` | `delta^T (X P)` |
+| in the full space, `Z` and no aim | `delta^T X` | `X^T delta` |
 
 **The diagonal aim.** Step 4 aims at `G`'s own Gram, `G^T G = X^T (delta
 delta^T) X` on the right; its cross-token terms need `G`, and the token
@@ -662,7 +675,8 @@ tensor (`docs/FACTS.md` on `lab`, "The fused fallback").
 | `frame_moment_span` | `[r,r]` | `[r,r]` | fp32 |
 | `moment` | `[m,r]` | `[n,r]` | parameter dtype |
 
-That is the whole per-matrix state, with `init_norm` (fp32, 0-dim) under norm bounds;
+A matrix in its full space keeps only `moment`, `[max(m,n), s]`. That is the whole
+per-matrix state, with `init_norm` (fp32, 0-dim) under norm bounds;
 each entry is a view into its block's buffer (Blocks), and a load packs a checkpoint
 into fresh blocks. A checkpoint without the frame moment starts it at zero. Projections and
 aims are transient pending work. Fallback parameters retain AdamW's fp32 first moment, second

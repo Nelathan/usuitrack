@@ -20,6 +20,9 @@ SIDES = ("auto", "left", "right")
 # Ranks come in multiples of the r x r polar kernel's tile, which pads to it anyway (SPEC "Coordinates").
 RANK_STEP = 32
 RANK_CAP = 256
+# A rank of a quarter of the shorter side or more takes the full space: tracking it costs more
+# wall time than stepping in it (SPEC "Coordinates").
+FULL_SHARE = 4
 
 # Polar Express's converged triple: one step pulls a near-orthonormal frame back
 # onto the Stiefel manifold (SPEC step 4).
@@ -28,13 +31,20 @@ RETRACTION_COEFFICIENTS = (1.875, -1.25, 0.375)
 FOLLOW_SCHEDULE = NEWTON_SCHULZ_COEFFICIENTS + (RETRACTION_COEFFICIENTS,)
 
 
-def resolve_side(shape: torch.Size, side: str) -> str:
+def resolve_side(shape: torch.Size, side: str, rank: int) -> str:
     """`auto` puts the frame on the shorter side, `right` (length `n`) when
-    `m >= n`: a shape guess, not an architectural one."""
+    `m >= n`: a shape guess, not an architectural one. A matrix in its full space
+    takes the shorter side whatever `side` says: its moment is `[longer, shorter]`."""
 
-    if side == "auto":
+    if side == "auto" or is_full(shape, rank):
         return "right" if shape[0] >= shape[1] else "left"
     return side
+
+
+def is_full(shape: torch.Size, rank: int) -> bool:
+    """The matrix steps in its full space, on its shorter side, with no frame (SPEC "Coordinates")."""
+
+    return rank == min(shape)
 
 
 def orient(matrix: Tensor, side: str) -> Tensor:
@@ -42,13 +52,14 @@ def orient(matrix: Tensor, side: str) -> Tensor:
 
 
 def rank(shape: torch.Size, rank_fraction: float) -> int:
-    """`rank_fraction * sqrt(m n)` to the nearest multiple of `RANK_STEP`, at least one step, at most `RANK_CAP`
-    and half the shorter side (SPEC "Coordinates")."""
+    """`rank_fraction * sqrt(m n)` to the nearest multiple of `RANK_STEP`, at least one step, at most `RANK_CAP`;
+    the shorter side, the full space, once that reaches a quarter of it (SPEC "Coordinates")."""
 
     rows, cols = shape
     steps = max(1, math.floor(rank_fraction * math.sqrt(rows * cols) / RANK_STEP + 0.5))
     wanted = min(RANK_STEP * steps, RANK_CAP)
-    return min(wanted, max(1, min(rows, cols) // 2))
+    short = min(rows, cols)
+    return short if FULL_SHARE * wanted >= short else wanted
 
 
 def fit(grad: Tensor, rank: int) -> Tensor:

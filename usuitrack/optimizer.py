@@ -38,9 +38,6 @@ BLOCK_BYTES = 256 * 2**20
 # The CUDA write launches one grid row per member, and a grid's third axis holds 65535.
 BLOCK_MEMBERS = 65535
 
-# The state a block holds as one buffer per entry, each matrix's a view into it.
-BLOCK_STATE = ("frame", "frame_moment", "frame_moment_span", "moment")
-
 
 @dataclass
 class Prepared:
@@ -62,14 +59,17 @@ class Prepared:
 class Block:
     """Same-shaped matrices of one group, in param order, stepped together (SPEC "Blocks").
 
-    Each entry of `BLOCK_STATE` is one `[b, ...]` buffer, allocated with the
-    first frame, and a matrix's state holds views into it, so the step reads
+    Each entry of a matrix's state (the moment and, unless in the full space, the
+    frame, the frame's moment and its span) is one `[b, ...]` buffer, allocated with the
+    first state, and a matrix's state holds views into it, so the step reads
     and writes the block's state in place, with no stacking copy."""
 
     params: list[Tensor]
     side: str
     """The resolved side, `left` or `right`."""
     rank: int
+    full: bool
+    """The full space: no frame, the moment the whole oriented matrix's (SPEC "Coordinates")."""
     buffers: dict[str, Tensor] = field(default_factory=dict)
     init_norm: Tensor | None = None
     """`[b]`, fp32: each matrix's norm before its first write, under `norm_bounds`."""
@@ -123,7 +123,8 @@ class UsuiTrack(Optimizer):
     Biases, norms, embeddings and other lookup tables go to a separate
     optimizer (README, "Usage"). Per matrix it keeps a frame `[d, r]`, a
     moment `[other, r]` and the frame's moment, `[d, r]` in the parameter's
-    dtype plus its in-span part `[r, r]` in fp32.
+    dtype plus its in-span part `[r, r]` in fp32; a matrix in its full space
+    keeps its moment alone.
 
     `release_matrix_grads` consumes each matrix gradient in a backward hook
     as soon as it is complete and frees it, rather than holding every gradient
@@ -203,18 +204,23 @@ class UsuiTrack(Optimizer):
         group["norm_bounds"] = tuple(group["norm_bounds"])
         for param in group["params"]:
             self._group_of[param] = group
-            if group["frame_init"] == "random":
+            if group["frame_init"] == "random" and not self._is_full(param, group):
                 self._hold_frame(param, self._draw_frame(param, group))
             if self.release_matrix_grads and param.requires_grad:
                 param.register_post_accumulate_grad_hook(self._release_hook)
+
+    @staticmethod
+    def _is_full(param: Tensor, group: dict) -> bool:
+        return frame.is_full(param.shape, frame.rank(param.shape, group["rank_fraction"]))
 
     def _draw_frame(self, param: Tensor, group: dict) -> Tensor:
         # One private generator per device, so the draws follow the param order
         # and training's random stream never shifts.
         if param.device not in self._frame_generators:
             self._frame_generators[param.device] = torch.Generator(param.device).manual_seed(0)
-        length = frame.orient(param, frame.resolve_side(param.shape, group["side"])).shape[1]
-        return frame.draw(length, frame.rank(param.shape, group["rank_fraction"]), self._frame_generators[param.device], param.dtype)
+        rank = frame.rank(param.shape, group["rank_fraction"])
+        length = frame.orient(param, frame.resolve_side(param.shape, group["side"], rank)).shape[1]
+        return frame.draw(length, rank, self._frame_generators[param.device], param.dtype)
 
     def _form_blocks(self, group: dict) -> None:
         """Split a group into blocks: one per side and shape (and device, dtype), in
@@ -224,18 +230,26 @@ class UsuiTrack(Optimizer):
 
         open_blocks: dict[tuple, Block] = {}
         for param in group["params"]:
-            side = frame.resolve_side(param.shape, group["side"])
             rank = frame.rank(param.shape, group["rank_fraction"])
+            side = frame.resolve_side(param.shape, group["side"], rank)
             key = (param.device, param.dtype, side, tuple(param.shape))
             block = open_blocks.get(key)
             if block is None or len(block.params) == BLOCK_MEMBERS or (len(block.params) + 1) * _work_bytes(param, rank) > BLOCK_BYTES:
-                block = open_blocks[key] = Block([], side, rank)
+                block = open_blocks[key] = Block([], side, rank, frame.is_full(param.shape, rank))
             self._block_of[param] = (block, len(block.params))
             block.params.append(param)
 
     def _hold_frame(self, param: Tensor, value: Tensor) -> Tensor:
-        """Store a matrix's first frame and bind its state to its block's buffers;
-        the frame's moment and the moment start at zero. Returns the stored frame."""
+        """Store a matrix's first frame and bind its state; the frame's moment and the
+        moment start at zero. Returns the stored frame."""
+
+        state = self._bind_state(param)
+        state["frame"].copy_(value)
+        return state["frame"]
+
+    def _bind_state(self, param: Tensor) -> dict:
+        """Bind a matrix's state to its block's buffers, allocating them zeroed at the block's
+        first; a matrix in its full space binds at its first step, holding no frame."""
 
         if param not in self._block_of:
             self._form_blocks(self._group_of[param])
@@ -245,18 +259,16 @@ class UsuiTrack(Optimizer):
             sample = block.params[0]
             other, length = frame.orient(sample, block.side).shape
             device, dtype = sample.device, sample.dtype
-            block.buffers = {
-                "frame": torch.zeros(count, length, block.rank, device=device, dtype=dtype),
-                "frame_moment": torch.zeros(count, length, block.rank, device=device, dtype=dtype),
+            block.buffers = {"moment": torch.zeros(count, other, block.rank, device=device, dtype=dtype)}
+            if not block.full:
+                block.buffers["frame"] = torch.zeros(count, length, block.rank, device=device, dtype=dtype)
+                block.buffers["frame_moment"] = torch.zeros(count, length, block.rank, device=device, dtype=dtype)
                 # fp32: rounding `Y`'s large in-span part walks the frame (SPEC step 4).
-                "frame_moment_span": torch.zeros(count, block.rank, block.rank, device=device, dtype=torch.float32),
-                "moment": torch.zeros(count, other, block.rank, device=device, dtype=dtype),
-            }
+                block.buffers["frame_moment_span"] = torch.zeros(count, block.rank, block.rank, device=device, dtype=torch.float32)
         state = self.state[param]
-        for name in BLOCK_STATE:
-            state[name] = block.buffers[name][index]
-        state["frame"].copy_(value)
-        return state["frame"]
+        for name, buffer in block.buffers.items():
+            state[name] = buffer[index]
+        return state
 
     def _hold_init_norm(self, param: Tensor, value: Tensor | float) -> None:
         block, index = self._block_of[param]
@@ -292,10 +304,16 @@ class UsuiTrack(Optimizer):
         live = [param for group in self.param_groups for param in group["params"]]
         for index, param in zip(indices, live, strict=True):
             loaded = dict(self.state[param])
-            if "frame" not in loaded:
+            if "moment" not in loaded:
                 continue
             saved = self._checkpoint["state"].get(index, {})
-            self._hold_frame(param, loaded["frame"])
+            if "frame" in loaded and self._is_full(param, self._group_of[param]):
+                # Its moment is in the tracked frame's coordinates, not the full space's.
+                raise ValueError(f"UsuiTrack: the checkpoint tracks a frame for a {tuple(param.shape)} matrix that now steps in its full space; this optimizer is left half-loaded")
+            if "frame" in loaded:
+                self._hold_frame(param, loaded["frame"])
+            else:
+                self._bind_state(param)
             for name in ("frame_moment", "moment"):
                 if name in loaded:
                     self.state[param][name].copy_(loaded[name])
@@ -306,7 +324,7 @@ class UsuiTrack(Optimizer):
         # A param the checkpoint holds no state for gets its drawn frame back, so it does not fit one.
         for group in self.param_groups:
             for param in group["params"]:
-                if group["frame_init"] == "random" and "frame" not in self.state[param]:
+                if group["frame_init"] == "random" and "frame" not in self.state[param] and not self._is_full(param, group):
                     self._hold_frame(param, self._draw_frame(param, group))
 
     def zero_grad(self, set_to_none: bool = True) -> None:
@@ -343,12 +361,16 @@ class UsuiTrack(Optimizer):
         if grad.is_sparse:
             raise RuntimeError("UsuiTrack does not support sparse gradients")
         group = self._group_of[param]
-        grad = frame.orient(grad, frame.resolve_side(param.shape, group["side"]))
+        rank = frame.rank(param.shape, group["rank_fraction"])
+        grad = frame.orient(grad, frame.resolve_side(param.shape, group["side"], rank))
         raw_norm = torch.linalg.vector_norm(grad, dtype=torch.float32)
         grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
         state = self.state[param]
-        if "frame" not in state:
-            held = self._hold_frame(param, frame.fit(grad, frame.rank(param.shape, group["rank_fraction"])))
+        if frame.is_full(param.shape, rank):
+            # No frame: `Z` is the oriented gradient, and there is no aim to follow.
+            projected, aim = grad, None
+        elif "frame" not in state:
+            held = self._hold_frame(param, frame.fit(grad, rank))
             projected, aim = grad @ held, None
         else:
             projected, aim = frame.project_and_aim(grad, state["frame"])
@@ -370,6 +392,8 @@ class UsuiTrack(Optimizer):
                     self._prepare(param)
                 prepared = self._pending.pop(param, None)
                 if prepared is not None:
+                    if "moment" not in self.state[param]:
+                        self._bind_state(param)
                     block, index = self._block_of[param]
                     parts.setdefault((block, prepared.aim is None, prepared.probed), []).append((index, prepared))
             for (block, _fitted, _probed), entries in parts.items():
@@ -387,7 +411,7 @@ class UsuiTrack(Optimizer):
         index = block.index(members)
         params = [block.params[member] for member in members]
         moment = self._blend_moment(params, block.take("moment", index), prepared, group["beta"])
-        frames = block.take("frame", index)
+        frames = None if block.full else block.take("frame", index)
         self._write_weights(group, block, index, params, unit_polar(moment), frames)
         # The weights were lifted through the held frames; only now do they move.
         # Matrices whose frame was fitted this step have no aim and hold still.
@@ -431,8 +455,9 @@ class UsuiTrack(Optimizer):
             self.diagnostics.moment(params, unit, before, moment, beta)
         return moment
 
-    def _write_weights(self, group: dict, block: Block, index: Tensor | None, params: list[Tensor], direction: Tensor, frames: Tensor) -> None:
-        """SPEC step 8: `W -= lr size lift(O)` for each member, decay folded in, rounded once;
+    def _write_weights(self, group: dict, block: Block, index: Tensor | None, params: list[Tensor], direction: Tensor, frames: Tensor | None) -> None:
+        """SPEC step 8: `W -= lr size lift(O)` for each member, decay folded in, rounded once
+        (`O` itself, oriented back, in the full space, `frames` `None`);
         on CUDA by the Triton write (`write.py`), elsewhere in eager PyTorch."""
 
         lr = group["lr"]
@@ -468,11 +493,11 @@ class UsuiTrack(Optimizer):
         return block.init_norm if index is None else block.init_norm[index]
 
 
-def _write_eager(block: Block, params: list[Tensor], direction: Tensor, frames: Tensor, decay: float, lr: float,
+def _write_eager(block: Block, params: list[Tensor], direction: Tensor, frames: Tensor | None, decay: float, lr: float,
                  fixed_scale: float | None, bounds: tuple, reference: Tensor | None) -> Tensor:
     """`write_block`'s maths without its kernel: the members are stacked, written, rounded and copied back."""
 
-    lift = frame.orient(direction @ frames.float().mT, block.side)
+    lift = frame.orient(direction if frames is None else direction @ frames.float().mT, block.side)
     # One member is written in place; more are stacked, then copied back in one call.
     weights = params[0].unsqueeze(0) if len(params) == 1 else torch.stack(params)
     if fixed_scale is None:

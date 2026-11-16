@@ -14,7 +14,7 @@ from usuitrack.polar import unit_polar
 # A representative transformer-ish weight. Small toy shapes like (8, 4) put the
 # rank straight into its floor, so every test would silently exercise a rank-1
 # frame. RANK_FRACTION is chosen so this shape runs at exactly RANK, below the cap.
-ROWS, COLS, RANK = 256, 128, 32
+ROWS, COLS, RANK = 256, 160, 32
 RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 
@@ -72,6 +72,94 @@ def test_only_the_frame_its_moment_and_the_moment_are_kept():
         assert tuple(state["frame"].shape) == tuple(state["frame_moment"].shape) == (COLS, RANK)
         assert tuple(state["frame_moment_span"].shape) == (RANK, RANK)
         assert tuple(state["moment"].shape) == (ROWS, RANK)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="the Triton write runs on CUDA"))])
+@pytest.mark.parametrize("side", ["left", "right"])
+@pytest.mark.parametrize("shape", [(64, 512), (512, 64)])
+def test_a_narrow_matrix_steps_in_its_full_space(shape, side, device):
+    """A rank of a quarter of the shorter side takes all of it, on that side whatever `side` says:
+    no frame, the moment is the whole oriented gradient's, and the step is its unit polar factor at `lr` of `||W||` (on CUDA up to the write's TF32 lift). A
+    checkpoint carries it on."""
+    torch.manual_seed(0)
+    rank = frame.rank(torch.Size(shape), RANK_FRACTION)
+    assert rank == min(shape)
+    weight = torch.nn.Parameter(torch.randn(*shape, device=device))
+    optimizer = UsuiTrack([weight], lr=0.01, beta=0.9, rank_fraction=RANK_FRACTION, side=side)
+    tall = shape[0] >= shape[1]
+    start = weight.detach().clone()
+    expected, moment = start.clone(), torch.zeros(max(shape), rank, device=device)
+    gradients = [torch.randn(*shape, device=device) for _ in range(5)]
+    for gradient in gradients[:3]:
+        weight.grad = gradient.clone()
+        optimizer.step()
+        oriented = gradient if tall else gradient.mT
+        moment = 0.9 * moment + 0.1 * oriented / oriented.norm()
+        direction = unit_polar(moment)
+        expected = expected - 0.01 * expected.norm() * (direction if tall else direction.mT)
+    assert torch.linalg.vector_norm(weight.detach() - expected) < (1e-3 if device == "cuda" else 1e-5) * torch.linalg.vector_norm(expected - start)
+    state = optimizer.state[weight]
+    assert set(state) == {"moment"}
+
+    resumed = torch.nn.Parameter(weight.detach().clone())
+    loaded = UsuiTrack([resumed], lr=0.01, beta=0.9, rank_fraction=RANK_FRACTION, side=side)
+    loaded.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+    for gradient in gradients[3:]:
+        weight.grad, resumed.grad = gradient.clone(), gradient.clone()
+        optimizer.step()
+        loaded.step()
+    torch.testing.assert_close(resumed, weight)
+
+
+def test_a_checkpoint_tracking_a_matrix_that_is_now_full_is_refused(monkeypatch):
+    """A checkpoint from before the full space tracks a frame for a matrix that now steps in it,
+    and its moment is in that frame's coordinates: the load says so instead of failing on a shape."""
+    weight = torch.nn.Parameter(torch.randn(512, 64))
+    monkeypatch.setattr(frame, "FULL_SHARE", 0)
+    tracked = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
+    weight.grad = torch.randn_like(weight)
+    tracked.step()
+    checkpoint = tracked.state_dict()
+    monkeypatch.undo()
+    full = UsuiTrack([weight], lr=0.01, rank_fraction=RANK_FRACTION)
+    with pytest.raises(ValueError, match="now steps in its full space"):
+        full.load_state_dict(checkpoint)
+
+
+@pytest.mark.parametrize("options", [dict(frame_init="random"), dict(step_rule="fixed"), dict(norm_bounds=(1.0, 1.0))])
+def test_a_narrow_matrix_holds_no_frame_under_any_group_setting(options):
+    """No setting gives a matrix in its full space a frame: it draws none, and under release its
+    step is the ordinary step's, bit for bit."""
+    torch.manual_seed(0)
+    start = torch.randn(512, 64)
+    weights = [torch.nn.Parameter(start.clone()) for _ in range(2)]
+    gradients = [torch.randn(512, 64) for _ in range(3)]
+    optimizers = [UsuiTrack([{"params": [weight], **options}], lr=0.01, rank_fraction=RANK_FRACTION, release_matrix_grads=release)
+                  for weight, release in zip(weights, (False, True))]
+    for gradient in gradients:
+        for weight, optimizer in zip(weights, optimizers):
+            if optimizer.release_matrix_grads:
+                (weight * gradient).sum().backward()
+            else:
+                weight.grad = gradient.clone()
+            optimizer.step()
+            assert "frame" not in optimizer.state[weight]
+    assert torch.equal(weights[0], weights[1])
+    if "norm_bounds" in options:
+        torch.testing.assert_close(torch.linalg.vector_norm(weights[0]), optimizers[0].state[weights[0]]["init_norm"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="moves the model to CUDA")
+def test_a_narrow_matrix_takes_the_device_and_dtype_it_trains_in():
+    """The full space's state is bound at the first step, as a fit is, so an optimizer built
+    before the model moves and casts steps it where it lands."""
+    linear = torch.nn.Linear(512, 64, bias=False)
+    optimizer = UsuiTrack(linear.parameters(), lr=0.01, rank_fraction=RANK_FRACTION)
+    linear.cuda().bfloat16()
+    linear.weight.grad = torch.randn_like(linear.weight)
+    optimizer.step()
+    held = optimizer.state[linear.weight]
+    assert held["moment"].device.type == "cuda" and held["moment"].dtype is torch.bfloat16
 
 
 def test_release_matches_ordinary_step_exactly():
@@ -355,9 +443,10 @@ def test_matrices_stepped_together_match_each_stepped_alone():
     optimizer would: nothing in a step couples matrices."""
 
     torch.manual_seed(5)
-    shapes = [(64, 512), (64, 520), (384, 384)]
+    shapes = [(160, 256), (160, 264), (384, 384), (64, 512)]
     ranks = [frame.rank(torch.Size(shape), RANK_FRACTION) for shape in shapes]
     assert ranks[0] == ranks[1] != ranks[2]
+    assert frame.is_full(torch.Size(shapes[3]), ranks[3])
     base = {shape: torch.randn(*shape) for shape in shapes}
     gradients = {shape: [torch.randn(*shape) for _ in range(6)] for shape in shapes}
 
@@ -389,9 +478,10 @@ def test_a_block_steps_its_matrices_as_each_would_step_alone(monkeypatch, block_
     if block_bytes is not None:
         monkeypatch.setattr(usuitrack.optimizer, "BLOCK_BYTES", block_bytes)
     torch.manual_seed(6)
-    shapes = [(64, 512), (96, 96), (64, 512), (64, 512)]
+    # (64, 512) is in its full space.
+    shapes = [(160, 256), (64, 512), (160, 256), (160, 256)]
     base = [torch.randn(*shape) for shape in shapes]
-    # The middle (64, 512) gets no gradient on step 3, so its block steps a subset there.
+    # The middle (160, 256) gets no gradient on step 3, so its block steps a subset there.
     gradients = [[None if (step, k) == (3, 2) else torch.randn(*shape) for k, shape in enumerate(shapes)] for step in range(6)]
 
     together = [torch.nn.Parameter(weight.clone()) for weight in base]
@@ -409,23 +499,31 @@ def test_a_block_steps_its_matrices_as_each_would_step_alone(monkeypatch, block_
 
     for k in range(len(shapes)):
         torch.testing.assert_close(together[k], separate[k], rtol=1e-5, atol=1e-6)
-        for name in ("frame", "moment", "frame_moment", "frame_moment_span"):
-            torch.testing.assert_close(optimizer.state[together[k]][name], solo[k].state[separate[k]][name], rtol=1e-5, atol=1e-6)
+        state = optimizer.state[together[k]]
+        assert set(state) == set(solo[k].state[separate[k]])
+        for name, value in state.items():
+            torch.testing.assert_close(value, solo[k].state[separate[k]][name], rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the Triton write runs on CUDA")
+@pytest.mark.parametrize("full", [False, True])
 @pytest.mark.parametrize("side,bounds,fixed", [("right", (None, None), False), ("left", (None, 0.99), False), ("right", (1.0, 1.0), True)])
-def test_the_cuda_write_lands_where_the_eager_write_lands(side, bounds, fixed):
+def test_the_cuda_write_lands_where_the_eager_write_lands(side, bounds, fixed, full):
     """Against the eager maths in fp32: fp32 weights take the same step up to the lift's
-    TF32 error, and bf16 weights take it in expectation, within an ulp of it."""
+    TF32 error, and bf16 weights take it in expectation, within an ulp of it. In the full space
+    there is no frame, and the direction is written oriented back."""
     from usuitrack.optimizer import Block, _write_eager
     from usuitrack.write import write_block
 
     torch.manual_seed(0)
     count, rows, cols, rank = 3, 200, 136, 40
+    if full:
+        # The full space takes the shorter side: tall on the input side, wide on the output side.
+        rows, cols = (rows, cols) if side == "right" else (cols, rows)
+        rank = min(rows, cols)
     length, other = (cols, rows) if side == "right" else (rows, cols)
     start = torch.randn(count, rows, cols, device="cuda") * 0.02
-    frames = torch.linalg.qr(torch.randn(count, length, rank, device="cuda"))[0].bfloat16()
+    frames = None if full else torch.linalg.qr(torch.randn(count, length, rank, device="cuda"))[0].bfloat16()
     direction = unit_polar(torch.randn(count, other, rank, device="cuda"))
     reference = torch.linalg.vector_norm(start, dim=(-2, -1))
     lr, decay = 2e-2, 1.0 - 2e-2 * 0.1
@@ -434,7 +532,7 @@ def test_the_cuda_write_lands_where_the_eager_write_lands(side, bounds, fixed):
         params = [weight.to(dtype) for weight in start]
         before = torch.stack(params).float()
         expected = list(before.clone().unbind(0))
-        block = Block(expected, side, rank)
+        block = Block(expected, side, rank, full)
         _write_eager(block, expected, direction, frames, decay, lr, fixed_scale, bounds, reference)
         expected = torch.stack(expected)
         step = expected - before
@@ -464,10 +562,10 @@ def test_the_cuda_write_lands_a_sub_ulp_step_in_expectation():
     direction = unit_polar(torch.randn(count, rows, rank, device="cuda"))
     before = start.float()
     expected = list(before.clone().unbind(0))
-    _write_eager(Block(expected, "right", rank), expected, direction, frames, 1.0, 1e-5, None, (None, None), None)
+    _write_eager(Block(expected, "right", rank, False), expected, direction, frames, 1.0, 1e-5, None, (None, None), None)
     step = torch.stack(expected) - before
     params = [weight.clone() for weight in start]
-    write_block(params, Block(params, "right", rank).pointer_table(params), "right", direction, frames, 1.0, 1e-5, None, (None, None), None)
+    write_block(params, Block(params, "right", rank, False).pointer_table(params), "right", direction, frames, 1.0, 1e-5, None, (None, None), None)
     moved = torch.stack(params).float() - before
     # bf16's spacing at each entry, from its fp32 bits (bf16 is their top half).
     magnitude = before.abs()

@@ -6,7 +6,7 @@ import torch
 from usuitrack import frame
 
 # RANK_FRACTION is chosen so (ROWS, COLS) runs at exactly RANK, below the cap.
-ROWS, COLS, RANK = 256, 128, 32
+ROWS, COLS, RANK = 256, 160, 32
 RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 
@@ -123,14 +123,20 @@ def test_the_frame_settles_on_a_held_gradients_leading_eigenspace():
     assert float((top.mT @ q).norm().square()) / RANK > 0.99
 
 
-def test_rank_is_a_fraction_of_the_size_to_the_nearest_32_capped_at_256_and_half_the_smaller_side():
-    """Anima's patch embedding is the case the half cap exists for: (2048, 68) can carry a
-    rank-68 gradient at most, so at 0.2, which asks for 64 planes, it runs at 34."""
+def test_rank_is_a_fraction_of_the_size_to_the_nearest_32_capped_at_256_or_the_full_space():
+    """A rank of a quarter of the shorter side or more takes all of it: Anima's (2048, 68) patch
+    embedding asks for 32 planes at 0.05, past its quarter of 17, and steps in its 68; nanodit's
+    (4608, 768) AdaLN asks for its quarter at 0.1. The ceiling keeps a side past 1024 tracked."""
     assert frame.rank(torch.Size((1024, 1024)), 0.1) == 96
     assert frame.rank(torch.Size((1024, 1024)), 0.05) == 64
     assert frame.rank(torch.Size((4608, 1024)), 0.1) == 224
     assert frame.rank(torch.Size((1024, 4608)), 0.05) == 96
-    assert frame.rank(torch.Size((128, 128)), 0.05) == 32
     assert frame.rank(torch.Size((8192, 8192)), 0.05) == 256
-    assert frame.rank(torch.Size((2048, 68)), 0.2) == 34
+    assert frame.rank(torch.Size((2048, 68)), 0.05) == 68
+    assert frame.rank(torch.Size((128, 128)), 0.05) == 128
+    assert frame.rank(torch.Size((160, 160)), 0.05) == 32
+    assert frame.rank(torch.Size((8192, 256)), 0.05) == 256
+    assert frame.rank(torch.Size((8192, 288)), 0.05) == 64
+    assert frame.rank(torch.Size((4608, 768)), 0.1) == 768
+    assert frame.rank(torch.Size((20000, 1032)), 0.5) == 256
     assert frame.rank(torch.Size((64, 1)), 0.1) == 1

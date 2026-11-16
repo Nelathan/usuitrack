@@ -37,7 +37,7 @@ class _Projected(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad: Tensor):
         x, weight, probes, test = ctx.saved_tensors
-        right = ctx.module.right
+        right, full = ctx.module.right, ctx.module.full
         grad_x = grad @ weight
         stream = x.reshape(-1, x.shape[-1])
         delta = grad.reshape(-1, grad.shape[-1])
@@ -49,9 +49,13 @@ class _Projected(torch.autograd.Function):
             basis = fitted = frame.range_find(gradient, test)
         else:
             basis = ctx.module.basis
-        rank, count = basis.shape[-1], probes.shape[-1]
+        if full:
+            # No frame: `Z` is the oriented gradient itself, and there is no aim.
+            z = delta.mT @ stream if right else stream.mT @ delta
+            action, probed = None, delta.mT @ (stream @ probes)
         # The probes ride with the frame in one GEMM over each stream: [Q | P].
-        if right:
+        elif right:
+            rank, count = basis.shape[-1], probes.shape[-1]
             # Zero columns pad [Q | P] to a multiple of ALIGN: an unaligned width
             # (any rank not a multiple of 16) drops cuBLAS off its tensor-core tiles.
             width = _aligned(rank + count)
@@ -65,11 +69,13 @@ class _Projected(torch.autograd.Function):
             # Aligned too: the columns past `rank` are the probes' and are cut after.
             action = (stream.mT @ (projected_x[:, :_aligned(rank)] * weights).to(stream.dtype))[:, :rank]
         else:
+            rank = basis.shape[-1]
             projected_delta = delta @ basis
             z = stream.mT @ projected_delta
             action_probed = delta.mT @ torch.cat([projected_delta, stream @ probes], dim=1)
             action, probed = action_probed[:, :rank], action_probed[:, rank:]
-        return grad_x, None, grad_bias, fitted, None, None, None, None, z, action.float(), probed.float()
+        action = None if action is None else action.float()
+        return grad_x, None, grad_bias, fitted, None, None, None, None, z, action, probed.float()
 
 
 def _anchor(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device) -> Tensor:
@@ -81,11 +87,14 @@ class MoleLinear(torch.nn.Linear):
     """A Linear whose weight gradient arrives projected; `Molegrad` swaps
     every tracked Linear's class to this."""
 
-    basis: Tensor
+    basis: Tensor | None
+    """The held frame; `None` in the full space."""
     probes: Tensor
     test: Tensor | None
     """The range finder's draw while the basis waits for its fit, drawn outside any compiled region."""
     right: bool
+    full: bool
+    """The full space: no frame, and the backward forms no aim."""
     z: Tensor
     action: Tensor
     probed: Tensor
@@ -94,7 +103,8 @@ class MoleLinear(torch.nn.Linear):
         if not torch.is_grad_enabled():
             return F.linear(x, self.weight, self.bias)
         # A basis that still requires grad is waiting for its fit.
-        return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.test, self, self.basis.requires_grad, self.z, self.action, self.probed)
+        fit = self.basis is not None and self.basis.requires_grad
+        return _Projected.apply(x, self.weight, self.bias, self.basis, self.probes, self.test, self, fit, self.z, self.action, self.probed)
 
 
 class Molegrad:
@@ -183,8 +193,9 @@ class Molegrad:
             estimate = probed.square().sum(dim=0).mean().sqrt()
             raw_norm = torch.where(torch.isfinite(estimate), estimate, torch.nan)
             z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
-            action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
-            aim = None if param in self._fitted else frame.aim(action, module.basis)
+            aim = None
+            if not (module.full or param in self._fitted):
+                aim = frame.aim(torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0), module.basis)
             self.optimizer._pending[param] = Prepared(z, torch.linalg.vector_norm(z, dtype=torch.float32), aim, raw_norm, probed=True)
             prepared = True
         if prepared:
@@ -193,12 +204,13 @@ class Molegrad:
 
     def _project(self, module: torch.nn.Linear, group: dict) -> None:
         weight = module.weight
-        right = frame.resolve_side(weight.shape, group["side"]) == "right"
         rank = frame.rank(weight.shape, group["rank_fraction"])
+        right = frame.resolve_side(weight.shape, group["side"], rank) == "right"
         length, other = (weight.shape[1], weight.shape[0]) if right else (weight.shape[0], weight.shape[1])
         module.__class__ = MoleLinear
         module.right = right
-        module.basis = torch.zeros(length, rank, dtype=weight.dtype, device=weight.device)
+        module.full = frame.is_full(weight.shape, rank)
+        module.basis = None if module.full else torch.zeros(length, rank, dtype=weight.dtype, device=weight.device)
         module.probes = self._probe(weight.shape[1], weight.device, weight.dtype)
         module.z = _anchor((other, rank), weight.dtype, weight.device)
         module.action = _anchor((length, rank), torch.float32, weight.device)
@@ -215,6 +227,9 @@ class Molegrad:
         """The frame lives only in optimizer state, which a load replaces: the
         module reads it from there, or holds a leaf that waits for its fit."""
 
+        if module.full:
+            module.test = None
+            return
         weight = module.weight
         held = self.optimizer.state[weight].get("frame")
         if held is not None:

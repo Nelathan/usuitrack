@@ -31,6 +31,7 @@ READS = {
     "grad_capture": (
         "||G Q|| / ||G||: the share of the gradient the tracked frame holds. Falls when "
         "the rank is too small or the frame lags a moving gradient. Compare runs at equal rank_fraction. "
+        "A matrix in its full space reads 1. "
         "A non-finite gradient counts as zero."
     ),
     "grad_capture_probe": (

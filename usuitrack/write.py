@@ -22,7 +22,7 @@ _TL_DTYPES = {torch.bfloat16: tl.bfloat16, torch.float16: tl.float16, torch.floa
 def _write_pass(pointers, rows, cols, alpha, sigma, seed, partials, M, N, R,
                 row_b, row_m, row_r, col_b, col_n, col_r,
                 DTYPE: tl.constexpr, TILE: tl.constexpr, RANK_CHUNK: tl.constexpr,
-                WRITE: tl.constexpr, LIFT: tl.constexpr, STOCHASTIC: tl.constexpr):
+                WRITE: tl.constexpr, LIFT: tl.constexpr, FULL: tl.constexpr, STOCHASTIC: tl.constexpr):
     tile_m = tl.program_id(0)
     tile_n = tl.program_id(1)
     member = tl.program_id(2)
@@ -33,7 +33,10 @@ def _write_pass(pointers, rows, cols, alpha, sigma, seed, partials, M, N, R,
     offsets = rm[:, None].to(tl.int64) * N + rn[None, :]
     w = tl.load(weight + offsets, mask=inside, other=0.0).to(tl.float32)
     lift = tl.zeros((TILE, TILE), dtype=tl.float32)
-    if LIFT:
+    if LIFT and FULL:
+        # The full space: `rows` is the direction itself, laid out as `W` by its strides.
+        lift = tl.load(rows + member * row_b + rm[:, None] * row_m + rn[None, :] * row_r, mask=inside, other=0.0).to(tl.float32)
+    elif LIFT:
         for k in range(0, R, RANK_CHUNK):
             rk = k + tl.arange(0, RANK_CHUNK)
             a = tl.load(rows + member * row_b + rm[:, None] * row_m + rk[None, :] * row_r, mask=(rm[:, None] < M) & (rk[None, :] < R), other=0.0)
@@ -55,21 +58,25 @@ def _write_pass(pointers, rows, cols, alpha, sigma, seed, partials, M, N, R,
         tl.store(partials + tile * 3 + 2, tl.sum(lift * lift))
 
 
-def write_block(params: list[Tensor], pointers: Tensor, side: str, direction: Tensor, frames: Tensor, decay: float,
+def write_block(params: list[Tensor], pointers: Tensor, side: str, direction: Tensor, frames: Tensor | None, decay: float,
                 lr: float, fixed_scale: float | None, bounds: tuple, reference: Tensor | None) -> Tensor:
     """Writes `W <- decay W - scale lift(O)` into each of `params`, clamped into `bounds` times `reference` and
-    rounded once; returns each member's scale, `[b]`."""
+    rounded once; returns each member's scale, `[b]`. `frames` `None` is the full space, `O` itself oriented back."""
 
     if not all(param.is_contiguous() for param in params):
         raise ValueError("UsuiTrack: the CUDA weight write needs contiguous weights")
     count = len(params)
     M, N = params[0].shape
-    # W = rows cols^T: on the input side the moment is [out, r] and the frame [in, r].
-    rows, cols = (direction, frames) if side == "right" else (frames, direction)
+    # W = rows cols^T: on the input side the moment is [out, r] and the frame [in, r]. In the full
+    # space `rows` is the direction as `W`: [out, in] on the input side, transposed on the output side.
+    if frames is None:
+        rows = cols = direction if side == "right" else direction.mT
+    else:
+        rows, cols = (direction, frames) if side == "right" else (frames, direction)
     grid = (triton.cdiv(M, TILE), triton.cdiv(N, TILE), count)
     shape = dict(M=M, N=N, R=direction.shape[-1], row_b=rows.stride(0), row_m=rows.stride(1), row_r=rows.stride(2),
                  col_b=cols.stride(0), col_n=cols.stride(1), col_r=cols.stride(2))
-    kind = dict(DTYPE=_TL_DTYPES[params[0].dtype], TILE=TILE, RANK_CHUNK=RANK_CHUNK, STOCHASTIC=params[0].dtype is torch.bfloat16)
+    kind = dict(DTYPE=_TL_DTYPES[params[0].dtype], TILE=TILE, RANK_CHUNK=RANK_CHUNK, FULL=frames is None, STOCHASTIC=params[0].dtype is torch.bfloat16)
     low, high = bounds
     bounded = (low, high) != (None, None)
     if fixed_scale is None or bounded:

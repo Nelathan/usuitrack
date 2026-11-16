@@ -10,7 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from usuitrack import Molegrad, UsuiTrack, frame
 from usuitrack.molegrad import MoleLinear
 
-IN, HIDDEN, BATCH, TOKENS = 64, 128, 4, 32
+IN, HIDDEN, BATCH, TOKENS = 160, 320, 4, 32
 
 
 class _Block(torch.nn.Module):
@@ -83,6 +83,39 @@ def test_step_one_is_the_optimizers_own_first_step():
     for module, twin_module in ((block.w1, twin.w1), (block.w2, twin.w2)):
         torch.testing.assert_close(_span(optimizer.state[module.weight]["frame"]), _span(twin_optimizer.state[twin_module.weight]["frame"]))
         torch.testing.assert_close(module.weight, twin_module.weight)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_narrow_linear_hands_over_its_whole_gradient_and_steps_as_the_g_path(compiled):
+    """In the full space there is no frame: `Z` is the oriented `G` itself and there is no aim; three steps land where the ordinary optimizer's do. Both orientations: the
+    narrow output of `IN -> 32` and the narrow input of `32 -> IN`."""
+
+    def build():
+        torch.manual_seed(0)
+        model = torch.nn.Sequential(torch.nn.Linear(IN, 32, bias=False), torch.nn.Tanh(), torch.nn.Linear(32, IN, bias=False))
+        return model, UsuiTrack(model.parameters(), lr=1e-3, rank_fraction=0.1, side="right")
+
+    model, optimizer = build()
+    for weight in (model[0].weight, model[2].weight):
+        assert frame.is_full(weight.shape, frame.rank(weight.shape, 0.1))
+    molegrad = Molegrad(model, optimizer)
+    run = torch.compile(model, fullgraph=True) if compiled else model
+    twin, twin_optimizer = build()
+    for step in range(3):
+        inputs, target = _batch(step)
+        (run(inputs) * target).sum().backward()
+        molegrad.prepare()
+        (twin(inputs) * target).sum().backward()
+        for weight, twin_weight in ((model[0].weight, twin[0].weight), (model[2].weight, twin[2].weight)):
+            pending = optimizer._pending[weight]
+            oriented = twin_weight.grad.mT if weight.shape[0] < weight.shape[1] else twin_weight.grad
+            torch.testing.assert_close(pending.projected, oriented)
+            assert pending.aim is None
+        optimizer.step()
+        twin_optimizer.step()
+    for weight, twin_weight in ((model[0].weight, twin[0].weight), (model[2].weight, twin[2].weight)):
+        torch.testing.assert_close(weight, twin_weight)
+        assert set(optimizer.state[weight]) == {"moment"}
 
 
 def test_under_accumulation_the_first_micro_batch_fits_the_frame():
@@ -433,5 +466,6 @@ def test_a_frame_moved_after_the_forward_is_the_one_its_backward_projects_on(com
     molegrad.prepare()
     (twin(inputs) * target).sum().backward()
     for weight, twin_weight in ((model[0].weight, twin[0].weight), (model[2].weight, twin[2].weight)):
-        grad = frame.orient(twin_weight.grad, frame.resolve_side(weight.shape, "right"))
+        rank = optimizer.state[weight]["frame"].shape[-1]
+        grad = frame.orient(twin_weight.grad, frame.resolve_side(weight.shape, "right", rank))
         torch.testing.assert_close(optimizer._pending[weight].projected, grad @ moved[weight])

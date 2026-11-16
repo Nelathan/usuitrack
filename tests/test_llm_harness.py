@@ -282,7 +282,7 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
         self.assertEqual([id(param) for param in groups[0]["params"]], [id(up), id(down)])
         self.assertNotIn("side", groups[0])
         self.assertEqual(UsuiTrack(groups).param_groups[0]["side"], "right")
-        self.assertEqual(stats, {"effective_rank_min": 2, "effective_rank_max": 2})
+        self.assertEqual(stats, {"effective_rank_min": 4, "effective_rank_max": 4})
 
     def test_training_model_checkpoints_its_decoder_layers(self):
         from transformers import Lfm2Config, Lfm2ForCausalLM
@@ -300,15 +300,15 @@ class LlmHarnessParamScopeTest(unittest.TestCase):
 
         self.assertEqual([counter.call_count for counter in counters], [2, 2])
 
-    def test_rank_fraction_clamps_to_half_the_smaller_side(self):
+    def test_a_narrow_matrix_reports_its_full_space_as_its_rank(self):
         first = torch.nn.Parameter(torch.randn(16, 4))
         second = torch.nn.Parameter(torch.randn(16, 4))
         named = [("a.up_proj.weight", first), ("b.up_proj.weight", second)]
 
         groups, stats = build_usuitrack_param_groups(named, rank_fraction=1.0)
 
-        self.assertEqual(stats["effective_rank_min"], 2)
-        self.assertEqual(stats["effective_rank_max"], 2)
+        self.assertEqual(stats["effective_rank_min"], 4)
+        self.assertEqual(stats["effective_rank_max"], 4)
         self.assertTrue(all(group["rank_fraction"] == 1.0 for group in groups))
 
     def test_rank_fraction_must_be_positive(self):

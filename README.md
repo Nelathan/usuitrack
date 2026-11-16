@@ -66,8 +66,10 @@ maps, and belong in the fallback. `docs/SPEC.md` has the reasoning.
 
 Rank is not configured per matrix: `rank_fraction` (default `0.05`) sizes each
 matrix at `rank_fraction * sqrt(m * n)` rounded to the nearest multiple of 32 (at
-least 32), capped at 256 and at half its smaller side, so a 1024x1024 projection
-runs at 64 and a 4608x1024 MLP matrix at 96. The tracked
+least 32), capped at 256, so a 1024x1024 projection runs at 64 and a 4608x1024
+MLP matrix at 96. A matrix whose rank would reach a quarter of its smaller side
+steps in its full space instead, with no frame: a 2048x68 patch embedding steps
+in all 68 planes. The tracked
 side defaults to `side="right"`, the input side of every matrix; a param group
 can set `side="left"`, or `"auto"` for the shorter side.
 
