@@ -39,7 +39,13 @@ $$W,G\in\mathbb R^{m\times n},\qquad 1\le r\le\min(m,n).$$
 Rank is not configured per matrix. One model-wide `rank_fraction` `c`
 (default `0.05`) sizes every matrix by its shape:
 
-$$r=\min\!\left(\max\!\left(1,\ \operatorname{round}(c\sqrt{mn})\right),\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right).$$
+$$r=\min\!\left(32\max\!\left(1,\ \operatorname{round}(c\sqrt{mn}/32)\right),\ 256,\ \max\!\left(1,\ \lfloor\min(m,n)/2\rfloor\right)\right),$$
+
+halves rounding up. The step of 32 is the polar kernel's tile (step 7), which pads an `r x r`
+matrix to it anyway up to `r = 128`, so a rank between steps would pay for planes it does not
+track; rounding to the nearest step keeps `c` the fraction it names, within 16 planes. Above 128
+the batched GEMMs run unpadded, and the steps hold for one grid of ranks. The ceiling of 256
+bounds the frame's `r x r` work.
 
 The rank sets the subspace, not the step: the step is sized against the
 weight's own norm (step 8), so `rank_fraction` decides which directions a matrix
@@ -55,8 +61,9 @@ every step. And narrow modules are bottlenecks -- they carry the residual
 stream through a small waist, so a large update there destabilizes every block
 downstream, independently of how well-conditioned the step was.
 
-At `c = 0.05` the cap binds on no shape of LFM's or Anima's; at `0.1`, on
-Anima's `(2048, 68)` patch embedding, which asks for 37 planes and runs at 34.
+Anima's `(2048, 68)` patch embedding asks for 19 planes at `c = 0.05` and runs at one step,
+32; the half cap, 34, binds on it from `c = 0.13`. At `0.1` the ceiling binds on LFM3's MLP
+matrices, which ask for 397.
 The default is the smaller: on LFM3 `0.1` buys capture and no loss under
 either aim (`ARCHIVE.md` on `lab`, "a live aim does not make a larger rank pay").
 

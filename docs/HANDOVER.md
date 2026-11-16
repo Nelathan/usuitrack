@@ -19,8 +19,9 @@ tracker to move frames during the next forward. Chapter 4 is next, its seam arou
 knows its last micro-batch. The frame's polar stays Newton-Schulz's five steps: one Polar Express step loses
 most of the capture, since `Q+Y` has a condition number of 35-55 (FACTS, "One polar step cannot follow").
 Both polar maps now run on the `r x r` Gram, a Triton kernel up to `r = 128` (`usuitrack/gram.py`; topic,
-"the polar on the Gram"). Next in the agreed order: ranks in steps of 32 capped at 256, then a fast
-StochasticAdamW for the fallback, then chapter 4.
+"the polar on the Gram"). Ranks now come in steps of 32, to the nearest, capped at 256 (SPEC "Coordinates"); FACTS
+numbers before 2026-11-16 ran the old per-plane rule. Next in the agreed order: a fast StochasticAdamW
+for the fallback, then chapter 4.
 float64 is unsupported (user).
 To review, each read by a review subagent: `af8ef61`, `6698f19`, `ea3092b`, `5ba1ae4`, `b4edb07`, `0718526`,
 `8cba722`, and the write-up after them.

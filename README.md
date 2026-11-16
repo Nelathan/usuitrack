@@ -34,7 +34,10 @@ difference that matters is retention: LoRA's source loss rises 1.8x to 2.2x as
 far as UsuiTrack's, and raising its lr buys target at roughly nine times its
 cost in source. LoRA steps faster; its adapters cost activation memory instead.
 One seed and two LoRA learning rates: this is a measured comparison, not a
-sweep. The UsuiTrack rows predate the twin tracker. Its frame moment adds about
+sweep. The UsuiTrack rows predate ranks in steps of 32, which move LFM3's
+matrices by 15 planes at most (51 to 64 and 177 to 192, 102 and 198 to 96 and
+192), about 2% less state by shape arithmetic, unmeasured in a run. They also
+predate the twin tracker, whose frame moment adds about
 29% to the matrix state on LFM3's native sides, 431 against 334 MiB (`FACTS.md`
 on `lab`, "The frame moment's in-span part needs fp32"); these rows are not
 rerun.
@@ -61,8 +64,9 @@ non-2D tensors: lookup tables (embeddings) are 2D but are not shared linear
 maps, and belong in the fallback. `docs/SPEC.md` has the reasoning.
 
 Rank is not configured per matrix: `rank_fraction` (default `0.05`) sizes each
-matrix at `rank_fraction * sqrt(m * n)`, capped at half its smaller side, so a
-1024x1024 projection runs at 51 and a 4608x1024 MLP matrix at 109. The tracked
+matrix at `rank_fraction * sqrt(m * n)` rounded to the nearest multiple of 32 (at
+least 32), capped at 256 and at half its smaller side, so a 1024x1024 projection
+runs at 64 and a 4608x1024 MLP matrix at 96. The tracked
 side defaults to `side="right"`, the input side of every matrix; a param group
 can set `side="left"`, or `"auto"` for the shorter side.
 

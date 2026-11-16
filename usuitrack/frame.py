@@ -17,6 +17,9 @@ from torch import Tensor
 from .polar import NEWTON_SCHULZ_COEFFICIENTS, newton_schulz
 
 SIDES = ("auto", "left", "right")
+# Ranks come in multiples of the r x r polar kernel's tile, which pads to it anyway (SPEC "Coordinates").
+RANK_STEP = 32
+RANK_CAP = 256
 
 # Polar Express's converged triple: one step pulls a near-orthonormal frame back
 # onto the Stiefel manifold (SPEC step 4).
@@ -39,10 +42,12 @@ def orient(matrix: Tensor, side: str) -> Tensor:
 
 
 def rank(shape: torch.Size, rank_fraction: float) -> int:
-    """`rank_fraction * sqrt(m n)`, at most half the shorter side (SPEC "Coordinates")."""
+    """`rank_fraction * sqrt(m n)` to the nearest multiple of `RANK_STEP`, at least one step, at most `RANK_CAP`
+    and half the shorter side (SPEC "Coordinates")."""
 
     rows, cols = shape
-    wanted = max(1, round(rank_fraction * math.sqrt(rows * cols)))
+    steps = max(1, math.floor(rank_fraction * math.sqrt(rows * cols) / RANK_STEP + 0.5))
+    wanted = min(RANK_STEP * steps, RANK_CAP)
     return min(wanted, max(1, min(rows, cols) // 2))
 
 

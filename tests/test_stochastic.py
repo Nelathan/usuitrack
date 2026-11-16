@@ -5,7 +5,7 @@ import torch
 from usuitrack import UsuiTrack, copy_stochastic_
 from usuitrack.stochastic import StochasticAdamW
 
-ROWS, COLS, RANK = 256, 128, 16
+ROWS, COLS, RANK = 256, 128, 32
 RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 

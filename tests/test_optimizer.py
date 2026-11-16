@@ -14,7 +14,7 @@ from usuitrack.polar import unit_polar
 # A representative transformer-ish weight. Small toy shapes like (8, 4) put the
 # rank straight into its floor, so every test would silently exercise a rank-1
 # frame. RANK_FRACTION is chosen so this shape runs at exactly RANK, below the cap.
-ROWS, COLS, RANK = 256, 128, 16
+ROWS, COLS, RANK = 256, 128, 32
 RANK_FRACTION = RANK / math.sqrt(ROWS * COLS)
 
 
@@ -355,7 +355,7 @@ def test_matrices_stepped_together_match_each_stepped_alone():
     optimizer would: nothing in a step couples matrices."""
 
     torch.manual_seed(5)
-    shapes = [(64, 512), (64, 520), (96, 96)]
+    shapes = [(64, 512), (64, 520), (384, 384)]
     ranks = [frame.rank(torch.Size(shape), RANK_FRACTION) for shape in shapes]
     assert ranks[0] == ranks[1] != ranks[2]
     base = {shape: torch.randn(*shape) for shape in shapes}

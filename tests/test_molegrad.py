@@ -27,7 +27,7 @@ def _setup(seed=0):
     torch.manual_seed(seed)
     block = _Block()
     groups = [{"params": [block.w1.weight], "side": "right"}, {"params": [block.w2.weight], "side": "left"}]
-    optimizer = UsuiTrack(groups, lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    optimizer = UsuiTrack(groups, lr=1e-3, rank_fraction=0.1)
     return block, optimizer
 
 
@@ -176,7 +176,7 @@ def test_a_bias_gets_its_ordinary_gradient():
     layer = torch.nn.Linear(IN, HIDDEN)
     twin = torch.nn.Linear(IN, HIDDEN)
     twin.load_state_dict(layer.state_dict())
-    optimizer = UsuiTrack([layer.weight], lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    optimizer = UsuiTrack([layer.weight], lr=1e-3, rank_fraction=0.1)
     molegrad = Molegrad(layer, optimizer)
     inputs, _target = _batch(1)
     target = torch.randn(BATCH, TOKENS, HIDDEN)
@@ -287,7 +287,7 @@ def test_capture_over_the_probe_estimate_is_published_as_a_probe_read():
     torch.manual_seed(0)
     block = _Block()
     groups = [{"params": [block.w1.weight], "side": "right"}, {"params": [block.w2.weight], "side": "left"}]
-    optimizer = UsuiTrack(groups, lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN), diagnostics=True)
+    optimizer = UsuiTrack(groups, lr=1e-3, rank_fraction=0.1, diagnostics=True)
     Molegrad(block, optimizer)
     for step in range(3):
         _loss(block, _batch(step)).backward()
@@ -350,7 +350,7 @@ def test_a_zero_initialized_output_trains_from_random_frames():
     torch.nn.init.zeros_(model[2].weight)
     first, last = model[0].weight, model[2].weight
     groups = [{"params": [first], "frame_init": "random"}, {"params": [last], "step_rule": "fixed", "frame_init": "random"}]
-    optimizer = UsuiTrack(groups, lr=1e-2, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    optimizer = UsuiTrack(groups, lr=1e-2, rank_fraction=0.1)
     Molegrad(model, optimizer)
     frame_before, first_before = optimizer.state[first]["frame"].clone(), first.detach().clone()
     backward(model, 0)
@@ -371,7 +371,7 @@ def test_a_projected_linear_compiles_whole_from_its_first_step():
     the backward it traces compile without a graph break."""
 
     model = torch.nn.Sequential(torch.nn.Linear(IN, HIDDEN, bias=False), torch.nn.Tanh(), torch.nn.Linear(HIDDEN, IN, bias=False))
-    optimizer = UsuiTrack(model.parameters(), lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    optimizer = UsuiTrack(model.parameters(), lr=1e-3, rank_fraction=0.1)
     Molegrad(model, optimizer)
     compiled = torch.compile(model, fullgraph=True)
     for step in range(3):
@@ -387,7 +387,7 @@ def test_a_linear_that_first_trains_late_fits_beside_a_trained_one_of_its_block(
 
     torch.manual_seed(0)
     early, late = torch.nn.Linear(IN, IN, bias=False), torch.nn.Linear(IN, IN, bias=False)
-    optimizer = UsuiTrack([early.weight, late.weight], lr=1e-3, rank_fraction=8 / IN)
+    optimizer = UsuiTrack([early.weight, late.weight], lr=1e-3, rank_fraction=0.1)
     Molegrad(torch.nn.ModuleList([early, late]), optimizer)
     inputs = torch.randn(BATCH, TOKENS, IN)
     early(inputs).square().sum().backward()
@@ -397,7 +397,7 @@ def test_a_linear_that_first_trains_late_fits_beside_a_trained_one_of_its_block(
     for module in (early, late):
         stored = optimizer.state[module.weight]["frame"]
         assert module.basis is stored
-        torch.testing.assert_close(stored.mT @ stored, torch.eye(8), atol=1e-4, rtol=0)
+        torch.testing.assert_close(stored.mT @ stored, torch.eye(stored.shape[-1]), atol=1e-4, rtol=0)
 
 
 class _Checkpointed(torch.nn.Sequential):
@@ -415,7 +415,7 @@ def test_a_frame_moved_after_the_forward_is_the_one_its_backward_projects_on(com
     kind = _Checkpointed if checkpointed else torch.nn.Sequential
     model = kind(torch.nn.Linear(IN, HIDDEN, bias=False), torch.nn.Tanh(), torch.nn.Linear(HIDDEN, IN, bias=False))
     twin = copy.deepcopy(model)
-    optimizer = UsuiTrack(model.parameters(), lr=1e-3, rank_fraction=8 / math.sqrt(IN * HIDDEN))
+    optimizer = UsuiTrack(model.parameters(), lr=1e-3, rank_fraction=0.1)
     molegrad = Molegrad(model, optimizer)
     run = torch.compile(model, fullgraph=True) if compiled else model
     inputs, target = _batch(0)
