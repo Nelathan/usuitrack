@@ -12,11 +12,15 @@ in-span part needs fp32"); `side` defaults to `right`, and the harness runs Mole
 Chapter 2 (`||Z||` once, phase two per matrix) and chapter 3 (blocks: SPEC "Blocks", FACTS "Blocks take
 nanodit's `step()` from 140 to about 62 ms") are in. A block is a run of same-shaped matrices in param order under a
 256 MiB cap, not a model block, which the optimizer cannot see. Compact after each chapter is committed.
-Night of 2026-11-16: chapter 4's seam is a proposal in the topic, unbuilt; chapter 5's read finds the step
-GPU-bound after blocks, so no graph was built; chapter 6's fused write is a prototype in
-`outputs/tools/fused_write.py` (FACTS, "A fused Triton write cuts nanodit's step by about 18 ms"), waiting on
-the three decisions listed under chapter 6. To review, each read by a review subagent: `af8ef61`, `6698f19`,
-`ea3092b`, `5ba1ae4`, `b4edb07`.
+Night of 2026-11-16 into the day: chapter 6 is in, the weight write a Triton kernel on CUDA with the eager
+write as the CPU path (`8cba722`; FACTS, "The CUDA write takes nanodit's `step()` from 79 to 45 ms"); chapter 5's
+graph is dropped (you). Molegrad reads a held frame at backward (`0718526`), which frees chapter 4's deferred
+tracker to move frames during the next forward. Chapter 4 is next, its seam around tiny-dit's loop, which
+knows its last micro-batch. The frame's polar stays Newton-Schulz's five steps: one Polar Express step loses
+most of the capture, since `Q+Y` has a condition number of 35-55 (FACTS, "One polar step cannot follow").
+float64 matrices fail in the step at `vector_norm(..., dtype=float32)`, on CPU too; an old limit, unfiled.
+To review, each read by a review subagent: `af8ef61`, `6698f19`, `ea3092b`, `5ba1ae4`, `b4edb07`, `0718526`,
+`8cba722`, and the write-up after them.
 
 ## Group X, 2026-11-15
 
@@ -55,7 +59,7 @@ aim, no step ever holds `G`, accumulation works; ties `G` through 1k steps on
 LFM3 at 3.66 against 4.09 s/step, and both beat a memory-matched LoRA (R2
 closed, README's Result). Resume is tested; a review subagent's five
 silent bugs are fixed, each with a test. M1 closed: the magnitude goes at `Z`.
-The weight write runs eager (R1 closed); `rank_fraction` defaults to 0.05.
+On CUDA the weight write is a Triton kernel (fast-step chapter 6); `rank_fraction` defaults to 0.05.
 
 - **Package:** `frame.py` (fit, aim, the twin's `follow`, retraction),
   `polar.py` (balanced Newton-Schulz), `optimizer.py`, `molegrad.py`,
@@ -120,7 +124,6 @@ Molegrad toward release, in order:
 Still open:
 - PLAN N2 needs `||W||` per role; the harness logs only the whole model's
   norm. Not a decay arm (user).
-- Triton and the CUDA graph: optional, clean code first.
 
 ## To review
 

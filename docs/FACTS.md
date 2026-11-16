@@ -1828,6 +1828,29 @@ the 100-step run (`outputs/runs/cudawrite-s1-100.log`) reads target 1.423217 aga
 2.676723 against 2.677134. Optimizer peak 5.03 GB against 4.89 (larger blocks hold more rank-sized work),
 under the backward's 7.38.
 
+### One polar step cannot follow `Q+Y`; the Gram route is the same polar, faster only at large `d`
+
+2026-11-16, the frame's polar (user: one Polar Express step on `Y` in place of five). Replay of the twin
+(shiftkns/1/0.95/1, diagonal aim) on LFM3's `o12`, `q12` and `w1`, 300 steps
+(`outputs/tools/replay_follow_polar.py`, logs `outputs/runs/replay-follow-*.log`). `T = Q+Y` is far from
+orthonormal: its smallest singular value over its largest has median 0.029 and worst 0.018 over the stream,
+a condition number of 35-55. A step's polynomial maps every singular value by one curve, so one step cannot
+bring a spread of 35-55 to one; a warm start would not change `T`'s spread (reasoning, not a measured arm). The release's five steps plus a retraction land 1.8e-5 (mean) and 4.4e-5 (worst)
+from the exact polar factor per `sqrt(r)`, and their capture reads as the exact factor's to the 3 digits printed. One quintic
+step (the schedule's first) plus a retraction leaves the frame non-orthonormal (worst `|QᵀQ-I|` 1.0; its
+distance from the exact factor reads inf, the reference degenerating on the trajectory's `T`) and capture
+falls, over steps 201-300, from 0.565 to 0.361 (`o12`), 0.851 to 0.497 (`q12`) and 0.830 to 0.406 (`w1`); one
+retraction step from unit mean singular value diverges on `o12` within the first steps (the run stopped there,
+`q12` and `w1` unread).
+
+Newton-Schulz's iterates on `T` stay `T C_k`, so the same iterations run on the `r x r` Gram `TᵀT`, the retraction
+folded in, and end in one `T C`: about 2 passes over `d r²` against 12. On the stream it lands at most 3.7e-6 from
+the release. Batched as a block, CUDA events (`outputs/tools/follow_polar_bench.py`, `outputs/follow_polar_bench.log`):
+0.81 against 1.15 ms at nanodit's `[12, 768, 38]` (slower: six rounds of `r x r` launches, about 1.15 ms at any
+`d` at `r` 38), 1.78 against 1.16 at `[12, 3072, 38]`, 1.61 against 1.20 at LFM3's `[28, 2048, 102]`, 6.99 against 1.50 at
+`[28, 8192, 102]`. On LFM3 that estimates to under 10 ms of a 3.65 s step, from the bench's shapes, unmeasured in a step; not
+built.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |
