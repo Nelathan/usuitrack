@@ -134,9 +134,10 @@ side"). The twin, Newton-Schulz every step, is the release's tracker (SPEC step 
 ## Group V. A fast step for small, deep models
 
 The step is launch-bound on small, deep models. Decisions, chapters, baselines and open nuance:
-`docs/topics/fast-step.md`. State (2026-11-16): chapter 1 is in (the twin, the input side, Molegrad on in
-the harness; FACTS, "The new defaults on LFM3"), chapters 2 (`||Z||` once) and 3 (blocks; FACTS, "Blocks take nanodit's `step()` from 140 to about 62 ms")
-are in.
+`docs/topics/fast-step.md`. State (2026-11-16): chapters 1-3 are in (the defaults; `||Z||` once; blocks,
+FACTS "Blocks take nanodit's `step()` from 140 to about 62 ms"). Chapter 4's seam is proposed, chapter 5's
+graph read after blocks finds the step GPU-bound, and chapter 6's fused write is a measured prototype that
+waits on three decisions (topic, chapter 6).
 
 - V1. Clip instead of normalize `Z`, and clip to what? (topic, "Open nuance")
 

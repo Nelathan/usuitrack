@@ -1798,6 +1798,29 @@ matrix, under the cap's estimate of 19.6. LFM3, standard arm, 100 steps
 floor; 3.41 against 3.88 s/step; optimizer peak 4.90 against 5.42 GB allocated,
 backward peak 7.38 against 7.49.
 
+### A fused Triton write cuts nanodit's step by about 18 ms of GPU time, LFM3's by 0.11 s
+
+2026-11-16, fast-step chapter 6 prototype, not in the release (`outputs/tools/fused_write.py`, patched over
+`_write_weights` by a runner). SPEC step 8 as two Triton passes per block through a table of weight pointers,
+nothing stacked: one reads `W` for `||W||^2`, and under norm bounds also `<W, L>` and `||L||^2`, which give the
+clamp's factor without a pass over the result; the other writes `round_sr(alpha W - sigma L)`. The write, and
+the measure under norm bounds, form the lift `L` in registers from the moment's polar factor and the frame. With an fp32 (`ieee`) `tl.dot` the two
+passes cost 22 ms on nanodit (no tensor cores, the lift formed twice at rank 77) and the step does not gain;
+with TF32 they cost 4.1-4.8 ms. TF32's error does not show above stochastic rounding's: at lr 2e-3 and 4e-5 the
+error's RMS against the eager fp32 result matches `ieee`'s to 3 digits, and the realized step projects onto
+the intended one at 0.9995-1.0007 under both (`outputs/tools/fused_write_precision.py`). Against the eager
+formula's fp32 result, `ieee` lands within 1.125 bf16 ulp with a mean error of 3e-5 to 1e-3 ulp, and its
+written norm reads 1.00000 of the reference under `(1, 1)` (`outputs/tools/fused_write_check.py`, logs in
+`outputs/fused_write_check.log` and `outputs/fused_write_precision.log`). nanodit, the chapter 5 profile, paired over
+two passes each (`outputs/tools/fused_write_bench.py`, `outputs/nanodit_fused_write_tf32_bench.log`; `ieee`
+in `outputs/nanodit_fused_write_bench.log`): summed GPU time 52-53 against 68-73 ms per step, unsynced wall
+62-63 against 77. LFM3, standard arm, two pairs of 50 steps back to back (`outputs/runs/pair*-50*.log`,
+eval time matched to 0.5%): 3.79 against 3.89 and 3.78 against 3.90 s/step; optimizer peak 4.69 against
+4.89 GB. Its 100-step run reads target 1.423447 against blocks' 1.423493, source 2.677483 against 2.677134,
+both inside the floor (`outputs/runs/fusedwrite-s1-100.log`; its own s/step is not comparable, as eval ran
+16% slower on that machine state). The random bits come from philox under a seed drawn from torch's CUDA
+generator, not from `randint_like`.
+
 ## Run ledger (Anima)
 
 | run | what changed | outcome |

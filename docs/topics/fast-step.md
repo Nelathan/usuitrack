@@ -108,6 +108,18 @@ Each chapter is one or more reviewed commits, then a compaction.
    saves 0.22 s/step"). Then the moment blend, which is less gain but easy. Newton-Schulz and the other matmuls stay
    on cuBLAS, batched. A Triton kernel is the only implementation, so the release becomes CUDA-only: say so in
    README.
+   *Prototype, 2026-11-16, not in the release:* lift, decay, norm bound and stochastic rounding in two
+   Triton passes per block through weight pointers, the lift formed in registers in TF32. It saves nanodit
+   about 18 ms of GPU time per step, LFM3 0.11 s/step and 200 MB of optimizer peak (FACTS, "A fused Triton
+   write cuts nanodit's step by about 18 ms of GPU time, LFM3's by 0.11 s"). Before it enters the release,
+   the user decides:
+   - CUDA-only: the suite's 119 tests all run on CPU, so the release write's tests move to CUDA, or run
+     under `TRITON_INTERPRET=1`, or the eager write stays as the CPU path beside the kernel (the rule this
+     arc relaxed, with a kernel-against-eager test).
+   - TF32 in the lift, a change of arithmetic, measured as invisible under stochastic rounding.
+   - Philox bits instead of torch's global stream: reproducible from the seed, but a bf16 run's draws differ
+     from today's.
+   The moment blend is not fused yet.
 
 ## Open nuance (do not lose)
 
